@@ -1,6 +1,6 @@
 # dsh-fish-message
 
-DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，支持文字、图片、语音、离线补投和转义标记。
+DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，支持文字、图片、语音、离线补投、转义标记、持久化出站队列，以及底层/高级两层 HTTP API。
 
 - 插件名：`dsh-fish-message`
 - 版本：`0.1.0`
@@ -8,18 +8,25 @@ DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，�
 - 本地 AI：`127.0.0.1:7880` 的 `/asr`、`/tts`、`/media/to_wav`
 - 代码目录：`E:\dsh-fish-message`
 - 家目录文件：`<DSH 家目录>\fish-message-*`（默认 `C:\Users\Administrator\.dsh`）
+- 接口文档：[`docs/API.md`](docs/API.md)
 
 > 本插件替换第三方 `dsh-qq-bridge`。两个插件不要同时启用，否则同一条 QQ 消息会被转两次。
 
 ---
 
-## 1. 它解决的两个老问题
+## 1. 它解决的四个老问题
 
 1. **能发语音**：旧桥只有入站语音转写，没有出站 `record` 段。本插件支持
    `[语音]文字[/语音]` 调本地 TTS 发语音条，也支持 `[语音:路径]` 直接发已有音频。
 2. **消息不漏**：旧桥只看「上次时间」，机器人/DSH 没启动期间收到的消息不会补。
    本插件给每个私聊维护 `last_message_id` / `last_timestamp` 水位，并持久化到状态文件；
    启动、WS 重连、定时器、HTTP 轮询都会从历史补齐，按时间升序、按 `message_id` 去重。
+3. **发不出去也不丢**：DSH 的回复在 QQ 离线/发送失败时写进
+   `<家目录>\fish-message-outbox.json`，恢复后按 `createdAt` FIFO 补发；
+   相同内容 10 分钟内只留一条，失败指数退避，TTL 24 小时，单条最多试 20 次。
+4. **能被程序调用**：插件内置两层 API。底层 `send-text / send-image / send-record / send-file / history`
+   原样收发、失败入队；高级 `transcribe / synthesize / voice-reply / voice-analyze / capabilities`
+   封装本地 ASR/TTS，地址留空返回 501、服务不通返回 502。
 
 ---
 
@@ -36,6 +43,8 @@ E:\dsh-fish-message
 │  ├─ format.js            # [QQ] 块、反斜杠转义、显式图片/语音/文件指令
 │  ├─ config.js            # 默认配置、旧桥迁移、范围钳制、schemastery schema
 │  ├─ storage.js           # 水位 / 已处理 id / 统计 / 最近事件
+│  ├─ outbox.js            # 持久化出站队列：去重 / FIFO / 退避 / TTL
+│  ├─ api.js               # 底层原样 API + 高级语音 API（501/502 映射）
 │  ├─ queue.js             # 每个聊天的乱序缓冲队列
 │  ├─ voice.js             # ASR / TTS / to_wav / 图片落盘
 │  ├─ delivery.js          # agent.followup + 图片附件
@@ -45,10 +54,11 @@ E:\dsh-fish-message
 │     ├─ base.js           # Transport 适配器接口
 │     └─ napcat-onebot.js  # v1 的 NapCat / OneBot 11 实现
 ├─ docs
+│  ├─ API.md               # 底层/高级 API、出站队列语义、错误码
 │  ├─ FORMAT.md            # 语法、转义、代码块约定
-│  ├─ ARCHITECTURE.md      # 数据流、补投算法、扩展点
+│  ├─ ARCHITECTURE.md      # 数据流、补投算法、出站队列状态机、扩展点
 │  └─ ACCEPTANCE.md        # 真机验收清单与命令
-└─ tests                   # 单测 + mock OneBot HTTP/WS 集成测试
+└─ tests                   # 单测 + mock OneBot / mock AI 服务集成测试
 ```
 
 ---
@@ -122,14 +132,17 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 | `bindings` | `[]` | `[{ qq, session, name, enabled }]`，v1 只支持私聊 |
 | `onlyInsideMarkers` | `true` | 只发 `[QQ]…[/QQ]` 块内 |
 | `transcriptionEnabled` | `true` | 入站语音调本地 `/asr` |
-| `asrBaseUrl` | `http://127.0.0.1:7880` | 本地 ASR 根地址 |
+| `asrBaseUrl` | `http://127.0.0.1:7880` | 本地 ASR 根地址；**留空 = 关闭高级 API 的转写** |
 | `asrCommand` | 空 | 留空走本地 `/asr`；填了走外部命令，必须包含 `{file}` |
-| `asrTimeoutMs` | `180000` | 转写超时 |
+| `asrTimeoutMs` | `180000` | 转写超时；超时映射 502 |
 | `ttsEnabled` | `true` | 出站 `[语音]` 调本地 `/tts` |
-| `ttsBaseUrl` | `http://127.0.0.1:7880` | 本地 TTS 根地址 |
+| `ttsBaseUrl` | `http://127.0.0.1:7880` | 本地 TTS 根地址；**留空 = 关闭高级 API 的合成** |
 | `ttsVoice` | `dafeiyu` | 音色名 |
-| `ttsTimeoutMs` | `180000` | 合成超时（首次加载模型可能 1 分钟以上） |
+| `ttsTimeoutMs` | `180000` | 合成超时（首次加载模型可能 1 分钟以上）；超时映射 502 |
 | `backfillWindowHours` | `24` | 补投窗口；超过只发摘要 |
+| `outboxTtlHours` | `24` | 出站队列 TTL；过期丢弃并记统计 |
+| `outboxDedupMinutes` | `10` | 相同 fingerprint 去重窗口 |
+| `outboxFlushIntervalMs` | `10000` | 出站队列心跳补发间隔 |
 | `pollIntervalMs` | `2000` | WS 不可用时的 HTTP 轮询间隔 |
 | `historyIntervalMs` | `60000` | 即使 WS 连着也定期拉历史兜底 |
 | `reorderBufferMs` | `1500` | 乱序缓冲 |
@@ -141,6 +154,9 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 
 旧桥配置会在第一次启动时被读取并迁移到内存（`NapCat`、`绑定`、`只发标记内`、
 `语音转写`、`轮询间隔毫秒` 等）。保存设置后才会写新的 `fish-message-config.json`。
+
+> `asrBaseUrl` / `ttsBaseUrl` 的「空字符串」是有效值，表示关闭对应高级 API。
+> 设置页清空并保存后，`/api/transcribe`、`/api/synthesize` 等会返回 501，而不是偷偷用默认地址。
 
 ---
 
@@ -199,8 +215,9 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 [QQ][语音:C:\audio\a.wav][/QQ]
 ```
 
-发送顺序：本地绝对路径（正斜杠）→ `file:///` → `base64://`，失败自动重试，最多 3 次；
-仍失败会在会话里收到一条 `（dsh-fish-message）语音发送失败：…` 提示。
+发送顺序：本地绝对路径（正斜杠）→ `file:///` → `base64://`，失败自动重试，最多 3 次。
+仍失败时：合成语音的文字会进持久化出站队列（`record_text`），恢复后重新合成；
+`[语音:路径]` 只存路径，补发时文件不存在会丢弃并记错。不会把音频字节写进队列。
 
 ---
 
@@ -232,16 +249,49 @@ WS 连接、WS 重连、每 60 秒、HTTP 轮询都会触发这个同步；同�
 
 ---
 
-## 8. HTTP 接口和日志
+## 8. 持久化出站队列（发送不丢）
+
+文件：`<DSH 家目录>\fish-message-outbox.json`，原子写，结构 `{ version, items: [...] }`。
+
+什么时候入队：
+
+1. 网络错误 / 超时 / 连接拒绝；
+2. OneBot HTTP 非 2xx；
+3. `retcode != 0` 或 `status != ok`；
+4. 传输层已停止；
+5. 补发进行中 / 队列已有积压（新消息排到队尾，保持顺序）。
+
+补发时机：WS 恢复、每 10 秒心跳、启动 0.8 秒、`POST /outbox/flush` 手动。
+按 `createdAt` FIFO，失败指数退避 `min(5s × 1.8^attempts, 300s)`；
+默认 TTL 24 小时、单条最多 20 次、最多 1000 条（超出丢最旧）。
+
+去重：`fingerprint = sha256(qq + 规范化 segments)`，默认 10 分钟内相同内容只留一条。
+语音文本存文字、补发时重新合成；音频/图片/文件只存路径，失效直接丢弃并报错。
+
+设置页「出站队列」显示「积压 N 条 / 最老 X 秒」，可「立即补发」「清空」。
+完整语义见 [`docs/API.md`](docs/API.md#4-持久化出站队列)。
+
+---
+
+## 9. HTTP 接口和日志
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/dsh-fish-message/state` | 在线状态、配置、绑定、水位、统计、最近 200 行日志 |
+| GET | `/dsh-fish-message/state` | 在线状态、配置、绑定、水位、出站队列统计、日志 |
 | GET | `/dsh-fish-message/health` | 轻量健康检查，桥在跑返回 200 |
 | POST | `/dsh-fish-message/save` | 保存配置（设置页用） |
 | POST | `/dsh-fish-message/test-send` | 发一条固定测试文字 |
 | POST | `/dsh-fish-message/test-voice` | 合成并发送一条测试语音 |
 | GET | `/dsh-fish-message/logs` | 最近 200 行日志 |
+| GET | `/dsh-fish-message/outbox?limit=` | 出站队列列表 + 统计 |
+| POST | `/dsh-fish-message/outbox/flush` | 立即补发 |
+| POST | `/dsh-fish-message/outbox/clear` | 清空队列 |
+| DELETE | `/dsh-fish-message/outbox/{id}` | 丢弃单条 |
+| POST/GET | `/dsh-fish-message/api/send-text` 等底层 5 个 | 原样收发 / history 查询 |
+| POST | `/dsh-fish-message/api/transcribe` 等高级 4 个 | 转写 / 合成 / 语音回复 / 声纹分析 |
+| GET | `/dsh-fish-message/api/capabilities` | 高级能力与服务地址状态 |
+
+底层/高级 API 的完整清单、curl 示例、501/502 错误体见 [`docs/API.md`](docs/API.md)。
 
 日志：
 
@@ -250,7 +300,7 @@ WS 连接、WS 重连、每 60 秒、HTTP 轮询都会触发这个同步；同�
 
 ---
 
-## 9. 测试
+## 10. 测试
 
 ```powershell
 cd E:\dsh-fish-message
@@ -262,12 +312,16 @@ npm test
 
 - `tests/format.test.js`：块、转义、多个块、未闭合、代码块、显式指令；
 - `tests/core.test.js`：补投排序/去重、水位持久化、窗口摘要、WS 乱序、出站、语音重试；
+- `tests/outbox.test.js`：出站队列落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、离线入队→恢复补发、语音文本重合成、路径失效丢弃；
 - `tests/integration.test.js`：Node 内起 mock OneBot HTTP + WS，验证收/发/补投/轮询/重启；
-- `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站。
+- `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站；
+- `tests/api.test.js`：mock OneBot + mock 本地 AI 服务，验证底层原样发送、multipart、history、高级 501/502、capabilities、出站队列接口。
+
+当前共 61 项，全部离线。
 
 ---
 
-## 10. 真机验收与回滚
+## 11. 真机验收与回滚
 
 真机验收步骤、命令、预期结果见 [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)。
 其中「停掉 NapCat → 发 2 条 → 启动 NapCat → 自动补投」是关键项。
@@ -283,11 +337,15 @@ npm test
 
 ---
 
-## 11. 已知限制 / 风险
+## 12. 已知限制 / 风险
 
 - v1 **只做私聊**；群聊、其它 IM 只留 `Transport` 接口和文档，不实现。
 - `[文件:…]` 是否可用取决于 NapCat 版本/权限；不可用会明确报错。
 - 出站语音是「TTS 或已有文件」，不做变声、不做自动长文本切分；QQ 语音条有时长上限。
+- TTS 失败时文字会进补发队列，恢复后重新合成；如果 TTS 一直不可用，该条会在 20 次尝试或 24 小时后丢弃并记日志。
+- 出站队列的单条失败会阻塞后面的积压（严格保序）；正常发送在失败后立刻释放锁，不会被永久卡死。
+- 严格保序的代价：积压里有一条长期失败时，新消息会先入队等它重试/丢弃，而不是插队先发。
+- 补发是「至少一次」语义：发送成功但删除队列条目前进程被杀，重启后可能重发一次（极小窗口）。
 - 首次 `/tts` 要加载模型，实测可能 70 秒左右；默认超时 180 秒。
 - 入站语音的声纹名来自本地 `/asr`；未登记的人会显示 `未知-N`。
 - 水位之前的旧历史会被静默标记为已处理，不会补投（避免刚装好就灌几年历史）。

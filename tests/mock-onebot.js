@@ -28,6 +28,7 @@ export class MockOneBotServer {
     this.requests = []
     this.clients = new Set()
     this.下一个id = 9000
+    this.failSend = false
     this.server = null
     this.wss = null
     this.port = 0
@@ -59,6 +60,9 @@ export class MockOneBotServer {
         return 回(res, { status: 'ok', retcode: 0, data: { messages: 全部.slice(-数) } })
       }
       if (action === 'send_private_msg') {
+        if (this.failSend) {
+          return 回(res, { status: 'failed', retcode: 1200, wording: '模拟发送失败：机器人离线' }, 200)
+        }
         this.sent.push(体)
         return 回(res, { status: 'ok', retcode: 0, data: { message_id: this.下一个id++ } })
       }

@@ -134,13 +134,15 @@ window.__ModuleLoader__.load({
 
     function Section() {
       const [态, 设态] = React.useState(null)
+      const [能力, 设能力] = React.useState(null)
       const [脏, 设脏] = React.useState(false)
       const [忙, 设忙] = React.useState(false)
       const [说, 设说] = React.useState('')
 
       const 拉 = async () => {
-        const s = await get('/state')
+        const [s, c] = await Promise.all([get('/state'), get('/api/capabilities')])
         if (s) 设态(s)
+        if (c) 设能力(c)
       }
       React.useEffect(() => { 拉() }, [])
       React.useEffect(() => {
@@ -167,7 +169,9 @@ window.__ModuleLoader__.load({
         const r = await post('/save', { config: 配置 })
         设忙(false)
         if (r && r.ok) {
-          设脏(false); 设说('已保存，连接参数变了会自动重连。')
+          设脏(false)
+          const 关掉高级 = !String(配置.asrBaseUrl || '').trim() || !String(配置.ttsBaseUrl || '').trim()
+          设说(关掉高级 ? '已保存。注意：ASR/TTS 服务地址留空，对应高级 API 会返回 501（未启用）。' : '已保存，连接参数变了会自动重连。')
           await 拉()
         } else {
           设说('保存失败：' + String((r && (r.error || r.message)) || '未知错误'))
@@ -177,13 +181,48 @@ window.__ModuleLoader__.load({
         设忙(true); 设说('正在发测试文字…')
         const r = await post('/test-send', {})
         设忙(false)
-        设说(r && r.ok ? `已发到 QQ ${r.qq}` : '测试失败：' + String((r && r.error) || '未知错误'))
+        if (!r || !r.ok) 设说('测试失败：' + String((r && r.error) || '未知错误'))
+        else if (r.queued) 设说(`QQ 现在发不出去，测试文字已进补发队列（积压 ${r.pending ?? '?'} 条），恢复后会自动补发。`)
+        else 设说(`已发到 QQ ${r.qq}`)
       }
       const 测试语音 = async () => {
         设忙(true); 设说('正在合成并发送测试语音（第一次加载模型可能要几十秒）…')
         const r = await post('/test-voice', {})
         设忙(false)
-        设说(r && r.ok ? `测试语音已发到 QQ ${r.qq}（${r.method}）` : '测试失败：' + String((r && r.error) || '未知错误'))
+        if (!r || !r.ok) 设说('测试失败：' + String((r && r.error) || '未知错误'))
+        else if (r.queued) 设说(`语音已合成，但 QQ 现在发不出去；已把文字放进补发队列（积压 ${r.pending ?? '?'} 条）。`)
+        else 设说(`测试语音已发到 QQ ${r.qq}`)
+      }
+      const 立即补发 = async () => {
+        设忙(true); 设说('正在补发出站队列…')
+        const r = await post('/outbox/flush', {})
+        设忙(false)
+        if (!r || !r.ok) 设说('补发失败：' + String((r && r.error) || '未知错误'))
+        else 设说(`补发结束：成功 ${r.sent || 0}，失败 ${r.failed || 0}，丢弃 ${r.dropped || 0}，剩余 ${r.pending || 0} 条。`)
+        await 拉()
+      }
+      const 清空队列 = async () => {
+        const 出站 = (态 && 态.bridge && 态.bridge.outbox) || {}
+        const n = Number(出站.pending) || 0
+        if (n > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function'
+          && !window.confirm(`确定清空出站队列里的 ${n} 条消息？清空后不会再补发。`)) return
+        设忙(true); 设说('正在清空出站队列…')
+        const r = await post('/outbox/clear', {})
+        设忙(false)
+        设说(r && r.ok ? `已清空 ${r.cleared || 0} 条。` : '清空失败：' + String((r && r.error) || '未知错误'))
+        await 拉()
+      }
+      const 测试高级 = async () => {
+        const c = await get('/api/capabilities')
+        if (c) 设能力(c)
+        if (!c?.advanced?.synthesize) {
+          设说('高级 API 未启用：请先在「收发行为」里填写 TTS 服务地址。')
+          return
+        }
+        设忙(true); 设说('正在测试 TTS（不改 QQ，只合成到本地）…')
+        const r = await post('/api/synthesize', { text: '（dsh-fish-message 高级 API 测试）' })
+        设忙(false)
+        设说(r && r.ok ? `TTS 正常：${r.path}（${r.ms} ms）` : '高级 API 测试失败：' + String((r && (r.detail || r.error)) || '未知错误'))
       }
 
       if (!态) return h('div', { style: S.wrap }, h('div', { style: S.h1 }, '鱼讯 QQ'), h('div', { style: S.dim }, '正在读取状态…'))
@@ -272,7 +311,43 @@ window.__ModuleLoader__.load({
         行('每次拉历史条数', h('input', {
           style: S.small, type: 'number', min: 10, max: 500, value: 配置.historyCount ?? 100,
           onChange: (e) => 改('historyCount', Number(e.target.value)),
-        })))
+        })),
+        行('出站队列 TTL（小时）', h('input', {
+          style: S.small, type: 'number', min: 1, max: 720, value: 配置.outboxTtlHours ?? 24,
+          onChange: (e) => 改('outboxTtlHours', Number(e.target.value)),
+        }), '超过这个时间的积压消息丢弃并记日志/统计。'),
+        行('出站去重窗口（分钟）', h('input', {
+          style: S.small, type: 'number', min: 0, max: 1440, value: 配置.outboxDedupMinutes ?? 10,
+          onChange: (e) => 改('outboxDedupMinutes', Number(e.target.value)),
+        }), '同一个 QQ、同样内容的重复入队只保留一条。'))
+
+      const 出站 = 桥.outbox || {}
+      const 出站页 = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '出站队列'),
+        h('div', { style: S.dim },
+          `出站积压 ${出站.pending || 0} 条 / 最老 ${出站.oldestAgeSec || 0} 秒｜补发成功 ${出站.sentTotal || 0}｜失败 ${出站.failedTotal || 0}｜丢弃 ${出站.droppedTotal || 0}`),
+        h('div', { style: S.hint }, 'QQ 发不出去的消息会先落盘到 fish-message-outbox.json，恢复后按时间顺序补发；最多 1000 条，单条最多试 20 次。'),
+        出站.lastError ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近补发错误：${出站.lastError}`) : null,
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+          h('button', { type: 'button', style: S.btn, onClick: 立即补发, disabled: 忙 }, '立即补发'),
+          h('button', { type: 'button', style: S.btn, onClick: 清空队列, disabled: 忙 || !(出站.pending > 0) }, '清空')))
+
+      const 高级 = (能力 && 能力.advanced) || {}
+      const 服务 = (能力 && 能力.services) || {}
+      const 高级开 = Boolean(高级.transcribe || 高级.synthesize)
+      const 高级页 = h('div', {
+        style: { ...S.card, opacity: 高级开 ? 1 : 0.58 },
+      },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '高级 API（语音识别 / 合成）'),
+        h('div', { style: S.dim },
+          `转写：${高级.transcribe ? '已启用' : '未启用'}（${服务.asr?.url || '地址为空'}）｜`
+          + `合成：${高级.synthesize ? '已启用' : '未启用'}（${服务.tts?.url || '地址为空'}）`),
+        h('div', { style: S.hint },
+          '地址留空 = 对应高级 API 关闭，调用会返回 501（advanced_api_disabled），不会静默失败。'
+          + ' 地址在「收发行为」里修改；保存后立即生效，不用重启。'),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+          h('button', { type: 'button', style: S.btn, onClick: 测试高级, disabled: 忙 }, '测试 TTS'),
+          h('button', { type: 'button', style: S.btn, onClick: 拉, disabled: 忙 }, '刷新能力')))
 
       const 日志 = Array.isArray(态.logs) ? 态.logs.join('\n') : ''
       return h('div', { style: S.wrap },
@@ -283,10 +358,10 @@ window.__ModuleLoader__.load({
         h('div', { style: S.dim }, 'DSH 的回复发到 QQ，QQ 私聊消息转进 DSH。v1 只做私聊；旧桥 dsh-qq-bridge 请保持禁用。'),
         h('div', { style: { ...S.card, marginTop: 10 } },
           h('div', { style: S.dim },
-            `传输：${传.name || 'napcat-onebot'}｜队列 ${桥.queueSize || 0} 条｜最近同步 ${桥.lastSyncAt ? new Date(桥.lastSyncAt).toLocaleTimeString('zh-CN', { hour12: false }) : '—'}｜`
+            `传输：${传.name || 'napcat-onebot'}｜收件队列 ${桥.queueSize || 0} 条｜出站积压 ${出站.pending || 0} 条｜最近同步 ${桥.lastSyncAt ? new Date(桥.lastSyncAt).toLocaleTimeString('zh-CN', { hour12: false }) : '—'}｜`
             + `收 ${桥.stats?.received || 0} / 投 ${桥.stats?.delivered || 0} / 跳过旧 ${桥.stats?.skippedOld || 0} / 错 ${桥.stats?.errors || 0}`),
           (桥.lastSyncError || 桥.stats?.lastError) ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近错误：${桥.lastSyncError || 桥.stats.lastError}`) : null),
-        连接页, 绑定页, 行为页, 补投页,
+        连接页, 绑定页, 行为页, 补投页, 出站页, 高级页,
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' } },
           h('button', { type: 'button', style: S.btnOn, onClick: 存, disabled: 忙 }, 忙 ? '处理中…' : '保存设置'),
           h('button', { type: 'button', style: S.btn, onClick: 测试文字, disabled: 忙 }, '发测试文字'),

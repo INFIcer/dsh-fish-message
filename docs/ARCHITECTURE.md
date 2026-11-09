@@ -18,13 +18,30 @@ Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
    ├─ 转写：record → VoiceService → 本地 /asr
    ├─ 图片：image → inbox → DSH 附件
-   └─ 出站：session/event → [QQ] 解析 → text / image / record / file
+   └─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
+        └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
    │
    ▼
 Delivery（lib/delivery.js）
    │  agent.followup({ role:'user', source:{ kind:'qq' } })
    ▼
 DSH 会话（模型照常开一轮）
+```
+
+对外还有两层 HTTP API（`lib/api.js`，路由在 `lib/host.js`）：
+
+```text
+底层 API（不解析 [QQ]，不转写/合成）
+  /api/send-text  /api/send-image  /api/send-record  /api/send-file  /api/history
+        │ 直发失败
+        ▼
+     Outbox ── 恢复后 FIFO 补发
+
+高级 API（依赖 asrBaseUrl / ttsBaseUrl，地址留空 = 501）
+  /api/transcribe  /api/synthesize  /api/voice-reply  /api/voice-analyze  /api/capabilities
+        │
+        ▼
+  VoiceService ── /asr  /tts  /media/to_wav
 ```
 
 本地 AI 服务只通过 HTTP 调用，插件不 import 它的代码，也不改它：
@@ -49,6 +66,8 @@ VoiceService ── POST /asr?speaker=1       （multipart）
 | `lib/queue.js` | 每个聊天的乱序缓冲 | 不做持久化 |
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
 | `lib/voice.js` | ASR / TTS / to_wav / 图片落盘 | 不改 7880 服务 |
+| `lib/outbox.js` | 持久化出站队列：去重、FIFO、退避、TTL、计数 | 不做网络发送 |
+| `lib/api.js` | 底层 API（原样收发）+ 高级 API（ASR/TTS 封装、501/502 映射） | 不拼 `[QQ]` 标记 |
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 
 ---
@@ -175,7 +194,51 @@ extractOutbound(text, onlyInsideMarkers)
 | `file` | `file` 段（NapCat 支持时） |
 
 语音发送按「本地路径 → `file:///` → `base64://`」重试，最多 3 次。
-全部失败：日志/状态记错，并在会话里投一条错误提示（同一会话 60 秒最多一次）。
+
+**任何 token 最终发送失败都不再丢弃**：`Bridge.发一条` 把内部消息段写进持久化出站队列，
+同一轮后续 token 也按顺序入队（避免后发先至），并记日志/事件。
+只有「发送失败 **且** 队列写盘也失败」才会在会话里投错误提示（同一会话 60 秒最多一次）。
+
+### 4.4 持久化出站队列
+
+```text
+正常发送 / 底层 API / voice-reply
+        │
+        ├─ 成功 ──────────────────────────────► 发到 QQ
+        │
+        └─ 失败（网络 / 5xx / retcode!=0 / 传输停止 / 补发中）
+                 │
+                 ▼
+        Outbox.enqueue（原子写 fish-message-outbox.json）
+                 │  fingerprint 去重（默认 10 分钟）
+                 │  超过 1000 条丢最旧
+                 ▼
+        补发触发：启动 0.8s / WS 恢复 / 每 10s 心跳 / POST /outbox/flush
+                 │
+                 ▼
+        按 createdAt FIFO，拿发送锁逐条派发
+                 │
+        ┌────────┴─────────┐
+        │                  │
+      成功               失败
+        │                  │
+   删除 + sentTotal++   attempts++ + failedTotal++
+   日志「补发成功（积压 N 条，延迟 X 秒）」  退避 min(5s×1.8^attempts, 300s)
+                           │
+                    20 次 / TTL 24h / 路径失效
+                           ▼
+                    丢弃 + droppedTotal++ + 错误日志
+```
+
+关键约束：
+
+- `fingerprint = sha256(qq + 规范化 segments)`；同一条消息重试不会变成多条。
+- 语音文本入队存 `record_text`（文字），补发时重新合成；`record` 只存路径，路径不存在直接丢弃。
+- 补发与正常发送共用 `this.发送链`（Promise 串行锁）；补发期间或已有积压时，新消息直接入队，保持顺序。
+- 补发失败一条就停，下一轮再试；不会因为积压把正常发送永久卡死（新消息仍会持久化受理，等前面的发完/丢弃后继续）。
+- 队列计数写进 `fish-message-state.json` 的 `stats.outbox*`，`/state` 的 `outbox` 只读汇总。
+
+详细语义和接口见 [`API.md`](API.md#4-持久化出站队列)。
 
 ---
 
@@ -256,7 +319,13 @@ v1 不实现群聊。将来要加群：
 | DSH 会话没开 | 不推进水位；消息留在队列，下一轮重试 |
 | followup 失败 | 同上，并记错误 |
 | ASR 失败 | 消息降级为 `[语音（转写失败）]`，不丢整条 |
-| TTS 失败 | 语音 token 报错；会话收到错误提示 |
-| `record` 发送失败 | 三种 file 形态重试，最多 3 次；仍失败报错 |
+| TTS 失败 | 语音文本入出站队列（`record_text`），恢复后重新合成；不会存音频字节 |
+| 文字/图片/文件发送失败 | 入持久化出站队列；恢复后按 FIFO 补发 |
+| `record` 发送失败 | 三种 file 形态重试 3 次；仍失败存路径入队 |
+| 出站队列写盘失败 | 日志报错；本次消息可能丢（磁盘满等硬故障） |
+| 补发失败 | `attempts++`，退避重试；20 次或 TTL 到期丢弃并记统计 |
+| 补发时音频/图片/文件已不存在 | 直接丢弃该条，报错，不重试 20 次 |
 | 图片下载失败 | 文字里标 `[图片（下载失败）]`，不影响其它段 |
 | 状态文件写失败 | 日志记错；内存继续，重启可能重投（已知风险） |
+| 高级 API 服务地址为空 | 501 `advanced_api_disabled`，带 `missing` |
+| 高级 API 服务超时/不通 | 502 `advanced_api_upstream_error`，带 `detail` |

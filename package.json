@@ -23,8 +23,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/format.test.js tests/core.test.js tests/integration.test.js tests/host.test.js",
-    "check": "node --check lib/host.js && node --check client.js"
+    "test": "node --test tests/format.test.js tests/core.test.js tests/outbox.test.js tests/integration.test.js tests/host.test.js tests/api.test.js",
+    "check": "node --check lib/host.js && node --check lib/bridge.js && node --check lib/outbox.js && node --check lib/api.js && node --check client.js"
   },
   "dsh": {
     "bundle": {

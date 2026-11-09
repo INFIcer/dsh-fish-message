@@ -1,4 +1,4 @@
-﻿# 真机验收清单
+# 真机验收清单
 
 > 前提：NapCat 在 `http://127.0.0.1:3000`，机器人 QQ `2983830957`，主人 QQ `1696117435`；
 > 本地 AI 服务在 `http://127.0.0.1:7880`；DSH profile 是 `desktop`。
@@ -24,7 +24,7 @@ npm test
 ```
 
 期望：`get_login_info` 返回 `user_id=2983830957`；`/health` 返回 `ok=true`；
-测试 34 项全部 pass。
+测试 61 项全部 pass。
 
 ---
 
@@ -240,7 +240,83 @@ QQ → DSH：主人发一张图，期望会话收到图片附件；纯文本模�
 
 ---
 
-## 9. 禁用旧桥 / 回滚
+## 9. 出站队列与两层 API（本轮新增）
+
+### 9.1 能力探测
+
+```powershell
+$base = 'http://127.0.0.1:8519'   # 换成重启后实际端口
+Invoke-RestMethod "$base/dsh-fish-message/api/capabilities" | ConvertTo-Json -Depth 6
+```
+
+期望：`lowLevel=true`；`advanced.transcribe/synthesize/voiceReply/voiceAnalyze` 全为 `true`
+（本机 asr/tts 地址已填）；`services.asr.url = services.tts.url = http://127.0.0.1:7880`。
+
+### 9.2 底层 API 原样发送
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/api/send-text" `
+  -ContentType 'application/json' `
+  -Body '{"text":"【验收 9】底层 API 原样发送 [QQ] 不解析"}'
+```
+
+期望：QQ 收到的文字里**保留** `[QQ]` 字面量；响应 `sent=true`。
+
+### 9.3 出站队列：断网入队 → 恢复补发
+
+```powershell
+# 1) 停掉 NapCat（或把 napcatBaseUrl 改到一个关闭的端口并保存）
+# 2) 调底层 API 发 2 条不同文字
+Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/api/send-text" `
+  -ContentType 'application/json' -Body '{"text":"【验收 9】离线第 1 条"}'
+Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/api/send-text" `
+  -ContentType 'application/json' -Body '{"text":"【验收 9】离线第 2 条"}'
+# 期望：两次都返回 202、queued=true、pending 依次为 1、2
+
+# 3) 看队列
+Invoke-RestMethod "$base/dsh-fish-message/outbox?limit=10" | ConvertTo-Json -Depth 8
+Invoke-RestMethod "$base/dsh-fish-message/state" | Select-Object -ExpandProperty bridge |
+  Select-Object -ExpandProperty outbox | ConvertTo-Json -Depth 4
+
+# 4) 恢复 NapCat，手动补发
+Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/outbox/flush" | ConvertTo-Json
+# 期望：sent=2、pending=0；QQ 按「第 1 条 → 第 2 条」顺序收到，且各只收到一次
+```
+
+日志里应出现：`补发成功（积压 N 条，延迟 X 秒）`。
+
+### 9.4 语音文本重合成
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/api/voice-reply" `
+  -ContentType 'application/json' -Body '{"text":"【验收 9】离线语音"}'
+```
+
+断网时期望：`202`、`queued=true`；`fish-message-outbox.json` 里该条是
+`record_text`（文字），没有 base64 音频；恢复后补发会重新调 `/tts`。
+
+### 9.5 高级 API 关闭时的 501 / 服务不通的 502
+
+1. 设置页把 `asrBaseUrl` 清空并保存；
+2. `POST /api/transcribe`（哪怕 `path` 不存在也可先看 501）应返回：
+
+```json
+{"ok":false,"error":"advanced_api_disabled","detail":"高级 API 未启用：请在设置里填写 asr 服务地址","missing":"asrBaseUrl","service":"asr"}
+```
+
+3. 把 `asrBaseUrl` 改成 `http://127.0.0.1:1` 保存，`POST /api/transcribe` 传一个真实 wav，
+   应返回 `502`、`error=advanced_api_upstream_error`，`detail` 带连接失败原因；
+4. 改回 `http://127.0.0.1:7880`。
+
+### 9.6 设置页
+
+- 「出站队列」卡片显示「出站积压 N 条 / 最老 X 秒」，有「立即补发」「清空」；
+- 「高级 API」卡片显示 ASR/TTS 已启用/未启用；地址都为空时整块灰显；
+- 清空地址保存后，提示里明确写「对应高级 API 会返回 501」。
+
+---
+
+## 10. 禁用旧桥 / 回滚
 
 ### 确认旧桥没在跑
 
@@ -263,11 +339,16 @@ notepad "$profileDir\package.json"
 
 ---
 
-## 10. 本轮已做 / 留给父 agent
+## 11. 本轮已做 / 留给父 agent
 
 ### 已做（不依赖 DSH 重载）
 
-- 全部 34 项单测 + mock 集成测试通过；
+- 全部 61 项单测 + mock 集成测试通过（新增出站队列 12 项、API 15 项）；
+- 出站队列：落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、
+  离线入队→恢复补发、语音文本重合成、路径失效丢弃、队列接口；
+- 底层 API：send-text 原样不解析、send-image（JSON + multipart）、send-record、send-file、history；
+- 高级 API：capabilities、transcribe、synthesize、voice-reply（含离线转文字入队）、
+  voice-analyze、空地址 501、服务不通/超时 502；
 - 真实 NapCat `send_private_msg` 文字 1 条，已回读历史确认；
 - 真实 `/tts` 合成 `dafeiyu` 语音，真实 `record` 段发送 1 条，已回读历史确认；
 - 真实 `get_record` 拿到 wav，真实 `/asr?speaker=1` 转写回 `这是一条测试语音。`；
@@ -276,6 +357,7 @@ notepad "$profileDir\package.json"
 ### 留给父 agent（需要重启 DSH / 用主人 QQ 发消息）
 
 - 把插件装进 profile 并重启 DSH（本 agent 在 DSH 内，不能自己杀自己）；
+- 按第 9 节做「出站队列断网→恢复补发」「高级 API 501/502」真机验收；
 - 主人 QQ → DSH 文字；
 - 主人 QQ → DSH 语音（声纹名）；
 - DSH → QQ `[语音]…[/语音]`；
@@ -285,7 +367,7 @@ notepad "$profileDir\package.json"
 
 ---
 
-## 11. 快速排障
+## 12. 快速排障
 
 ```powershell
 # 端口不固定，找 DSH 监听
