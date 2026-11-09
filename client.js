@@ -429,6 +429,40 @@ window.__ModuleLoader__.load({
       }, 配置块, 工具条, 网格, 最近块)
     }
 
+    // 原生表单控件在浅色/深色弹层下会出现「白字白底」：统一给 select/option 与 input 配成对颜色。
+    // 只注入一次，跟 DSH 客户端包自己的做法一样。
+    const 控件样式 = `
+      .fish-msg-settings select,
+      .fish-msg-settings input,
+      .fish-msg-settings textarea {
+        background-color: var(--dsw-alias-bg-layer-1, #ffffff);
+        color: var(--dsw-alias-label-primary, #1f1f1f);
+      }
+      .fish-msg-settings select { color-scheme: dark; }
+      .fish-msg-settings select option,
+      .fish-msg-settings select optgroup {
+        background-color: var(--dsw-alias-bg-layer-1, #2b2b2b);
+        color: var(--dsw-alias-label-primary, #f2f2f2);
+      }
+      .fish-msg-settings select option:checked {
+        background-color: var(--dsw-alias-state-business-primary, #2f6fed);
+        color: #ffffff;
+      }
+      .fish-msg-settings input::placeholder { color: var(--dsw-alias-label-secondary, #888); opacity: 1; }
+      .fish-msg-settings input[type="checkbox"] { accent-color: var(--dsw-alias-state-business-primary, #2f6fed); }
+    `
+
+    function 注入控件样式() {
+      try {
+        if (typeof document === 'undefined') return
+        if (document.querySelector('style[data-fish-message="controls"]')) return
+        const 节点 = document.createElement('style')
+        节点.dataset.fishMessage = 'controls'
+        节点.textContent = 控件样式
+        document.head.appendChild(节点)
+      } catch { /* 注入失败只影响外观 */ }
+    }
+
     function Section() {
       const [态, 设态] = React.useState(null)
       const [脏, 设脏] = React.useState(false)
@@ -499,7 +533,7 @@ window.__ModuleLoader__.load({
         await 拉()
       }
 
-      if (!态) return h('div', { style: S.wrap }, h('div', { style: S.h1 }, '鱼讯 QQ'), h('div', { style: S.dim }, '正在读取状态…'))
+      if (!态) return h('div', { className: 'fish-msg-settings', style: S.wrap }, h('div', { style: S.h1 }, '鱼讯 QQ'), h('div', { style: S.dim }, '正在读取状态…'))
 
       const 桥 = 态.bridge || {}
       const 传 = 桥.transport || {}
@@ -600,7 +634,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: S.btn, onClick: 清空队列, disabled: 忙 || !(出站.pending > 0) }, '清空')))
 
       const 日志 = Array.isArray(态.logs) ? 态.logs.join('\n') : ''
-      return h('div', { style: S.wrap },
+      return h('div', { className: 'fish-msg-settings', style: S.wrap },
         h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
           h('div', { style: S.h1 }, '鱼讯 QQ'),
           h('span', { style: { ...S.badge, ...(在线 ? S.ok : S.danger) } }, 在线 ? `在线 · ${传.mode || 'ws'}` : `离线 · ${传.mode || 'http'}`),
@@ -622,6 +656,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      注入控件样式()
       const slots = ctx.get('slots')
       if (slots === undefined) return
       slots.inject('settings.section', () => slots.register(
