@@ -1,0 +1,5 @@
+# dsh-fish-message：DSH 的 QQ 私聊桥（v1 只做私聊）
+# 这一层只负责把插件插进 profile；具体配置在 <DSH 家目录>/fish-message-config.json。
+- insert:
+    - id: fish-message
+      name: 'dsh-fish-message'
