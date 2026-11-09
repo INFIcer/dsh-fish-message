@@ -147,3 +147,27 @@ test('表情指令：空名字不生成 token', () => {
   const t = parseDirectives('[表情:   ]尾巴')
   assert.deepEqual(t, [{ type: 'text', text: '[表情:   ]尾巴' }])
 })
+
+test('转义表情指令：\\[表情:名字] 只当字面量', () => {
+  const r = extractOutbound('[QQ]写法示例：\\[表情:名字]、\\[表情:#标签]、\\[表情:id][/QQ]', true)
+  assert.equal(r.send, true)
+  assert.equal(r.tokens.length, 1)
+  assert.equal(r.tokens[0].type, 'text')
+  assert.equal(r.tokens[0].text, '写法示例：[表情:名字]、[表情:#标签]、[表情:id]')
+})
+
+test('未转义的表情指令仍然生效', () => {
+  const r = extractOutbound('[QQ]来一个 [表情:dschan_thumbs-up] 吧[/QQ]', true)
+  assert.deepEqual(r.tokens, [
+    { type: 'text', text: '来一个' },
+    { type: 'sticker', name: 'dschan_thumbs-up' },
+    { type: 'text', text: '吧' },
+  ])
+})
+
+test('转义语音/图片/文件指令：只当字面量', () => {
+  const t = parseDirectives('看 \\[语音]文本\\[/语音] 和 \\[图片:C:\\a.png]')
+  assert.equal(t.length, 1)
+  assert.equal(t[0].type, 'text')
+  assert.equal(t[0].text, '看 [语音]文本[/语音] 和 [图片:C:\\a.png]')
+})

@@ -398,7 +398,7 @@ test('表情工具：fish_sticker_list / fish_sticker_send 注册、执行、不
   assert.equal(注册表.size, 0)
 })
 
-test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时明确通知会话', async () => {
+test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时只记错误不刷会话', async () => {
   const { 库 } = 造库()
   const 条目 = 库.save(造GIF(), { name: '晚安.gif', tags: ['晚安'] }).entry
   const 发出 = []
@@ -411,12 +411,13 @@ test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时明确通�
     reorderBufferMs: 0,
     autoSaveStickers: false,
   }
+  const 错记录 = []
   const 存储 = {
     getWatermark: () => null,
     setWatermark() {},
     hasSeen: () => false,
     markSeen() {},
-    noteError() {},
+    noteError(文) { 错记录.push(String(文 || '')) },
     noteReceived() {},
     noteDelivered() {},
     recordEvent() {},
@@ -461,8 +462,8 @@ test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时明确通�
 
   await bridge.deliverAssistantTurn('session-b', '[QQ][表情:没有这个表情][/QQ]')
   assert.equal(发出.length, 2, '找不到时不应该发任何东西')
-  assert.equal(通知.length, 1)
-  assert.match(通知[0].text, /找不到表情/)
+  assert.equal(通知.length, 0, '找不到表情时不再往会话里塞提示')
+  assert.match(错记录.join('\n'), /找不到表情/)
 
   配置.autoSaveStickers = true
   const 入站 = await bridge.buildInbound(配置.bindings[0], {
