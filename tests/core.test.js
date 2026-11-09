@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Bridge } from '../lib/bridge.js'
+import { VoiceService } from '../lib/voice.js'
 import { StateStore } from '../lib/storage.js'
-import { normalizeConfig, deriveWsUrl, migrateLegacyConfig } from '../lib/config.js'
+import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig } from '../lib/config.js'
 import { Logger } from '../lib/logger.js'
 
 const 睡 = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -54,10 +55,28 @@ class 假投递 {
 }
 
 class 假语音 {
-  constructor() { this.transcribed = [] }
-  async transcribeRecord(segment, id) { return { text: segment?.data?.text || '', speakerName: '主人' } }
   async fetchImage() { throw new Error('测试里不放图片') }
-  async synthesize() { throw new Error('测试里不合成') }
+}
+
+/** 造一个最小可解析的 wav（16k 单声道 16bit），用于读时长。 */
+function 造wav(秒 = 1) {
+  const 采样率 = 16000
+  const 数据长 = Math.round(采样率 * 秒) * 2
+  const buf = Buffer.alloc(44 + 数据长)
+  buf.write('RIFF', 0, 'ascii')
+  buf.writeUInt32LE(36 + 数据长, 4)
+  buf.write('WAVE', 8, 'ascii')
+  buf.write('fmt ', 12, 'ascii')
+  buf.writeUInt32LE(16, 16)
+  buf.writeUInt16LE(1, 20)
+  buf.writeUInt16LE(1, 22)
+  buf.writeUInt32LE(采样率, 24)
+  buf.writeUInt32LE(采样率 * 2, 28)
+  buf.writeUInt16LE(2, 32)
+  buf.writeUInt16LE(16, 34)
+  buf.write('data', 36, 'ascii')
+  buf.writeUInt32LE(数据长, 40)
+  return buf
 }
 
 function 建桥({ dir = 临时目录(), 历史 = {}, config = {} } = {}) {
@@ -242,4 +261,122 @@ test('配置：派生 WS 地址、旧桥字段迁移、范围钳制', () => {
   assert.equal(钳.pollIntervalMs, 500)
   assert.equal(钳.historyCount, 500)
   assert.equal(钳.logLevel, 'info')
+})
+
+// ---------------- 解耦：语音只做传输，ASR/TTS 在 dsh-fish-ops ----------------
+
+test('入站语音：只落盘并递「语音：路径」，不联网、不转写', async () => {
+  const dir = 临时目录()
+  const 原始 = join(dir, 'from-qq.wav')
+  writeFileSync(原始, 造wav(2))
+
+  class 语音传输 extends 假传输 {
+    constructor(本地文件) { super(); this.本地文件 = 本地文件; this.getRecord次数 = 0; this.下载次数 = 0 }
+    async getRecord() { this.getRecord次数++; return { file: this.本地文件 } }
+    async download() { this.下载次数++; throw new Error('不应该下载') }
+  }
+
+  const transport = new 语音传输(原始)
+  const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
+  const voice = new VoiceService({
+    getConfig: () => normalizeConfig({ maxVoiceMB: 20 }),
+    logger,
+    transport,
+    inboxDir: join(dir, 'inbox'),
+  })
+  const 配置 = normalizeConfig({
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    reorderBufferMs: 0,
+  })
+  const bridge = new Bridge({
+    getConfig: () => 配置,
+    transport,
+    store: new StateStore({ homeDir: dir }),
+    logger,
+    voice,
+    delivery: new 假投递(),
+    autoTimers: false,
+  })
+
+  // 只要调用了 fetch 就算联网；这条链路必须一次都不调。
+  let 网络调用 = 0
+  const 原fetch = globalThis.fetch
+  globalThis.fetch = async () => { 网络调用++; throw new Error('解耦后入站语音不该联网') }
+  try {
+    const 内容 = await bridge.buildInbound(
+      { qq: QQ, name: '主人' },
+      { message_id: 'm-voice-1', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
+    )
+    assert.equal(网络调用, 0, '入站语音不能调 ASR / to_wav 等网络接口')
+    assert.equal(transport.getRecord次数, 1, '只问 get_record 要 wav')
+    assert.equal(transport.下载次数, 0)
+    assert.match(内容.text, /（语音：.+\.wav，2 秒）/)
+    assert.ok(!内容.text.includes('转写'), '不能再出现转写文字')
+    assert.ok(!内容.text.includes('声纹'), '不能再带声纹')
+  } finally {
+    globalThis.fetch = 原fetch
+  }
+})
+
+test('出站 [语音]文本[/语音]：返回 tts_moved_to_ops，不发任何消息', async () => {
+  const { bridge, transport } = 建桥()
+  const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ][语音]晚安，主人[/语音][/QQ]')
+  assert.equal(transport.sent.length, 0, '不能合成、也不能发任何消息')
+  assert.equal(结果.ok, false)
+  assert.equal(结果.code, 'tts_moved_to_ops')
+  assert.equal(结果.tts, 'moved')
+  assert.match(结果.hint, /fish_say_and_send/)
+  assert.match(结果.hint, /fish_say_voice/)
+})
+
+test('出站 [语音]文本[/语音] 与文字混排：文字照发，语音只提示', async () => {
+  const { bridge, transport } = 建桥()
+  const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ]先听这个 [语音]晚安[/语音][/QQ]')
+  assert.equal(transport.sent.length, 1)
+  assert.deepEqual(transport.sent[0].segments, [{ type: 'text', data: { text: '先听这个' } }])
+  assert.equal(结果.code, 'tts_moved_to_ops')
+})
+
+test('出站 [语音:路径]：照常发已有音频文件，不合成', async () => {
+  const dir = 临时目录()
+  const 音频 = join(dir, 'a.wav')
+  writeFileSync(音频, 造wav(0.2))
+  const { bridge, transport } = 建桥({ dir })
+  const 结果 = await bridge.deliverAssistantTurn(会话, `[QQ][语音:${音频}][/QQ]`)
+  assert.equal(结果.ok, true)
+  assert.equal(transport.sent.length, 1)
+  assert.equal(transport.sent[0].segments[0].type, 'record')
+  assert.equal(transport.sent[0].segments[0].data.file, 音频.replace(/\\/g, '/'))
+})
+
+test('旧配置：残留的 ASR/TTS 字段被静默忽略并从落盘文件清理', () => {
+  const dir = 临时目录()
+  const 文件 = join(dir, 'fish-message-config.json')
+  writeFileSync(文件, JSON.stringify({
+    napcatBaseUrl: 'http://127.0.0.1:3000',
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    transcriptionEnabled: false,
+    asrBaseUrl: 'http://127.0.0.1:9999',
+    asrCommand: 'python asr.py "{file}"',
+    asrTimeoutMs: 1,
+    ttsEnabled: false,
+    ttsBaseUrl: 'http://127.0.0.1:9999',
+    ttsVoice: '旧音色',
+    ttsTimeoutMs: 1,
+  }), 'utf8')
+
+  const 配置 = new ConfigStore({ homeDir: dir }).load({})
+  for (const 键 of 已移除的语音字段) assert.equal(键 in 配置, false, `内存配置不应再有 ${键}`)
+  assert.equal(配置.napcatBaseUrl, 'http://127.0.0.1:3000')
+  assert.equal(配置.bindings.length, 1)
+
+  // 加载时静默清理：文件还在，但旧键没了，其它设置原样保留。
+  const 盘 = JSON.parse(readFileSync(文件, 'utf8'))
+  for (const 键 of 已移除的语音字段) assert.equal(键 in 盘, false, `落盘配置不应再有 ${键}`)
+  assert.equal(盘.bindings[0].qq, QQ)
+
+  // 外部命令等旧键即使通过插件配置传进来，也只是被忽略，不报错。
+  const 再读 = new ConfigStore({ homeDir: 临时目录() }).load({ ttsVoice: 'x', asrCommand: 'y' })
+  assert.equal('ttsVoice' in 再读, false)
+  assert.equal('asrCommand' in 再读, false)
 })

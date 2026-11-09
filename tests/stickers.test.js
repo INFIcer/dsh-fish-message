@@ -407,7 +407,6 @@ test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时只记错�
     bindings: [{ qq: '10001', session: 'session-b', name: '主人', enabled: true }],
     onlyInsideMarkers: true,
     maxImageMB: 10,
-    ttsVoice: 'x',
     reorderBufferMs: 0,
     autoSaveStickers: false,
   }

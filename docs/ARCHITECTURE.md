@@ -16,7 +16,7 @@ Transport 适配器（v1：napcat-onebot）
    ▼
 Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
-   ├─ 转写：record → VoiceService → 本地 /asr
+   ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（不转写）
    ├─ 图片：image → inbox → DSH 附件（可选自动入表情库）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
    └─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
@@ -33,12 +33,13 @@ DSH 会话（模型照常开一轮）
 `/dsh-fish-message/*` 本地路由；表情库另有 `lib/stickers.js`（纯磁盘逻辑）和
 `lib/sticker-routes.js`（HTTP 门面）两层。
 
-本地 AI 服务只通过 HTTP 调用，插件不 import 它的代码，也不改它：
+**职责边界：鱼讯只做 QQ 传输。** 入站语音只落盘、不识别；出站只发已有音频文件、
+不合成。语音识别 / 合成在 `dsh-fish-ops`（它调 `fish.service` 的 ASR / TTS，
+再经 `fish.message.sendRecord` 发回 QQ）：
 
 ```text
-VoiceService ── POST /asr?speaker=1       （multipart）
-             ── POST /tts                 （JSON，返回 audio/wav）
-             ── POST /media/to_wav        （multipart）
+dsh-fish-ops ── fish.service.tts / fish.service.asr   （本地 AI 服务）
+             └─ fish.message.sendRecord                （鱼讯只负责发 record 段）
 ```
 
 ---
@@ -54,7 +55,7 @@ VoiceService ── POST /asr?speaker=1       （multipart）
 | `lib/format.js` | `[QQ]` 块、转义、显式指令 | 不发送 |
 | `lib/queue.js` | 每个聊天的乱序缓冲 | 不做持久化 |
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
-| `lib/voice.js` | ASR / TTS / to_wav / 图片落盘 | 不改 7880 服务 |
+| `lib/voice.js` | 入站语音 get_record / 落盘 / 读时长；图片落盘 | 不做 ASR / TTS / 转码 |
 | `lib/outbox.js` | 持久化出站队列：去重、FIFO、退避、TTL、计数 | 不做网络发送 |
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 | `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
@@ -124,20 +125,21 @@ VoiceService ── POST /asr?speaker=1       （multipart）
 5. 超过窗口的只投一条摘要，包含条数、最早/最近时间；
 6. 摘要投失败只记日志（这些消息已经太旧，不阻塞新消息）。
 
-### 3.6 语音入站
+### 3.6 语音入站（只做传输）
 
 ```text
 record 段
   → transport.getRecord(file, out_format=wav)
   → 拿不到则 transport.download(url) / base64:// / 本地文件
-  → 存 <家目录>\fish-message-inbox\qq-voice-*.wav
-  → 非 wav 再走 /media/to_wav
-  → /asr?speaker=1
-  → "（语音｜声纹：主人）文字"
+  → 存 <家目录>\fish-message-inbox\qq-voice-*
+  → 读 wav 头拿时长（读不到就省略秒数）
+  → "（语音：<绝对路径>，N 秒）" 交给会话
 ```
 
-原文件保留，供以后做声纹登记；转写失败会降级成 `[语音（转写失败：…）]`，
-不会把整条消息丢掉。
+**不调 `/asr`、不调 `/media/to_wav`、不带声纹。** 需要文字/声纹时用
+`dsh-fish-ops` 的 `fish_voice_note_analyze`（它通过 `fish.message.latestVoice`
+或历史拿同一条语音文件，再调 `fish.service.asr`）。落盘失败会降级成
+`[语音（保存失败：…）]`，不会把整条消息丢掉。
 
 ### 3.7 图片入站
 
@@ -170,8 +172,11 @@ image / mface 段
 ```text
 extractOutbound(text, onlyInsideMarkers)
   ├─ parseQQBlock：转义扫描 → 块内反转义 → 多块拼接 / 未闭合容错
-  └─ parseDirectives：text / voice / image / file 有序 token
+  └─ parseDirectives：text / ttsMoved / image / voiceFile / file / sticker 有序 token
 ```
+
+`[语音]文字[/语音]` 只识别成 `ttsMoved`（不再合成）；发送层会跳过它并返回
+`code: 'tts_moved_to_ops'`，提示改用 ops 的 `fish_say_and_send`。
 
 详细语法见 [`FORMAT.md`](FORMAT.md)。
 
@@ -181,8 +186,8 @@ extractOutbound(text, onlyInsideMarkers)
 |---|---|
 | `text` | `send_private_msg`，`text` 段 |
 | `image` | 本地图读 base64；网络图交 URL |
-| `voice` | `/tts` → 本地 wav → `record` 段 |
-| `voiceFile` | 直接 `record` 段 |
+| `ttsMoved` | **不发送**，记日志并返回 `tts_moved_to_ops`（TTS 已移到 dsh-fish-ops） |
+| `voiceFile` | 直接 `record` 段（已有音频文件） |
 | `file` | `file` 段（NapCat 支持时） |
 | `sticker` | 发送时查 `StickerStore` → 本地图片 → `image` 段；带 `stickerId` 供成功计数 |
 
@@ -195,7 +200,7 @@ extractOutbound(text, onlyInsideMarkers)
 ### 4.4 持久化出站队列
 
 ```text
-正常发送 / 测试语音 / 补发
+正常发送 / 补发
         │
         ├─ 成功 ──────────────────────────────► 发到 QQ
         │
@@ -226,7 +231,8 @@ extractOutbound(text, onlyInsideMarkers)
 关键约束：
 
 - `fingerprint = sha256(qq + 规范化 segments)`；同一条消息重试不会变成多条。
-- 语音文本入队存 `record_text`（文字），补发时重新合成；`record` 只存路径，路径不存在直接丢弃。
+- 语音只入队**已有文件路径**（`record`），不再存 `record_text`；旧版本遗留的
+  `record_text` 条目补发时直接判死并给出「改用 fish_say_and_send」的原因。
 - 补发与正常发送共用 `this.发送链`（Promise 串行锁）；补发期间或已有积压时，新消息直接入队，保持顺序。
 - 补发失败一条就停，下一轮再试；不会因为积压把正常发送永久卡死（新消息仍会持久化受理，等前面的发完/丢弃后继续）。
 - 队列计数写进 `fish-message-state.json` 的 `stats.outbox*`，`/state` 的 `outbox` 只读汇总。
@@ -340,8 +346,8 @@ v1 不实现群聊。将来要加群：
 | 历史接口失败 | 记日志/状态；下一轮重试；WS 事件仍可收 |
 | DSH 会话没开 | 不推进水位；消息留在队列，下一轮重试 |
 | followup 失败 | 同上，并记错误 |
-| ASR 失败 | 消息降级为 `[语音（转写失败）]`，不丢整条 |
-| TTS 失败 | 语音文本入出站队列（`record_text`），恢复后重新合成；不会存音频字节 |
+| 语音落盘失败 | 消息降级为 `[语音（保存失败）]`，不丢整条；需要识别时用 ops |
+| `[语音]文字[/语音]` | 不合成、不发送；返回 `tts_moved_to_ops`，提示改用 ops |
 | 文字/图片/文件发送失败 | 入持久化出站队列；恢复后按 FIFO 补发 |
 | `record` 发送失败 | 三种 file 形态重试 3 次；仍失败存路径入队 |
 | 出站队列写盘失败 | 日志报错；本次消息可能丢（磁盘满等硬故障） |

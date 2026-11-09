@@ -84,9 +84,9 @@ test('反斜杠转义函数', () => {
   assert.equal(unescape('D:\\dsh_ws\\a'), 'D:\\dsh_ws\\a')
 })
 
-test('显式指令：语音块 / 图片 / 文件', () => {
+test('显式指令：语音块（只识别、提示已迁移）/ 图片 / 文件', () => {
   const t = parseDirectives('[语音]你好呀[/语音] 中间 [图片:C:\\a.png] 尾巴 [文件:D:/b.pdf]')
-  assert.deepEqual(t.map((x) => x.type), ['voice', 'text', 'image', 'text', 'file'])
+  assert.deepEqual(t.map((x) => x.type), ['ttsMoved', 'text', 'image', 'text', 'file'])
   assert.equal(t[0].text, '你好呀')
   assert.equal(t[2].path, 'C:\\a.png')
   assert.equal(t[4].path, 'D:/b.pdf')
@@ -97,11 +97,12 @@ test('显式指令：直接发已有音频', () => {
   assert.deepEqual(t, [{ type: 'voiceFile', path: 'C:/a.wav' }])
 })
 
-test('出站总入口：只发块内的指令', () => {
+test('出站总入口：只发块内的指令，[语音] 块标成 ttsMoved', () => {
   const r = extractOutbound('本地的解释 [QQ][语音]晚安[/语音][/QQ] 块外', true)
   assert.equal(r.send, true)
   assert.equal(r.qqText, '[语音]晚安[/语音]')
-  assert.deepEqual(r.tokens, [{ type: 'voice', text: '晚安' }])
+  assert.deepEqual(r.tokens, [{ type: 'ttsMoved', text: '晚安' }])
+  assert.equal(r.ttsMoved, true)
 })
 
 test('出站总入口：块内为空不发', () => {
@@ -129,7 +130,7 @@ test('表情指令：大小写不敏感、中文冒号也认', () => {
 
 test('表情指令：一次多个，与其它指令按出现顺序混排', () => {
   const t = parseDirectives('先说 [表情:晚安] 再听 [语音]晚安[/语音] 看图 [图片:C:\\a.png] 最后 [表情:#生气]')
-  assert.deepEqual(t.map((x) => x.type), ['text', 'sticker', 'text', 'voice', 'text', 'image', 'text', 'sticker'])
+  assert.deepEqual(t.map((x) => x.type), ['text', 'sticker', 'text', 'ttsMoved', 'text', 'image', 'text', 'sticker'])
   assert.equal(t[1].name, '晚安')
   assert.equal(t[7].name, '#生气')
 })

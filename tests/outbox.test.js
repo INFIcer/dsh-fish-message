@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Outbox, 计算指纹, 消息摘要, 退避毫秒 } from '../lib/outbox.js'
@@ -157,18 +157,6 @@ class 假投递 {
 }
 
 class 假语音 {
-  constructor(dir) {
-    this.dir = dir
-    this.合成次数 = 0
-    this.转写次数 = 0
-  }
-  async synthesize(text) {
-    this.合成次数++
-    const 文件 = join(this.dir, `tts-${this.合成次数}.wav`)
-    writeFileSync(文件, Buffer.from('RIFFxxxxWAVE'))
-    return 文件
-  }
-  async transcribeRecord() { this.转写次数++; return { text: '转写', speakerName: '主人' } }
   async fetchImage() { throw new Error('测试不下载图片') }
 }
 
@@ -176,7 +164,7 @@ function 建桥({ dir = 临时目录(), config = {} } = {}) {
   const store = new StateStore({ homeDir: dir })
   const logger = new Logger({ filePath: join(dir, 'bridge.log'), level: 'debug' })
   const transport = new 假传输()
-  const voice = new 假语音(dir)
+  const voice = new 假语音()
   const 配置 = normalizeConfig({
     bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
     outboxTtlHours: 24,
@@ -254,29 +242,13 @@ test('Bridge：恢复在线但还没补发时，新消息也排队，不插到�
   await bridge.stop()
 })
 
-test('Bridge：语音文本入队存文字，补发时重新合成', async () => {
-  const { dir, bridge, transport, voice, outbox } = 建桥()
+test('Bridge：[语音]文本[/语音] 不再合成，也不进补发队列', async () => {
+  const { bridge, transport, outbox } = 建桥()
   await bridge.start({ syncNow: false })
-  // 让语音发送快速失败，避免 sendRecordWithRetry 里的 500ms 重试拖慢测试。
-  const 原发送语音 = bridge.sendRecordWithRetry
-  bridge.sendRecordWithRetry = async () => { throw new Error('模拟语音发送失败') }
-
-  await bridge.deliverAssistantTurn(会话, '块外 [QQ][语音]晚安，主人[/语音][/QQ] 块外')
-  assert.equal(outbox.pending(), 1)
-  const 条 = outbox.list()[0]
-  assert.equal(条.segments[0].type, 'record_text')
-  assert.equal(条.segments[0].data.text, '晚安，主人')
-  const 盘 = JSON.parse(readFileSync(join(dir, 'fish-message-outbox.json'), 'utf8'))
-  assert.ok(!JSON.stringify(盘).includes('base64'), '队列里不能存音频字节')
-
-  // 恢复：重新合成 + 真正发送。
-  bridge.sendRecordWithRetry = 原发送语音
-  transport.fail = false
-  const 结果 = await bridge.flushOutbox('test-voice', { force: true })
-  assert.equal(结果.sent, 1)
-  assert.equal(voice.合成次数, 2, '入队时合成一次，补发时再合成一次')
-  assert.equal(transport.sent.at(-1).segments[0].type, 'record')
-  assert.equal(outbox.pending(), 0)
+  const 结果 = await bridge.deliverAssistantTurn(会话, '块外 [QQ][语音]晚安，主人[/语音][/QQ] 块外')
+  assert.equal(结果.code, 'tts_moved_to_ops')
+  assert.equal(outbox.pending(), 0, '没有合成结果，也没有可补发的语音文本')
+  assert.equal(transport.sent.length, 0)
   await bridge.stop()
 })
 

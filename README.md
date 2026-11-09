@@ -1,11 +1,14 @@
-﻿# dsh-fish-message
+# dsh-fish-message
 
-DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，支持文字、图片、语音、表情包、离线补投、转义标记和持久化出站队列。设置页/诊断走本地 HTTP 路由，程序调用走 `fish.message` Cordis 服务。
+DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，支持文字、图片、语音文件、表情包、离线补投、转义标记和持久化出站队列。设置页/诊断走本地 HTTP 路由，程序调用走 `fish.message` Cordis 服务。
+
+> **职责边界：鱼讯只做 QQ 传输。** 入站语音只落盘、把本地路径和时长递给会话；出站只发已有音频文件。
+> 语音识别 / 合成在 `dsh-fish-ops`（调 `fish.service` 的 ASR / TTS，再经 `fish.message` 发回 QQ）。
 
 - 插件名：`dsh-fish-message`
 - 版本：`0.1.0`
 - 传输：NapCat / OneBot 11（WebSocket 优先，HTTP 轮询兜底）
-- 本地 AI：`127.0.0.1:7880` 的 `/asr`、`/tts`、`/media/to_wav`
+- 语音能力：**无内置 ASR/TTS**；`[语音:路径]` 发文件，`[语音]文字[/语音]` 会返回 `tts_moved_to_ops`
 - 代码目录：`E:\dsh-fish-message`
 - 家目录文件：`<DSH 家目录>\fish-message-*`（默认 `C:\Users\Administrator\.dsh`）
 
@@ -15,8 +18,8 @@ DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，�
 
 ## 1. 它解决的三个老问题
 
-1. **能发语音**：旧桥只有入站语音转写，没有出站 `record` 段。本插件支持
-   `[语音]文字[/语音]` 调本地 TTS 发语音条，也支持 `[语音:路径]` 直接发已有音频。
+1. **能发语音**：支持 `[语音:路径]` 直接发已有音频；「合成 + 发送」用 `dsh-fish-ops`
+   的 `fish_say_and_send`（鱼讯只负责 record 段的传输）。
 2. **消息不漏**：旧桥只看「上次时间」，机器人/DSH 没启动期间收到的消息不会补。
    本插件给每个私聊维护 `last_message_id` / `last_timestamp` 水位，并持久化到状态文件；
    启动、WS 重连、定时器、HTTP 轮询都会从历史补齐，按时间升序、按 `message_id` 去重。
@@ -41,7 +44,7 @@ E:\dsh-fish-message
 │  ├─ storage.js           # 水位 / 已处理 id / 统计 / 最近事件
 │  ├─ outbox.js            # 持久化出站队列：去重 / FIFO / 退避 / TTL
 │  ├─ queue.js             # 每个聊天的乱序缓冲队列
-│  ├─ voice.js             # ASR / TTS / to_wav / 图片落盘
+│  ├─ voice.js             # 入站语音 get_record/落盘/时长、图片落盘（无 ASR/TTS）
 │  ├─ delivery.js          # agent.followup + 图片附件
 │  ├─ stickers.js          # 表情库：索引、sha256 去重、标签、搜索、导入、清理
 │  ├─ sticker-routes.js    # /stickers HTTP 路由（multipart、取图防穿越）
@@ -128,14 +131,6 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 | `wsUrl` | 自动推导 | http→ws，https→wss |
 | `bindings` | `[]` | `[{ qq, session, name, enabled }]`，v1 只支持私聊 |
 | `onlyInsideMarkers` | `true` | 只发 `[QQ]…[/QQ]` 块内 |
-| `transcriptionEnabled` | `true` | 入站语音调本地 `/asr` |
-| `asrBaseUrl` | `http://127.0.0.1:7880` | 本地 ASR 根地址 |
-| `asrCommand` | 空 | 留空走本地 `/asr`；填了走外部命令，必须包含 `{file}` |
-| `asrTimeoutMs` | `180000` | 转写超时（首次加载模型可能 1 分钟以上） |
-| `ttsEnabled` | `true` | 出站 `[语音]` 调本地 `/tts` |
-| `ttsBaseUrl` | `http://127.0.0.1:7880` | 本地 TTS 根地址 |
-| `ttsVoice` | `dafeiyu` | 音色名 |
-| `ttsTimeoutMs` | `180000` | 合成超时（首次加载模型可能 1 分钟以上） |
 | `backfillWindowHours` | `24` | 补投窗口；超过只发摘要 |
 | `outboxTtlHours` | `24` | 出站队列 TTL；过期丢弃并记统计 |
 | `outboxDedupMinutes` | `10` | 相同 fingerprint 去重窗口 |
@@ -154,7 +149,12 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 | `logLevel` | `info` | `debug` / `info` / `warn` / `error` |
 
 旧桥配置会在第一次启动时被读取并迁移到内存（`NapCat`、`绑定`、`只发标记内`、
-`语音转写`、`轮询间隔毫秒` 等）。保存设置后才会写新的 `fish-message-config.json`。
+`轮询间隔毫秒` 等）。保存设置后才会写新的 `fish-message-config.json`。
+
+**已移除的 ASR/TTS 字段**：`transcriptionEnabled`、`asrBaseUrl`、`asrCommand`、
+`asrTimeoutMs`、`ttsEnabled`、`ttsBaseUrl`、`ttsVoice`、`ttsTimeoutMs`。
+旧配置里残留这些键时：加载**直接忽略、不报错**，并静默把落盘文件里的这些键清掉
+（配置文件本身保留，不删用户文件）。设置页也不再显示对应区块。
 
 ---
 
@@ -184,13 +184,15 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 ```text
 [图片:C:\pics\a.png]
 [图片:https://example.com/a.png]
-[语音]晚安，主人[/语音]
 [语音:C:\audio\a.wav]
 [文件:D:\docs\a.pdf]
 [表情:打哈欠]
 [表情:#睡觉]
 [表情:3b23f496681f]
 ```
+
+> `[语音]文字[/语音]` 已不再合成：遇到时鱼讯不发消息，只返回
+> `code: 'tts_moved_to_ops'`，提示改用 ops 的 `fish_say_and_send` / `fish_say_voice`。
 
 表情指令支持名字、`#标签`、id，大小写不敏感；一次可以写多个。找不到时会在会话里明确提示
 （不会静默跳过），名字以设置页「表情包」里显示的文件名/标签为准。
@@ -202,26 +204,28 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 
 ## 6. 语音
 
+> 鱼讯只做传输：不识别、不合成。识别/合成见 `dsh-fish-ops` 的
+> `fish_say_and_send`、`fish_voice_reply`、`fish_say_voice`、`fish_voice_note_analyze`。
+
 ### 入站
 
 1. 收到 `record` 段；
 2. 调 OneBot `get_record(file, out_format=wav)` 拿 wav；失败则下载 `url` / 解 `base64://`；
-3. 原文件保存到 `<家目录>\fish-message-inbox\`（保留给声纹登记）；
-4. 非 wav 时调本地 `/media/to_wav` 转 16k 单声道 wav；
-5. 调 `/asr?speaker=1`，把 `（语音｜声纹：主人）转写文字` 递进会话。
+3. 原文件保存到 `<家目录>\fish-message-inbox\`；
+4. 从 wav 头读时长（读不到就不显示秒数）；
+5. 把 `（语音：<绝对路径>，N 秒）` 递进会话——**不转写、不带声纹、不调 7880**。
 
-如果 ASR 失败，消息不会丢：会变成 `[语音（转写失败：…）]`，错误同时进日志/状态。
+落盘失败时消息不丢：会变成 `[语音（保存失败：…）]`，错误同时进日志/状态。
 
 ### 出站
 
 ```text
-[QQ][语音]晚安，主人[/语音][/QQ]
 [QQ][语音:C:\audio\a.wav][/QQ]
 ```
 
 发送顺序：本地绝对路径（正斜杠）→ `file:///` → `base64://`，失败自动重试，最多 3 次。
-仍失败时：合成语音的文字会进持久化出站队列（`record_text`），恢复后重新合成；
-`[语音:路径]` 只存路径，补发时文件不存在会丢弃并记错。不会把音频字节写进队列。
+仍失败时只存路径入队，补发时文件不存在会丢弃并记错；不会把音频字节写进队列。
+`[语音]文字[/语音]` 不再合成，返回 `tts_moved_to_ops`（见第 5 节）。
 
 ---
 
@@ -270,7 +274,7 @@ WS 连接、WS 重连、每 60 秒、HTTP 轮询都会触发这个同步；同�
 默认 TTL 24 小时、单条最多 20 次、最多 1000 条（超出丢最旧）。
 
 去重：`fingerprint = sha256(qq + 规范化 segments)`，默认 10 分钟内相同内容只留一条。
-语音文本存文字、补发时重新合成；音频/图片/文件只存路径，失效直接丢弃并报错。
+语音只存已有文件路径、补发时不合成；音频/图片/文件路径失效直接丢弃并报错。
 
 设置页「出站队列」显示「积压 N 条 / 最老 X 秒」，可「立即补发」「清空」。
 更细的状态机见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#44-持久化出站队列)。
@@ -372,7 +376,6 @@ fish-message-stickers/
 | GET | `/dsh-fish-message/health` | 轻量健康检查，桥在跑返回 200 |
 | POST | `/dsh-fish-message/save` | 保存配置（设置页用） |
 | POST | `/dsh-fish-message/test-send` | 发一条固定测试文字 |
-| POST | `/dsh-fish-message/test-voice` | 合成并发送一条测试语音 |
 | GET | `/dsh-fish-message/logs` | 最近 200 行日志 |
 | GET | `/dsh-fish-message/outbox?limit=` | 出站队列列表 + 统计 |
 | POST | `/dsh-fish-message/outbox/flush` | 立即补发 |
@@ -410,14 +413,14 @@ npm test
 测试不需要连 QQ，也不需要 DSH：
 
 - `tests/format.test.js`：块、转义、多个块、未闭合、代码块、显式指令；
-- `tests/core.test.js`：补投排序/去重、水位持久化、窗口摘要、WS 乱序、出站、语音重试；
-- `tests/outbox.test.js`：出站队列落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、离线入队→恢复补发、语音文本重合成、路径失效丢弃；
+- `tests/core.test.js`：补投排序/去重、水位持久化、窗口摘要、WS 乱序、出站、语音重试、入站语音只落盘、`tts_moved_to_ops`、旧配置清理；
+- `tests/outbox.test.js`：出站队列落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、离线入队→恢复补发、路径失效丢弃；
 - `tests/integration.test.js`：Node 内起 mock OneBot HTTP + WS，验证收/发/补投/轮询/重启；
 - `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站；
 - `tests/stickers.test.js`：入库/去重/搜索/改名/删除/bump/上限/导入/GIF 保留/服务门面/工具/Bridge 指令；
 - `tests/stickers-route.test.js`：`/stickers` 参数校验、multipart、发送、取图穿越防护、导入、清理。
 
-当前共 85 项，全部离线（不需要 QQ / DSH / 本地 AI）。
+当前共 93 项，全部离线（不需要 QQ / DSH / 本地 AI）。
 
 ---
 
@@ -430,10 +433,11 @@ npm test
 ```js
 const message = ctx.get('fish.message')
 message.apiVersion        // '0.1'
-message.capabilities()    // {sendText,sendImage,sendRecord,sendFile,fetchHistory,stickers:true,transcribe:{text:false,speaker:false}}
+message.capabilities()    // {sendText,sendImage,sendRecord,sendRecordFile,sendFile,fetchHistory,stickers:true,transcribe:{text:false,speaker:false}}
 await message.sendText(qq, text)          // {ok, sent, queued, pending, id?}
 await message.sendImage(qq, absolutePath) // {ok, sent, queued, pending, id?}
 await message.sendRecord(qq, absolutePath)
+await message.sendRecordFile(qq, absolutePath) // 等价别名：发已有音频文件（不合成）
 await message.sendFile(qq, absolutePath, name?)
 await message.fetchHistory(qq, { count, beforeMessageId }) // OneBot 原始消息数组
 await message.latestVoice(qq, { messageId?, count? })      // {ok, filePath, messageId, time?, sender?}
@@ -454,7 +458,8 @@ message.health()          // 不触发网络的本地诊断
 - 失败抛 `FishMessageError`（`code` 以 `fish_message_` 开头，带 `hint`/`detail`），
   不抛裸字符串；`toPublic()` 可直接得到工具层失败包；
 - **不返回 base64、不返回令牌**；`getConfig()` 里 `napcatToken` 只会是 `***已设置***` 或空串；
-- 语音转写能力在 fish-service，这里 `capabilities().transcribe` 固定为 `false`；
+- 语音识别/合成能力在 fish-service（由 dsh-fish-ops 编排），这里 `capabilities().transcribe` 固定为 `false`；
+- `sendRecord` / `sendRecordFile` 只发本机已有音频文件，不做任何合成；
 - `latestVoice` 只能看到「最近 N 条」历史（默认 50，上限 100），指定 `messageId` 时如果不在窗口内会明确报
   `fish_message_message_not_found`，不会悄悄换一条。
 
@@ -491,13 +496,12 @@ Agent 工具（`ctx.tools.register`，与 dsh-fish-service 同一套写法）：
 
 - v1 **只做私聊**；群聊、其它 IM 只留 `Transport` 接口和文档，不实现。
 - `[文件:…]` 是否可用取决于 NapCat 版本/权限；不可用会明确报错。
-- 出站语音是「TTS 或已有文件」，不做变声、不做自动长文本切分；QQ 语音条有时长上限。
-- TTS 失败时文字会进补发队列，恢复后重新合成；如果 TTS 一直不可用，该条会在 20 次尝试或 24 小时后丢弃并记日志。
+- 出站语音只发已有文件，不做变声、不做自动长文本切分；合成请用 `dsh-fish-ops` 的 `fish_say_and_send`。
+- `[语音]文字[/语音]` 已停用：返回 `tts_moved_to_ops`，不会入队、不会静默换成文字发送。
 - 出站队列的单条失败会阻塞后面的积压（严格保序）；正常发送在失败后立刻释放锁，不会被永久卡死。
 - 严格保序的代价：积压里有一条长期失败时，新消息会先入队等它重试/丢弃，而不是插队先发。
 - 补发是「至少一次」语义：发送成功但删除队列条目前进程被杀，重启后可能重发一次（极小窗口）。
-- 首次 `/tts` 要加载模型，实测可能 70 秒左右；默认超时 180 秒。
-- 入站语音的声纹名来自本地 `/asr`；未登记的人会显示 `未知-N`。
+- 入站语音只给路径和时长；识别/声纹请用 `fish_voice_note_analyze`（ops）。
 - 水位之前的旧历史会被静默标记为已处理，不会补投（避免刚装好就灌几年历史）。
 - 插件只监听绑定会话的 assistant 消息；群聊和未绑定会话不会外发。
 - `fish.message` 的 `latestVoice` 只按「最近 N 条」历史找语音（默认 50，上限 100），

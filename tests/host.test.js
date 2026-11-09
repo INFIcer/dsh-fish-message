@@ -73,6 +73,10 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(状态.bindings.length, 1)
   assert.equal(状态.bindings[0].qq, QQ)
   assert.equal(状态.sessions[0].title, '宿主测试')
+  // 内置 ASR/TTS 已移除：设置页不再有这些字段，也没有 test-voice 路由。
+  assert.equal('ttsEnabled' in 状态.config, false)
+  assert.equal('transcriptionEnabled' in 状态.config, false)
+  assert.equal(routes.has('/dsh-fish-message/test-voice'), false)
 
   const 健康响应 = 假响应()
   await routes.get('/dsh-fish-message/health')({}, 健康响应)

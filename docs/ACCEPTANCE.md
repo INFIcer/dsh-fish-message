@@ -116,7 +116,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 ---
 
-## 4. 入站语音转写
+## 4. 入站语音（只落盘，不转写）
 
 用主人 QQ 发一条 2–5 秒语音，说：
 
@@ -124,28 +124,30 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 这是语音验收。
 ```
 
-期望 DSH 会话收到类似：
+期望 DSH 会话收到的是**路径 + 时长**，不是文字：
 
 ```text
-（语音｜声纹：主人）这是语音验收。
+（语音：C:\Users\<你>\.dsh\fish-message-inbox\qq-voice-xxx.wav，3.2 秒）
 ```
 
 同时：
 
-- `<家目录>\fish-message-inbox\qq-voice-*.wav` 有原文件；
-- `state.bridge.stats.lastError` 为空；
-- 如果声纹没登记，会显示 `（语音｜声纹：未知-1）…`，文字仍应正确。
+- `<家目录>\fish-message-inbox\qq-voice-*` 有原文件；
+- 日志里**没有** `/asr`、没有声纹相关记录；
+- 想验证「不调网络」：断掉本地 AI 服务（7880）再发一条，这条消息仍应正常落到会话；
+- 时长读不出来时只显示 `（语音：<路径>）`，不影响消息投递。
 
-如果失败：
+需要识别 / 声纹时用 ops：
 
-```powershell
-Invoke-RestMethod 'http://127.0.0.1:7880/asr/status' | ConvertTo-Json -Depth 4
-Get-Content "$env:USERPROFILE\.dsh\fish-message.log" -Tail 80
+```text
+fish_voice_note_analyze(qq="<主人QQ>")
 ```
 
 ---
 
 ## 5. 出站语音
+
+### 5.1 `[语音]文字[/语音]`：应被拒绝（TTS 已移走）
 
 在 DSH 会话里发：
 
@@ -155,17 +157,34 @@ Get-Content "$env:USERPROFILE\.dsh\fish-message.log" -Tail 80
 
 期望：
 
+- **QQ 什么也收不到**（不合成、不发文字、不发语音）；
+- 日志/状态里能看到 `code: 'tts_moved_to_ops'`，提示改用 `fish_say_and_send`；
+- `fish-message.log` 有对应 warn，不产生新的出站队列条目。
+
+### 5.2 合成并发送（现在走 ops）
+
+在 DSH 里调：
+
+```text
+fish_say_and_send(text="【验收 3】这是 DSH 发出来的语音。")
+```
+
+期望：
+
 - QQ 收到一条语音条，点开是 TTS 声音；
-- 不是文件，不是文字；
-- `fish-message.log` 有「已发语音到 QQ」；
-- 第一次可能等 30–70 秒（TTS 模型加载），设置页显示「正在合成…」是正常的。
+- 返回 `{ok:true, wavPath, qq, sent|queued, pending}`；
+- 失败时按 `fish.message` 的出站队列语义入队（`queued:true`）。
 
-失败时：
+### 5.3 `[语音:路径]`：照常发已有音频
 
-- 会话里会出现 `（dsh-fish-message）语音发送失败：…`；
-- 看 `state.bridge.stats.lastError`；
-- 确认 `/voices` 里有 `dafeiyu`：
-  `Invoke-RestMethod 'http://127.0.0.1:7880/voices' | ConvertTo-Json -Depth 5`。
+先在会话里拿到一个存在的 wav 路径，再发：
+
+```text
+[QQ][语音:D:\audio\a.wav][/QQ]
+```
+
+- QQ 收到语音条；
+- 文件不存在时该条入队，补发时判死并记「语音文件不存在」。
 
 ---
 
@@ -265,16 +284,20 @@ Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/outbox/flush" | Conv
 
 日志里应出现：`补发成功（积压 N 条，延迟 X 秒）`。
 
-### 9.2 语音文本重合成
+### 9.2 语音（已解耦，不再有 test-voice）
+
+鱼讯不再提供 `/dsh-fish-message/test-voice`，也没有 `record_text` 补发。
+验证解耦：
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/test-voice" `
-  -ContentType 'application/json' -Body '{}'
+# 1) 设置页「鱼讯」里应看不到「入站语音转写 / 出站语音合成 / TTS 地址 / ASR 地址」等区块
+# 2) 旧 config.json 里如果残留 ttsVoice 等键，加载后会被静默清掉（文件仍在）
+Get-Content "$env:USERPROFILE\.dsh\fish-message-config.json" -Raw
+# 3) 发一条语音：会话应收到「（语音：<路径>，N 秒）」
 ```
 
-断网时期望：`queued=true`；`fish-message-outbox.json` 里该条是
-`record_text`（文字），没有 base64 音频；恢复后补发会重新调 `/tts`。
-注意：同样文案 10 分钟内会被去重；重复验收前先清空队列或等过去重窗口。
+`[语音]文字[/语音]` 现在返回 `tts_moved_to_ops`，不会入队；要发合成语音请用
+`fish_say_and_send`。
 
 ### 9.3 设置页
 
@@ -321,21 +344,23 @@ notepad "$profileDir\package.json"
 
 ### 已做（不依赖 DSH 重载）
 
-- 全部 46 项单测 + mock 集成测试通过（新增出站队列 12 项）；
+- 全部 93 项单测 + mock 集成测试通过；
 - 出站队列：落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、
-  离线入队→恢复补发、语音文本重合成、路径失效丢弃、队列接口；
+  离线入队→恢复补发、路径失效丢弃、队列接口；
+- 解耦：入站语音只落盘并递路径（有 fetch 调用计数断言）、`[语音]文字` 返回
+  `tts_moved_to_ops` 且不发消息、`[语音:路径]` 照常发、旧 ASR/TTS 配置字段被静默清理；
 - 真实 NapCat `send_private_msg` 文字 1 条，已回读历史确认；
-- 真实 `/tts` 合成 `dafeiyu` 语音，真实 `record` 段发送 1 条，已回读历史确认；
-- 真实 `get_record` 拿到 wav，真实 `/asr?speaker=1` 转写回 `这是一条测试语音。`；
 - 真实 NapCat 的 `get_friend_msg_history`、`get_login_info` 均验证。
 
 ### 留给父 agent（需要重启 DSH / 用主人 QQ 发消息）
 
-- 把插件装进 profile 并重启 DSH（本 agent 在 DSH 内，不能自己杀自己）；
-- 按第 9 节做「出站队列断网→恢复补发」「语音文本重合成」真机验收；
+- 重启 DSH，确认设置页「鱼讯」里 ASR/TTS 区块消失；
+- 按第 9 节做「出站队列断网→恢复补发」真机验收；
 - 主人 QQ → DSH 文字；
-- 主人 QQ → DSH 语音（声纹名）；
-- DSH → QQ `[语音]…[/语音]`；
+- 主人 QQ → DSH 语音：会话应收到「语音：路径」而不是转写；
+- DSH 里调 `fish_say_and_send` → QQ 真收到语音；
+- DSH → QQ `[语音]文字[/语音]` → 返回 `tts_moved_to_ops`，QQ 无消息；
+- DSH → QQ `[语音:路径]` → 收到语音条；
 - DSH → QQ 字面量 `[/QQ]`；
 - 停 NapCat → 主人发 2 条 → 启动 NapCat → 补投；
 - 可选：图片双向、`[文件:…]`。

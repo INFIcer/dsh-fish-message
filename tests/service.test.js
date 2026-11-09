@@ -86,6 +86,7 @@ test('apiVersion 与 capabilities 与契约一致', () => {
     sendText: true,
     sendImage: true,
     sendRecord: true,
+    sendRecordFile: true,
     sendFile: true,
     fetchHistory: true,
     stickers: true,
@@ -135,8 +136,12 @@ test('sendImage / sendRecord / sendFile 校验路径并走 sendOutbound', async 
   await api.sendRecord(QQ, 音)
   assert.deepEqual(桥.调用[1][2], [{ type: 'record', data: { path: 音 } }])
 
+  // sendRecordFile 是 sendRecord 的等价别名：同一路径校验、同一 record 段。
+  await api.sendRecordFile(QQ, 音)
+  assert.deepEqual(桥.调用[2][2], [{ type: 'record', data: { path: 音 } }])
+
   await api.sendFile(QQ, 文)
-  assert.deepEqual(桥.调用[2][2], [{ type: 'file', data: { path: 文, name: basename(文) } }])
+  assert.deepEqual(桥.调用[3][2], [{ type: 'file', data: { path: 文, name: basename(文) } }])
 
   await assert.rejects(() => api.sendImage(QQ, join(tmpdir(), '不存在.png')), (error) => {
     assert.equal(error.code, 'fish_message_bad_request')

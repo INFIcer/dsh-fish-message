@@ -479,14 +479,6 @@ window.__ModuleLoader__.load({
         else if (r.queued) 设说(`QQ 现在发不出去，测试文字已进补发队列（积压 ${r.pending ?? '?'} 条），恢复后会自动补发。`)
         else 设说(`已发到 QQ ${r.qq}`)
       }
-      const 测试语音 = async () => {
-        设忙(true); 设说('正在合成并发送测试语音（第一次加载模型可能要几十秒）…')
-        const r = await post('/test-voice', {})
-        设忙(false)
-        if (!r || !r.ok) 设说('测试失败：' + String((r && r.error) || '未知错误'))
-        else if (r.queued) 设说(`语音已合成，但 QQ 现在发不出去；已把文字放进补发队列（积压 ${r.pending ?? '?'} 条）。`)
-        else 设说(`测试语音已发到 QQ ${r.qq}`)
-      }
       const 立即补发 = async () => {
         设忙(true); 设说('正在补发出站队列…')
         const r = await post('/outbox/flush', {})
@@ -561,16 +553,9 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '收发行为'),
         行('只发 [QQ]…[/QQ] 块内', 开关(配置.onlyInsideMarkers, (v) => 改('onlyInsideMarkers', v)),
           '关掉后整条回复都发，但标记本身会剥掉；转义规则见 docs/FORMAT.md。'),
-        行('入站语音转写', 开关(配置.transcriptionEnabled, (v) => 改('transcriptionEnabled', v)),
-          'record 段 → 本地 /asr?speaker=1，文字和声纹名一起递进会话。'),
-        行('出站语音合成', 开关(配置.ttsEnabled, (v) => 改('ttsEnabled', v)),
-          '只对 [语音]…[/语音] 生效；[语音:路径] 直接发已有音频。'),
-        行('TTS 地址', 输入(配置.ttsBaseUrl, (v) => 改('ttsBaseUrl', v), 'http://127.0.0.1:7880')),
-        行('TTS 音色', 输入(配置.ttsVoice, (v) => 改('ttsVoice', v), 'dafeiyu'),
-          '本机 voices 目录里的名字；默认 dafeiyu。'),
-        行('ASR 地址', 输入(配置.asrBaseUrl, (v) => 改('asrBaseUrl', v), 'http://127.0.0.1:7880')),
-        行('外部转写命令', 输入(配置.asrCommand, (v) => 改('asrCommand', v), '留空 = 走本地 /asr'),
-          '高级用法：命令里必须带 {file}，例如 python asr.py "{file}"。'))
+        h('div', { style: S.hint },
+          '语音识别 / 合成已移到「鱼操作集」（dsh-fish-ops）：fish_say_and_send / fish_voice_reply / fish_voice_note_analyze。'
+          + '鱼讯只负责 QQ 传输——入站语音落盘后把「语音：路径」递给会话，出站只发 [语音:路径] 已有文件。'))
 
       const 补投页 = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '补投与轮询'),
@@ -630,7 +615,6 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' } },
           h('button', { type: 'button', style: S.btnOn, onClick: 存, disabled: 忙 }, 忙 ? '处理中…' : '保存设置'),
           h('button', { type: 'button', style: S.btn, onClick: 测试文字, disabled: 忙 }, '发测试文字'),
-          h('button', { type: 'button', style: S.btn, onClick: 测试语音, disabled: 忙 }, '发测试语音'),
           h('button', { type: 'button', style: S.btn, onClick: 拉, disabled: 忙 }, '刷新')),
         说 ? h('div', { style: 说.includes('失败') ? S.danger : S.ok }, 说) : null,
         h('div', { style: { ...S.h, marginTop: 14 } }, '最近日志（200 行）'),
