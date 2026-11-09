@@ -37,7 +37,6 @@ E:\dsh-fish-message
 │  ├─ host.js              # 宿主入口：组装、路由、session/event 监听
 │  ├─ bridge.js            # 收/发核心：队列、去重、水位、补投、出站
 │  ├─ format.js            # [QQ] 块、反斜杠转义、显式图片/语音/文件指令
-│  ├─ merge.js             # 出站合并窗口：段落去重、文本指纹（纯函数）
 │  ├─ config.js            # 默认配置、旧桥迁移、范围钳制、schemastery schema
 │  ├─ storage.js           # 水位 / 已处理 id / 统计 / 最近事件
 │  ├─ outbox.js            # 持久化出站队列：去重 / FIFO / 退避 / TTL
@@ -141,7 +140,6 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 | `pollIntervalMs` | `2000` | WS 不可用时的 HTTP 轮询间隔 |
 | `historyIntervalMs` | `60000` | 即使 WS 连着也定期拉历史兜底 |
 | `reorderBufferMs` | `1500` | 乱序缓冲 |
-| `mergeWindowMs` | `1200` | 出站合并窗口（300~5000 毫秒）：`turn/end` 后等这么久再发，窗口内的后半段并成一条 |
 | `historyCount` | `100` | 每次拉多少条历史 |
 | `maxImageMB` | `10` | 图片上限 |
 | `maxVoiceMB` | `20` | 语音上限（base64 兜底也受它限制） |
@@ -264,26 +262,6 @@ WS 连接、WS 重连、每 60 秒、HTTP 轮询都会触发这个同步；同�
 设置页「出站队列」显示「积压 N 条 / 最老 X 秒」，可「立即补发」「清空」。
 更细的状态机见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#44-持久化出站队列)。
 
-### 出站合并窗口（防重复发送）
-
-DSH 对同一轮回复可能按内容块多次触发 `session/event`（`assistant/message` 与
-`turn/end` 成对或多对）。如果每个 `turn/end` 都立刻发，同一轮的后半段就会被当成
-「下一轮」再发一遍，QQ 里看到的就是「完整回复 + 后半段」这种重复。
-
-现在 `turn/end` 不立刻发，而是先放进**每个 QQ 一条**的待发缓冲：
-
-1. 等 `mergeWindowMs`（默认 1200ms，可配 300~5000）再统一发；
-2. 窗口内又来了新的 `turn/end` / assistant 正文，就并进缓冲并重置计时器
-   （最多续 5 次，避免一直有新事件导致永远不发）；
-3. 合并按段落（`\n\s*\n`，没有空行就按换行）切分，保留首次出现顺序、完全相同段落去重；
-   如果新文本只是已缓冲文本的子串/后缀（典型：后半段又到了一次），只保留更完整的那份；
-4. 合并结果在发送前**再走一遍** `extractOutbound`，`[QQ]` 标记和转义语义不变；
-5. 发送级兜底：每个 QQ 记最近一次发送的文字指纹，60 秒内「完全相同」或
-   「是上次内容的子串/后缀（≥ 8 字）」就跳过，并记一行 `跳过重复发送` 日志。
-
-合并日志形如：`合并 3 段 → 发出 164 字（跳过重复 2 段）`；窗口内每个会话事件在
-`debug` 级别记 `type / turn / 文本前 40 字`，日志文件 `<DSH 家目录>\fish-message.log`。
-
 ---
 
 ## 9. HTTP 接口和日志
@@ -322,12 +300,11 @@ npm test
 
 - `tests/format.test.js`：块、转义、多个块、未闭合、代码块、显式指令；
 - `tests/core.test.js`：补投排序/去重、水位持久化、窗口摘要、WS 乱序、出站、语音重试；
-- `tests/merge.test.js`：出站合并窗口（完整+后半段只发一条、3 段合并、窗口重置、`mergeWindowMs` 生效）、发送指纹去重、合并后 `[QQ]`/转义解析；
 - `tests/outbox.test.js`：出站队列落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、离线入队→恢复补发、语音文本重合成、路径失效丢弃；
 - `tests/integration.test.js`：Node 内起 mock OneBot HTTP + WS，验证收/发/补投/轮询/重启；
 - `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站。
 
-当前共 54 项，全部离线。
+当前共 46 项，全部离线。
 
 ---
 
