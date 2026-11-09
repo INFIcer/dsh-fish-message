@@ -18,7 +18,7 @@ Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
    ├─ 转写：record → VoiceService → 本地 /asr
    ├─ 图片：image → inbox → DSH 附件
-   └─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
+   └─ 出站：session/event → 合并窗口（mergeWindowMs）→ [QQ] 解析 → 发送锁 → text / image / record / file
         └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
    │
    ▼
@@ -50,6 +50,7 @@ VoiceService ── POST /asr?speaker=1       （multipart）
 | `lib/transport/base.js` | 适配器接口定义 | 不实现协议 |
 | `lib/transport/napcat-onebot.js` | OneBot HTTP/WS、断线重连、历史 | 不做业务去重 |
 | `lib/format.js` | `[QQ]` 块、转义、显式指令 | 不发送 |
+| `lib/merge.js` | 出站文本合并、段落去重、发送指纹 | 不发送、不碰定时器 |
 | `lib/queue.js` | 每个聊天的乱序缓冲 | 不做持久化 |
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
 | `lib/voice.js` | ASR / TTS / to_wav / 图片落盘 | 不改 7880 服务 |
@@ -149,15 +150,32 @@ image / mface 段
 
 ## 4. 出站流程
 
-### 4.1 触发
+### 4.1 触发与合并窗口
 
 `host.js` 监听 `session/event`：
 
-- `assistant/message`：记这一轮最后一段 assistant 正文和图片块；
-- `turn/end` 且 `reason.kind === 'completed'`：如果这一轮属于绑定会话，调用
-  `bridge.deliverAssistantTurn`。
+- `assistant/message`：记这一轮最后一段 assistant 正文和图片块（同一 turn 的多次
+  assistant 事件按合并规则累加，不覆盖）；
+- `turn/end` 且 `reason.kind === 'completed'`：如果这一轮属于绑定会话，**不立刻发送**，
+  先把文本/图片放进该 QQ 的待发缓冲（`Bridge.合并缓冲`）。
 
-按「会话 key + turn」去重，同一轮不会发两次。被中断（`interrupted`）的轮不发送。
+合并窗口（`mergeWindowMs`，默认 1200ms，范围 300~5000）：
+
+- 窗口到点才统一调 `冲刷合并` → `extractOutbound` → `deliverAssistantTurn`；
+- 窗口内又来了同一 binding 的 `turn/end` / assistant 正文 → 并入缓冲并重置计时器，
+  最多续 5 次（`合并最多续次`），避免一直有新事件导致永远不发；
+- 合并规则见 `lib/merge.js`：按段落切分、保留首次出现顺序、完全重复段落去重；
+  新文本是已缓冲文本的子串/后缀时只保留更完整的那份；比较时会先剥掉未转义的
+  `[QQ]`/`[/QQ]` 标记再比内容，所以标记位置不同也不会漏去重；
+- `stop()`（例如保存设置触发 stop → start）前会把窗口里剩余的回复立刻冲刷掉，避免吞消息。
+
+发送级兜底：`deliverAssistantTurn` 在真正发送前认领该 binding 的发送指纹
+（`sha256(文本)` + 时间），60 秒内与最近一次发送完全相同、或本次是它的子串/后缀
+（长度 ≥ 8）就跳过并记 `跳过重复发送`。同一 binding 的发送仍复用发送锁串行化。
+
+被中断（`interrupted`）的轮不发送。诊断日志：窗口内每个 `session/event` 在 `debug`
+级别记 `type / turn / 文本前 40 字`；合并发送时 `info` 记
+`合并 N 段 → 发出 X 字（跳过重复 Y 段）`。
 
 ### 4.2 解析
 

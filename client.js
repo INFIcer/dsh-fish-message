@@ -264,6 +264,10 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '收发行为'),
         行('只发 [QQ]…[/QQ] 块内', 开关(配置.onlyInsideMarkers, (v) => 改('onlyInsideMarkers', v)),
           '关掉后整条回复都发，但标记本身会剥掉；转义规则见 docs/FORMAT.md。'),
+        行('出站合并窗口（毫秒）', h('input', {
+          style: S.small, type: 'number', min: 300, max: 5000, value: 配置.mergeWindowMs ?? 1200,
+          onChange: (e) => 改('mergeWindowMs', Number(e.target.value)),
+        }), 'turn/end 后等这么久再发；DSH 同一轮多触发几次时，后半段会并成一条，不会重复发。'),
         行('入站语音转写', 开关(配置.transcriptionEnabled, (v) => 改('transcriptionEnabled', v)),
           'record 段 → 本地 /asr?speaker=1，文字和声纹名一起递进会话。'),
         行('出站语音合成', 开关(配置.ttsEnabled, (v) => 改('ttsEnabled', v)),
