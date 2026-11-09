@@ -304,11 +304,49 @@ npm test
 - `tests/integration.test.js`：Node 内起 mock OneBot HTTP + WS，验证收/发/补投/轮询/重启；
 - `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站。
 
-当前共 46 项，全部离线。
+当前共 58 项，全部离线。
 
 ---
 
-## 11. 真机验收与回滚
+## 11. Cordis 服务：`fish.message`
+
+插件加载时通过 `ctx.provide('fish.message', api)` 暴露一个**很薄**的服务门面（`lib/service.js`），
+给 `dsh-fish-ops` 等插件用，不需要它们知道 QQ 号映射、出站队列和补发细节。
+卸载时由 `ctx.effect` 自动注销，服务消失后依赖它的工具会被上层插件摘掉。
+
+```js
+const message = ctx.get('fish.message')
+message.apiVersion        // '0.1'
+message.capabilities()    // {sendText,sendImage,sendRecord,sendFile,fetchHistory,transcribe:{text:false,speaker:false}}
+await message.sendText(qq, text)          // {ok, sent, queued, pending, id?}
+await message.sendImage(qq, absolutePath) // {ok, sent, queued, pending, id?}
+await message.sendRecord(qq, absolutePath)
+await message.sendFile(qq, absolutePath, name?)
+await message.fetchHistory(qq, { count, beforeMessageId }) // OneBot 原始消息数组
+await message.latestVoice(qq, { messageId?, count? })      // {ok, filePath, messageId, time?, sender?}
+message.bindings()        // [{qq, session, name}]
+message.getConfig()       // 只读公开配置（令牌打码）
+message.events            // EventEmitter：received / sent / outbox-flushed
+message.health()          // 不触发网络的本地诊断
+```
+
+约定：
+
+- 发送全部复用 `Bridge`：直发失败自动进持久化出站队列，返回 `queued:true`；**不重复实现发送逻辑**；
+- `fetchHistory` 复用 `Transport`；`latestVoice` 复用 `Transport.fetchHistory` + `VoiceService.recordToFile`；
+- 失败抛 `FishMessageError`（`code` 以 `fish_message_` 开头，带 `hint`/`detail`），
+  不抛裸字符串；`toPublic()` 可直接得到工具层失败包；
+- **不返回 base64、不返回令牌**；`getConfig()` 里 `napcatToken` 只会是 `***已设置***` 或空串；
+- 语音转写能力在 fish-service，这里 `capabilities().transcribe` 固定为 `false`；
+- `latestVoice` 只能看到「最近 N 条」历史（默认 50，上限 100），指定 `messageId` 时如果不在窗口内会明确报
+  `fish_message_message_not_found`，不会悄悄换一条。
+
+测试：`tests/service.test.js` 用 mock Bridge/Transport/VoiceService 覆盖方法转发、参数校验、
+错误传播、服务注册/卸载和 `sent` / `outbox-flushed` 事件。
+
+---
+
+## 12. 真机验收与回滚
 
 真机验收步骤、命令、预期结果见 [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)。
 其中「停掉 NapCat → 发 2 条 → 启动 NapCat → 自动补投」是关键项。
@@ -324,7 +362,7 @@ npm test
 
 ---
 
-## 12. 已知限制 / 风险
+## 13. 已知限制 / 风险
 
 - v1 **只做私聊**；群聊、其它 IM 只留 `Transport` 接口和文档，不实现。
 - `[文件:…]` 是否可用取决于 NapCat 版本/权限；不可用会明确报错。
@@ -337,6 +375,8 @@ npm test
 - 入站语音的声纹名来自本地 `/asr`；未登记的人会显示 `未知-N`。
 - 水位之前的旧历史会被静默标记为已处理，不会补投（避免刚装好就灌几年历史）。
 - 插件只监听绑定会话的 assistant 消息；群聊和未绑定会话不会外发。
+- `fish.message` 的 `latestVoice` 只按「最近 N 条」历史找语音（默认 50，上限 100），
+  更早的语音要先把 `count` 调大或改用文件路径；服务版本仍是 0.x，破坏性改动必须升 `requires`。
 - 2026-11-09 本机实测：`ws://127.0.0.1:3000` 握手超时（NapCat 当前只开了 HTTP），
   插件自动降级为 2 秒 HTTP 轮询，`/state` 里 `transport.mode = "http"`；
   WS 服务一旦在 NapCat 里启用，插件会按指数退避自动连回去。
