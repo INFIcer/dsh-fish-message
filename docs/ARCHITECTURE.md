@@ -28,21 +28,8 @@ Delivery（lib/delivery.js）
 DSH 会话（模型照常开一轮）
 ```
 
-对外还有两层 HTTP API（`lib/api.js`，路由在 `lib/host.js`）：
-
-```text
-底层 API（不解析 [QQ]，不转写/合成）
-  /api/send-text  /api/send-image  /api/send-record  /api/send-file  /api/history
-        │ 直发失败
-        ▼
-     Outbox ── 恢复后 FIFO 补发
-
-高级 API（依赖 asrBaseUrl / ttsBaseUrl，地址留空 = 501）
-  /api/transcribe  /api/synthesize  /api/voice-reply  /api/voice-analyze  /api/capabilities
-        │
-        ▼
-  VoiceService ── /asr  /tts  /media/to_wav
-```
+对外暂不提供编程 API（只保留设置页/诊断用的本地路由）。如果以后需要程序调用，
+再在 Bridge 之上单独加一层，不影响现有收发与出站队列链路。
 
 本地 AI 服务只通过 HTTP 调用，插件不 import 它的代码，也不改它：
 
@@ -67,7 +54,6 @@ VoiceService ── POST /asr?speaker=1       （multipart）
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
 | `lib/voice.js` | ASR / TTS / to_wav / 图片落盘 | 不改 7880 服务 |
 | `lib/outbox.js` | 持久化出站队列：去重、FIFO、退避、TTL、计数 | 不做网络发送 |
-| `lib/api.js` | 底层 API（原样收发）+ 高级 API（ASR/TTS 封装、501/502 映射） | 不拼 `[QQ]` 标记 |
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 
 ---
@@ -202,7 +188,7 @@ extractOutbound(text, onlyInsideMarkers)
 ### 4.4 持久化出站队列
 
 ```text
-正常发送 / 底层 API / voice-reply
+正常发送 / 测试语音 / 补发
         │
         ├─ 成功 ──────────────────────────────► 发到 QQ
         │
@@ -238,7 +224,8 @@ extractOutbound(text, onlyInsideMarkers)
 - 补发失败一条就停，下一轮再试；不会因为积压把正常发送永久卡死（新消息仍会持久化受理，等前面的发完/丢弃后继续）。
 - 队列计数写进 `fish-message-state.json` 的 `stats.outbox*`，`/state` 的 `outbox` 只读汇总。
 
-详细语义和接口见 [`API.md`](API.md#4-持久化出站队列)。
+队列状态机就是本节；`/state` 的 `outbox` 字段和设置页卡片都只是这里的只读汇总。
+对外暂不提供编程 API；将来需要再扩展。
 
 ---
 
@@ -327,5 +314,3 @@ v1 不实现群聊。将来要加群：
 | 补发时音频/图片/文件已不存在 | 直接丢弃该条，报错，不重试 20 次 |
 | 图片下载失败 | 文字里标 `[图片（下载失败）]`，不影响其它段 |
 | 状态文件写失败 | 日志记错；内存继续，重启可能重投（已知风险） |
-| 高级 API 服务地址为空 | 501 `advanced_api_disabled`，带 `missing` |
-| 高级 API 服务超时/不通 | 502 `advanced_api_upstream_error`，带 `detail` |

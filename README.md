@@ -1,6 +1,6 @@
 # dsh-fish-message
 
-DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，支持文字、图片、语音、离线补投、转义标记、持久化出站队列，以及底层/高级两层 HTTP API。
+DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，支持文字、图片、语音、离线补投、转义标记和持久化出站队列。对外 HTTP API 暂不提供，将来需要再扩展。
 
 - 插件名：`dsh-fish-message`
 - 版本：`0.1.0`
@@ -8,13 +8,12 @@ DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，�
 - 本地 AI：`127.0.0.1:7880` 的 `/asr`、`/tts`、`/media/to_wav`
 - 代码目录：`E:\dsh-fish-message`
 - 家目录文件：`<DSH 家目录>\fish-message-*`（默认 `C:\Users\Administrator\.dsh`）
-- 接口文档：[`docs/API.md`](docs/API.md)
 
 > 本插件替换第三方 `dsh-qq-bridge`。两个插件不要同时启用，否则同一条 QQ 消息会被转两次。
 
 ---
 
-## 1. 它解决的四个老问题
+## 1. 它解决的三个老问题
 
 1. **能发语音**：旧桥只有入站语音转写，没有出站 `record` 段。本插件支持
    `[语音]文字[/语音]` 调本地 TTS 发语音条，也支持 `[语音:路径]` 直接发已有音频。
@@ -24,9 +23,6 @@ DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，�
 3. **发不出去也不丢**：DSH 的回复在 QQ 离线/发送失败时写进
    `<家目录>\fish-message-outbox.json`，恢复后按 `createdAt` FIFO 补发；
    相同内容 10 分钟内只留一条，失败指数退避，TTL 24 小时，单条最多试 20 次。
-4. **能被程序调用**：插件内置两层 API。底层 `send-text / send-image / send-record / send-file / history`
-   原样收发、失败入队；高级 `transcribe / synthesize / voice-reply / voice-analyze / capabilities`
-   封装本地 ASR/TTS，地址留空返回 501、服务不通返回 502。
 
 ---
 
@@ -44,7 +40,6 @@ E:\dsh-fish-message
 │  ├─ config.js            # 默认配置、旧桥迁移、范围钳制、schemastery schema
 │  ├─ storage.js           # 水位 / 已处理 id / 统计 / 最近事件
 │  ├─ outbox.js            # 持久化出站队列：去重 / FIFO / 退避 / TTL
-│  ├─ api.js               # 底层原样 API + 高级语音 API（501/502 映射）
 │  ├─ queue.js             # 每个聊天的乱序缓冲队列
 │  ├─ voice.js             # ASR / TTS / to_wav / 图片落盘
 │  ├─ delivery.js          # agent.followup + 图片附件
@@ -54,11 +49,10 @@ E:\dsh-fish-message
 │     ├─ base.js           # Transport 适配器接口
 │     └─ napcat-onebot.js  # v1 的 NapCat / OneBot 11 实现
 ├─ docs
-│  ├─ API.md               # 底层/高级 API、出站队列语义、错误码
 │  ├─ FORMAT.md            # 语法、转义、代码块约定
 │  ├─ ARCHITECTURE.md      # 数据流、补投算法、出站队列状态机、扩展点
 │  └─ ACCEPTANCE.md        # 真机验收清单与命令
-└─ tests                   # 单测 + mock OneBot / mock AI 服务集成测试
+└─ tests                   # 单测 + mock OneBot 集成测试
 ```
 
 ---
@@ -132,13 +126,13 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 | `bindings` | `[]` | `[{ qq, session, name, enabled }]`，v1 只支持私聊 |
 | `onlyInsideMarkers` | `true` | 只发 `[QQ]…[/QQ]` 块内 |
 | `transcriptionEnabled` | `true` | 入站语音调本地 `/asr` |
-| `asrBaseUrl` | `http://127.0.0.1:7880` | 本地 ASR 根地址；**留空 = 关闭高级 API 的转写** |
+| `asrBaseUrl` | `http://127.0.0.1:7880` | 本地 ASR 根地址 |
 | `asrCommand` | 空 | 留空走本地 `/asr`；填了走外部命令，必须包含 `{file}` |
-| `asrTimeoutMs` | `180000` | 转写超时；超时映射 502 |
+| `asrTimeoutMs` | `180000` | 转写超时（首次加载模型可能 1 分钟以上） |
 | `ttsEnabled` | `true` | 出站 `[语音]` 调本地 `/tts` |
-| `ttsBaseUrl` | `http://127.0.0.1:7880` | 本地 TTS 根地址；**留空 = 关闭高级 API 的合成** |
+| `ttsBaseUrl` | `http://127.0.0.1:7880` | 本地 TTS 根地址 |
 | `ttsVoice` | `dafeiyu` | 音色名 |
-| `ttsTimeoutMs` | `180000` | 合成超时（首次加载模型可能 1 分钟以上）；超时映射 502 |
+| `ttsTimeoutMs` | `180000` | 合成超时（首次加载模型可能 1 分钟以上） |
 | `backfillWindowHours` | `24` | 补投窗口；超过只发摘要 |
 | `outboxTtlHours` | `24` | 出站队列 TTL；过期丢弃并记统计 |
 | `outboxDedupMinutes` | `10` | 相同 fingerprint 去重窗口 |
@@ -154,9 +148,6 @@ pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
 
 旧桥配置会在第一次启动时被读取并迁移到内存（`NapCat`、`绑定`、`只发标记内`、
 `语音转写`、`轮询间隔毫秒` 等）。保存设置后才会写新的 `fish-message-config.json`。
-
-> `asrBaseUrl` / `ttsBaseUrl` 的「空字符串」是有效值，表示关闭对应高级 API。
-> 设置页清空并保存后，`/api/transcribe`、`/api/synthesize` 等会返回 501，而不是偷偷用默认地址。
 
 ---
 
@@ -269,7 +260,7 @@ WS 连接、WS 重连、每 60 秒、HTTP 轮询都会触发这个同步；同�
 语音文本存文字、补发时重新合成；音频/图片/文件只存路径，失效直接丢弃并报错。
 
 设置页「出站队列」显示「积压 N 条 / 最老 X 秒」，可「立即补发」「清空」。
-完整语义见 [`docs/API.md`](docs/API.md#4-持久化出站队列)。
+更细的状态机见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#44-持久化出站队列)。
 
 ---
 
@@ -287,11 +278,8 @@ WS 连接、WS 重连、每 60 秒、HTTP 轮询都会触发这个同步；同�
 | POST | `/dsh-fish-message/outbox/flush` | 立即补发 |
 | POST | `/dsh-fish-message/outbox/clear` | 清空队列 |
 | DELETE | `/dsh-fish-message/outbox/{id}` | 丢弃单条 |
-| POST/GET | `/dsh-fish-message/api/send-text` 等底层 5 个 | 原样收发 / history 查询 |
-| POST | `/dsh-fish-message/api/transcribe` 等高级 4 个 | 转写 / 合成 / 语音回复 / 声纹分析 |
-| GET | `/dsh-fish-message/api/capabilities` | 高级能力与服务地址状态 |
 
-底层/高级 API 的完整清单、curl 示例、501/502 错误体见 [`docs/API.md`](docs/API.md)。
+对外只保留设置页/诊断需要的路由，不提供程序调用 API；将来需要再扩展。
 
 日志：
 
@@ -314,10 +302,9 @@ npm test
 - `tests/core.test.js`：补投排序/去重、水位持久化、窗口摘要、WS 乱序、出站、语音重试；
 - `tests/outbox.test.js`：出站队列落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、离线入队→恢复补发、语音文本重合成、路径失效丢弃；
 - `tests/integration.test.js`：Node 内起 mock OneBot HTTP + WS，验证收/发/补投/轮询/重启；
-- `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站；
-- `tests/api.test.js`：mock OneBot + mock 本地 AI 服务，验证底层原样发送、multipart、history、高级 501/502、capabilities、出站队列接口。
+- `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站。
 
-当前共 61 项，全部离线。
+当前共 46 项，全部离线。
 
 ---
 

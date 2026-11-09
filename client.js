@@ -134,15 +134,13 @@ window.__ModuleLoader__.load({
 
     function Section() {
       const [态, 设态] = React.useState(null)
-      const [能力, 设能力] = React.useState(null)
       const [脏, 设脏] = React.useState(false)
       const [忙, 设忙] = React.useState(false)
       const [说, 设说] = React.useState('')
 
       const 拉 = async () => {
-        const [s, c] = await Promise.all([get('/state'), get('/api/capabilities')])
+        const s = await get('/state')
         if (s) 设态(s)
-        if (c) 设能力(c)
       }
       React.useEffect(() => { 拉() }, [])
       React.useEffect(() => {
@@ -170,8 +168,7 @@ window.__ModuleLoader__.load({
         设忙(false)
         if (r && r.ok) {
           设脏(false)
-          const 关掉高级 = !String(配置.asrBaseUrl || '').trim() || !String(配置.ttsBaseUrl || '').trim()
-          设说(关掉高级 ? '已保存。注意：ASR/TTS 服务地址留空，对应高级 API 会返回 501（未启用）。' : '已保存，连接参数变了会自动重连。')
+          设说('已保存，连接参数变了会自动重连。')
           await 拉()
         } else {
           设说('保存失败：' + String((r && (r.error || r.message)) || '未知错误'))
@@ -211,18 +208,6 @@ window.__ModuleLoader__.load({
         设忙(false)
         设说(r && r.ok ? `已清空 ${r.cleared || 0} 条。` : '清空失败：' + String((r && r.error) || '未知错误'))
         await 拉()
-      }
-      const 测试高级 = async () => {
-        const c = await get('/api/capabilities')
-        if (c) 设能力(c)
-        if (!c?.advanced?.synthesize) {
-          设说('高级 API 未启用：请先在「收发行为」里填写 TTS 服务地址。')
-          return
-        }
-        设忙(true); 设说('正在测试 TTS（不改 QQ，只合成到本地）…')
-        const r = await post('/api/synthesize', { text: '（dsh-fish-message 高级 API 测试）' })
-        设忙(false)
-        设说(r && r.ok ? `TTS 正常：${r.path}（${r.ms} ms）` : '高级 API 测试失败：' + String((r && (r.detail || r.error)) || '未知错误'))
       }
 
       if (!态) return h('div', { style: S.wrap }, h('div', { style: S.h1 }, '鱼讯 QQ'), h('div', { style: S.dim }, '正在读取状态…'))
@@ -332,23 +317,6 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: S.btn, onClick: 立即补发, disabled: 忙 }, '立即补发'),
           h('button', { type: 'button', style: S.btn, onClick: 清空队列, disabled: 忙 || !(出站.pending > 0) }, '清空')))
 
-      const 高级 = (能力 && 能力.advanced) || {}
-      const 服务 = (能力 && 能力.services) || {}
-      const 高级开 = Boolean(高级.transcribe || 高级.synthesize)
-      const 高级页 = h('div', {
-        style: { ...S.card, opacity: 高级开 ? 1 : 0.58 },
-      },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '高级 API（语音识别 / 合成）'),
-        h('div', { style: S.dim },
-          `转写：${高级.transcribe ? '已启用' : '未启用'}（${服务.asr?.url || '地址为空'}）｜`
-          + `合成：${高级.synthesize ? '已启用' : '未启用'}（${服务.tts?.url || '地址为空'}）`),
-        h('div', { style: S.hint },
-          '地址留空 = 对应高级 API 关闭，调用会返回 501（advanced_api_disabled），不会静默失败。'
-          + ' 地址在「收发行为」里修改；保存后立即生效，不用重启。'),
-        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
-          h('button', { type: 'button', style: S.btn, onClick: 测试高级, disabled: 忙 }, '测试 TTS'),
-          h('button', { type: 'button', style: S.btn, onClick: 拉, disabled: 忙 }, '刷新能力')))
-
       const 日志 = Array.isArray(态.logs) ? 态.logs.join('\n') : ''
       return h('div', { style: S.wrap },
         h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
@@ -361,7 +329,7 @@ window.__ModuleLoader__.load({
             `传输：${传.name || 'napcat-onebot'}｜收件队列 ${桥.queueSize || 0} 条｜出站积压 ${出站.pending || 0} 条｜最近同步 ${桥.lastSyncAt ? new Date(桥.lastSyncAt).toLocaleTimeString('zh-CN', { hour12: false }) : '—'}｜`
             + `收 ${桥.stats?.received || 0} / 投 ${桥.stats?.delivered || 0} / 跳过旧 ${桥.stats?.skippedOld || 0} / 错 ${桥.stats?.errors || 0}`),
           (桥.lastSyncError || 桥.stats?.lastError) ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近错误：${桥.lastSyncError || 桥.stats.lastError}`) : null),
-        连接页, 绑定页, 行为页, 补投页, 出站页, 高级页,
+        连接页, 绑定页, 行为页, 补投页, 出站页,
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' } },
           h('button', { type: 'button', style: S.btnOn, onClick: 存, disabled: 忙 }, 忙 ? '处理中…' : '保存设置'),
           h('button', { type: 'button', style: S.btn, onClick: 测试文字, disabled: 忙 }, '发测试文字'),
