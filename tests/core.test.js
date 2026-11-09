@@ -233,6 +233,20 @@ test('状态：已处理 id 持久化并有限长度', () => {
   assert.equal(s2.snapshot().seen.length, 5)
 })
 
+test('状态：旧的「语音文件不存在：路径」读回时改成占位符说明', () => {
+  const dir = 临时目录()
+  writeFileSync(join(dir, 'fish-message-state.json'), JSON.stringify({
+    version: 1,
+    stats: { lastError: '语音文件不存在：路径', outboxLastError: '语音文件不存在：路径' },
+  }), 'utf8')
+  const s = new StateStore({ homeDir: dir })
+  const 快照 = s.snapshot()
+  assert.match(快照.stats.lastError, /占位符/)
+  assert.ok(快照.stats.lastError.includes('「路径」'))
+  assert.match(快照.stats.outboxLastError, /占位符/)
+  assert.doesNotMatch(快照.stats.lastError, /^语音文件不存在：路径$/)
+})
+
 test('旧桥状态迁移：只读旧文件，搬水位和已转 id', () => {
   const dir = 临时目录()
   const 旧 = join(dir, 'qq-bridge-state.json')

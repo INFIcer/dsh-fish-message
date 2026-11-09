@@ -267,8 +267,43 @@ test('Bridge：音频文件失效的积压条目直接丢弃并记错，不重�
   assert.equal(结果.failed, 0)
   assert.equal(outbox.pending(), 0)
   assert.equal(outbox.status().droppedTotal, 1)
-  assert.match(store.snapshot().stats.lastError, /语音文件不存在/)
+  const 错误 = store.snapshot().stats.lastError
+  assert.match(错误, /语音文件不存在/)
+  assert.ok(错误.includes('不存在.wav'), `错误里应带真实文件路径，实际是：${错误}`)
   assert.ok(r.item.id)
+  await bridge.stop()
+})
+
+test('Bridge：示例占位符 [语音:路径] 不发、不入队，提示明确说明是占位符', async () => {
+  const { bridge, transport, outbox, store } = 建桥()
+  await bridge.start({ syncNow: false })
+
+  const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ][语音:路径][/QQ]')
+  assert.equal(结果.ok, true)
+  assert.equal(outbox.pending(), 0, '占位符不能进补发队列')
+  assert.equal(transport.sent.length, 0, '占位符不能真的发出去')
+
+  const 错误 = store.snapshot().stats.lastError
+  assert.match(错误, /占位符/)
+  assert.ok(错误.includes('「路径」'), `提示里应保留原始占位值，实际是：${错误}`)
+  assert.doesNotMatch(错误, /^语音文件不存在：路径$/, '不能再显示成像变量名一样的错误')
+  await bridge.stop()
+})
+
+test('Bridge：旧的占位语音积压条目被丢弃时，错误文案也说明是占位符', async () => {
+  const { bridge, outbox, store } = 建桥()
+  await bridge.start({ syncNow: false })
+  outbox.enqueue({
+    qq: QQ,
+    segments: [{ type: 'record', data: { path: '路径' } }],
+    reason: '旧版本留下的示例',
+  })
+
+  const 结果 = await bridge.flushOutbox('test-placeholder', { force: true })
+  assert.equal(结果.dropped, 1)
+  const 错误 = store.snapshot().stats.lastError
+  assert.match(错误, /占位符/)
+  assert.ok(错误.includes('「路径」'))
   await bridge.stop()
 })
 

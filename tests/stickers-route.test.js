@@ -152,7 +152,7 @@ test('/stickers/save：JSON 路径入库与参数校验', async () => {
     method: 'POST', url: `${前缀}/stickers/save`, headers: JSON头, body: { path: 文本 },
   }))
   assert.equal(假图.statusCode, 400)
-  assert.match(JSON.parse(假图.body).error, /只支持/)
+  assert.match(JSON.parse(假图.body).error, /仅支持/)
 
   const 方法 = await 调(handlers, `${前缀}/stickers/save`, 造请求({ method: 'GET', url: `${前缀}/stickers/save` }))
   assert.equal(方法.statusCode, 405)

@@ -228,7 +228,7 @@ test('导入：Python 表情库格式 → 本库字段，按 sha 去重，路径
   assert.equal(第一次.total, 3)
   assert.equal(第一次.imported, 2)
   assert.equal(第一次.skipped, 1)
-  assert.match(第一次.errors[0].error, /跑出库目录/)
+  assert.match(第一次.errors[0].error, /超出表情库/)
 
   const 睡 = 库.get('abc123def456')
   assert.equal(睡.type, 'gif')
