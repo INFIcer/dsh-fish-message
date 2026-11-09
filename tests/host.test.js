@@ -79,6 +79,15 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(健康响应.statusCode, 200)
   assert.equal(JSON.parse(健康响应.body).ok, true)
 
+  // 表情库路由已经在宿主里挂上；空库返回 0 条。
+  assert.equal(typeof routes.get('/dsh-fish-message/stickers'), 'function')
+  const 表情响应 = 假响应()
+  await routes.get('/dsh-fish-message/stickers')({ method: 'GET', url: '/dsh-fish-message/stickers' }, 表情响应)
+  const 表情 = JSON.parse(表情响应.body)
+  assert.equal(表情.ok, true)
+  assert.equal(表情.total, 0)
+  assert.equal(表情.stats.count, 0)
+
   const 发 = 监听.get('session/event')
   assert.equal(typeof 发, 'function')
   发({ id: 会话 }, {

@@ -17,7 +17,8 @@ Transport 适配器（v1：napcat-onebot）
 Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
    ├─ 转写：record → VoiceService → 本地 /asr
-   ├─ 图片：image → inbox → DSH 附件
+   ├─ 图片：image → inbox → DSH 附件（可选自动入表情库）
+   ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
    └─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
         └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
    │
@@ -28,8 +29,9 @@ Delivery（lib/delivery.js）
 DSH 会话（模型照常开一轮）
 ```
 
-对外暂不提供编程 API（只保留设置页/诊断用的本地路由）。如果以后需要程序调用，
-再在 Bridge 之上单独加一层，不影响现有收发与出站队列链路。
+对上提供 `fish.message` Cordis 服务（`lib/service.js`），设置页/诊断走
+`/dsh-fish-message/*` 本地路由；表情库另有 `lib/stickers.js`（纯磁盘逻辑）和
+`lib/sticker-routes.js`（HTTP 门面）两层。
 
 本地 AI 服务只通过 HTTP 调用，插件不 import 它的代码，也不改它：
 
@@ -55,6 +57,10 @@ VoiceService ── POST /asr?speaker=1       （multipart）
 | `lib/voice.js` | ASR / TTS / to_wav / 图片落盘 | 不改 7880 服务 |
 | `lib/outbox.js` | 持久化出站队列：去重、FIFO、退避、TTL、计数 | 不做网络发送 |
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
+| `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
+| `lib/sticker-routes.js` | `/stickers*` 路由：参数校验、multipart、取图防穿越 | 不实现存储算法 |
+| `lib/tools.js` | `fish_sticker_list` / `fish_sticker_send` 工具定义与注册 | 不直接读写索引 |
+| `lib/service.js` | `fish.message` 门面（发送/历史/语音/表情） | 不重新实现发送 |
 
 ---
 
@@ -178,6 +184,7 @@ extractOutbound(text, onlyInsideMarkers)
 | `voice` | `/tts` → 本地 wav → `record` 段 |
 | `voiceFile` | 直接 `record` 段 |
 | `file` | `file` 段（NapCat 支持时） |
+| `sticker` | 发送时查 `StickerStore` → 本地图片 → `image` 段；带 `stickerId` 供成功计数 |
 
 语音发送按「本地路径 → `file:///` → `base64://`」重试，最多 3 次。
 
@@ -225,7 +232,33 @@ extractOutbound(text, onlyInsideMarkers)
 - 队列计数写进 `fish-message-state.json` 的 `stats.outbox*`，`/state` 的 `outbox` 只读汇总。
 
 队列状态机就是本节；`/state` 的 `outbox` 字段和设置页卡片都只是这里的只读汇总。
-对外暂不提供编程 API；将来需要再扩展。
+程序调用走 `fish.message` 服务；HTTP 路由只给设置页/诊断。
+
+### 4.5 表情包链路
+
+```text
+入库（上传 / 入站图 / 导入 / 服务 / 工具）
+        │  读图片头（GIF/PNG/JPEG/WebP/BMP）→ 宽高/帧数/时长
+        │  sha256 → 已存在？只合并标签/描述
+        │  否则检查上限（条数 + 总字节）→ 写 gif/ 或 img/ → 原子写 index.json
+        ▼
+StickerStore（index.json + 文件）
+        │
+        ├─ 设置页：/stickers* 路由（列表/搜索/编辑/删除/取图/最近/导入/清理）
+        └─ 出站：[表情:名字] → resolve（id/文件名/#标签/模糊）
+                 → image 段（data.stickerId）
+                 → Bridge.派发（base64 发 NapCat，GIF 不动画转码）
+                 → 成功后 bump(used_count++, last_used_at)
+                 → 失败入 Outbox；补发成功时同样 bump
+```
+
+约束：
+
+- 表情查询只在**发送时**发生，所以增删改表情不需要改指令；
+- 找不到表情**不静默**：记日志/状态，并在会话里投提示；
+- 标签命中多个时按 `used_count` 升序 + `last_used_at` 升序轮换；
+- 上限到顶只报错（`sticker_limit`），不自动淘汰；
+- URL 取图只允许 `stickerDir` 内、扩展名在白名单里的文件（路径穿越返回 403）。
 
 ---
 
@@ -293,6 +326,8 @@ v1 不实现群聊。将来要加群：
 - 出站默认只发 `[QQ]` 块内，块外解释/路径/思考留在本地；
 - 令牌只存在配置文件和内存，不写日志；设置页显示 `***已设置***`；
 - 状态/日志/HTTP 路由由 DSH 的本地 Web 服务提供，默认只在 `127.0.0.1` 访问；
+- 表情取图路由只接受 `stickerDir` 内的路径（`..`、绝对路径越界一律 403）、只允许图片扩展名；
+  最近图片路由只接受文件名，不接受路径；
 - 不修改本地 AI 服务、ComfyUI、`D:\dsh_ws\qq-voice`、旧桥数据文件。
 
 ---
@@ -313,4 +348,6 @@ v1 不实现群聊。将来要加群：
 | 补发失败 | `attempts++`，退避重试；20 次或 TTL 到期丢弃并记统计 |
 | 补发时音频/图片/文件已不存在 | 直接丢弃该条，报错，不重试 20 次 |
 | 图片下载失败 | 文字里标 `[图片（下载失败）]`，不影响其它段 |
+| 表情找不到 | 记日志/状态；会话里投「找不到表情」提示；该 token 跳过，其它 token 照发 |
+| 表情库超上限 | 入库/导入返回 `sticker_limit`，提示清理；已有条目和文件不动 |
 | 状态文件写失败 | 日志记错；内存继续，重启可能重投（已知风险） |

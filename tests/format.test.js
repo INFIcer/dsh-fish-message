@@ -108,3 +108,42 @@ test('出站总入口：块内为空不发', () => {
   const r = extractOutbound('只有解释', true)
   assert.equal(r.send, false)
 })
+
+// ---------------- [表情:…] ----------------
+
+test('表情指令：名字 / #标签 / id 都解析成 sticker token', () => {
+  const t = parseDirectives('[表情:打哈欠][表情:#睡觉][表情:3b23f496681f]')
+  assert.deepEqual(t, [
+    { type: 'sticker', name: '打哈欠' },
+    { type: 'sticker', name: '#睡觉' },
+    { type: 'sticker', name: '3b23f496681f' },
+  ])
+})
+
+test('表情指令：大小写不敏感、中文冒号也认', () => {
+  const t = parseDirectives('[表情:DSCHAN_Gaming] [表情：晚安]')
+  assert.deepEqual(t.map((x) => x.type), ['sticker', 'sticker'])
+  assert.equal(t[0].name, 'DSCHAN_Gaming')
+  assert.equal(t[1].name, '晚安')
+})
+
+test('表情指令：一次多个，与其它指令按出现顺序混排', () => {
+  const t = parseDirectives('先说 [表情:晚安] 再听 [语音]晚安[/语音] 看图 [图片:C:\\a.png] 最后 [表情:#生气]')
+  assert.deepEqual(t.map((x) => x.type), ['text', 'sticker', 'text', 'voice', 'text', 'image', 'text', 'sticker'])
+  assert.equal(t[1].name, '晚安')
+  assert.equal(t[7].name, '#生气')
+})
+
+test('表情指令：不存在也只是 token，解析不存在由发送层报错，不静默吞掉', () => {
+  const r = extractOutbound('[QQ]看这个 [表情:完全没有这个表情][/QQ]', true)
+  assert.equal(r.send, true)
+  assert.deepEqual(r.tokens, [
+    { type: 'text', text: '看这个' },
+    { type: 'sticker', name: '完全没有这个表情' },
+  ])
+})
+
+test('表情指令：空名字不生成 token', () => {
+  const t = parseDirectives('[表情:   ]尾巴')
+  assert.deepEqual(t, [{ type: 'text', text: '[表情:   ]尾巴' }])
+})

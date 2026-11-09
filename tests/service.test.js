@@ -88,6 +88,7 @@ test('apiVersion 与 capabilities 与契约一致', () => {
     sendRecord: true,
     sendFile: true,
     fetchHistory: true,
+    stickers: true,
     transcribe: { text: false, speaker: false },
   })
   // 每次都是新对象，调用方改不坏内部状态。
