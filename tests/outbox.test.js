@@ -242,11 +242,12 @@ test('Bridge：恢复在线但还没补发时，新消息也排队，不插到�
   await bridge.stop()
 })
 
-test('Bridge：[语音]文本[/语音] 不再合成，也不进补发队列', async () => {
+test('Bridge：没装本地 AI 时 [语音]文本[/语音] 只提示，不进补发队列', async () => {
   const { bridge, transport, outbox } = 建桥()
   await bridge.start({ syncNow: false })
   const 结果 = await bridge.deliverAssistantTurn(会话, '块外 [QQ][语音]晚安，主人[/语音][/QQ] 块外')
-  assert.equal(结果.code, 'tts_moved_to_ops')
+  assert.equal(结果.code, 'service_not_installed')
+  assert.match(结果.hint, /本地 AI 插件没装或没启动/)
   assert.equal(outbox.pending(), 0, '没有合成结果，也没有可补发的语音文本')
   assert.equal(transport.sent.length, 0)
   await bridge.stop()

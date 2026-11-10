@@ -8,6 +8,7 @@ import { Bridge } from '../lib/bridge.js'
 import { VoiceService } from '../lib/voice.js'
 import { StateStore } from '../lib/storage.js'
 import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig } from '../lib/config.js'
+import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
 
 const 睡 = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -58,6 +59,40 @@ class 假语音 {
   async fetchImage() { throw new Error('测试里不放图片') }
 }
 
+/** 假本地 AI 服务：只实现鱼讯会调的那几个方法，形状按 fish.service 的公开契约。 */
+class 假服务 {
+  constructor({ ttsOk = true, asrText = '', describeText = '', caps = {} } = {}) {
+    this.ttsOk = ttsOk
+    this.asrText = asrText
+    this.describeText = describeText
+    this.calls = { tts: [], asr: [], vision: [] }
+    this.voices = [{ name: 'dafeiyu' }, { name: 'test_voice' }]
+    this.capabilities = {
+      tts: { available: ttsOk, ready: ttsOk },
+      asr: { available: true, ready: true },
+      vision: { available: true, ready: true },
+      ...caps,
+    }
+  }
+  async tts(text, opts) {
+    this.calls.tts.push({ text, opts })
+    if (!this.ttsOk) return { ok: false, code: 'service_down', hint: '服务没开' }
+    return { ok: true, items: [{ wavPath: this.输出, voice: opts?.voice, ms: 10 }] }
+  }
+  async asr(path, opts) {
+    this.calls.asr.push({ path, opts })
+    return { ok: true, items: [{ text: this.asrText, language: opts?.language }] }
+  }
+  async visionDescribe(path, opts) {
+    this.calls.vision.push({ path, opts })
+    return { ok: true, items: [{ path, text: this.describeText }] }
+  }
+}
+
+function 建AI(服务, logger) {
+  return new AiService({ getService: () => 服务, getConfig: () => ({}), logger })
+}
+
 /** 造一个最小可解析的 wav（16k 单声道 16bit），用于读时长。 */
 function 造wav(秒 = 1) {
   const 采样率 = 16000
@@ -79,7 +114,7 @@ function 造wav(秒 = 1) {
   return buf
 }
 
-function 建桥({ dir = 临时目录(), 历史 = {}, config = {} } = {}) {
+function 建桥({ dir = 临时目录(), 历史 = {}, config = {}, ai = null } = {}) {
   const store = new StateStore({ homeDir: dir })
   const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
   const transport = new 假传输(历史)
@@ -100,6 +135,7 @@ function 建桥({ dir = 临时目录(), 历史 = {}, config = {} } = {}) {
     logger,
     voice,
     delivery,
+    ai,
     autoTimers: false,
   })
   store.setWatermark(QQ, { timestamp: 1, messageId: '' })
@@ -277,7 +313,7 @@ test('配置：派生 WS 地址、旧桥字段迁移、范围钳制', () => {
   assert.equal(钳.logLevel, 'info')
 })
 
-// ---------------- 解耦：语音只做传输，ASR/TTS 在 dsh-fish-ops ----------------
+// ---------------- 可选本地 AI：语音/识图能力与降级 ----------------
 
 test('入站语音：只落盘并递「语音：路径」，不联网、不转写', async () => {
   const dir = 临时目录()
@@ -332,23 +368,155 @@ test('入站语音：只落盘并递「语音：路径」，不联网、不转�
   }
 })
 
-test('出站 [语音]文本[/语音]：返回 tts_moved_to_ops，不发任何消息', async () => {
+test('出站 [语音]文本[/语音]：没装本地 AI 时只提示，不发任何消息', async () => {
   const { bridge, transport } = 建桥()
   const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ][语音]晚安，主人[/语音][/QQ]')
   assert.equal(transport.sent.length, 0, '不能合成、也不能发任何消息')
   assert.equal(结果.ok, false)
-  assert.equal(结果.code, 'tts_moved_to_ops')
-  assert.equal(结果.tts, 'moved')
-  assert.match(结果.hint, /fish_say_and_send/)
-  assert.match(结果.hint, /fish_say_voice/)
+  assert.equal(结果.code, 'service_not_installed')
+  assert.equal(结果.tts, false)
+  assert.match(结果.hint, /本地 AI 插件没装或没启动/)
+  assert.match(结果.hint, /其它功能不受影响/)
 })
 
 test('出站 [语音]文本[/语音] 与文字混排：文字照发，语音只提示', async () => {
-  const { bridge, transport } = 建桥()
+  const { bridge, transport, delivery } = 建桥()
   const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ]先听这个 [语音]晚安[/语音][/QQ]')
   assert.equal(transport.sent.length, 1)
   assert.deepEqual(transport.sent[0].segments, [{ type: 'text', data: { text: '先听这个' } }])
-  assert.equal(结果.code, 'tts_moved_to_ops')
+  assert.equal(结果.code, 'service_not_installed')
+  assert.equal(delivery.got.length, 1, '语音失败要在会话里留一句提示，不能只写日志')
+  assert.match(delivery.got[0].text, /本地 AI 插件没装或没启动/)
+})
+
+test('出站 [语音]文本[/语音]：本地 AI 正常时按配置音色/语速合成并发送 wavPath', async () => {
+  const dir = 临时目录()
+  const 音频 = join(dir, 'tts.wav')
+  writeFileSync(音频, 造wav(0.2))
+  const 服务 = new 假服务()
+  服务.输出 = 音频
+  const { bridge, transport } = 建桥({ dir, ai: 建AI(服务) })
+  const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ][语音]晚安，主人[/语音][/QQ]')
+  assert.equal(结果.ok, true)
+  assert.equal(transport.sent.length, 1)
+  assert.equal(transport.sent[0].segments[0].type, 'record')
+  assert.equal(transport.sent[0].segments[0].data.file, 音频.replace(/\\/g, '/'))
+  assert.deepEqual(服务.calls.tts, [{ text: '晚安，主人', opts: { voice: 'dafeiyu', speed: 1 } }])
+})
+
+test('出站语音：服务在但 tts 能力关时降级提示，不抛错', async () => {
+  const 服务 = new 假服务({ ttsOk: false, caps: { tts: { available: false, reason: 'model_missing' } } })
+  const { bridge, transport } = 建桥({ ai: 建AI(服务) })
+  const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ][语音]晚安[/语音][/QQ]')
+  assert.equal(transport.sent.length, 0)
+  assert.equal(结果.ok, false)
+  assert.equal(结果.code, 'model_missing')
+  assert.match(结果.hint, /模型还没准备好/)
+})
+
+test('入站语音：本地 AI 正常时在路径后附转写文字', async () => {
+  const dir = 临时目录()
+  const 原始 = join(dir, 'from-qq.wav')
+  writeFileSync(原始, 造wav(2))
+  const 服务 = new 假服务({ asrText: '今晚早点睡' })
+  const transport = new 假传输()
+  transport.getRecord = async () => ({ file: 原始 })
+  const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
+  const voice = new VoiceService({
+    getConfig: () => normalizeConfig({ maxVoiceMB: 20 }),
+    logger,
+    transport,
+    inboxDir: join(dir, 'inbox'),
+  })
+  const 配置 = normalizeConfig({
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    reorderBufferMs: 0,
+  })
+  const bridge = new Bridge({
+    getConfig: () => 配置,
+    transport,
+    store: new StateStore({ homeDir: dir }),
+    logger,
+    voice,
+    delivery: new 假投递(),
+    ai: 建AI(服务, logger),
+    autoTimers: false,
+  })
+  const 内容 = await bridge.buildInbound(
+    { qq: QQ, name: '主人' },
+    { message_id: 'm-voice-2', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
+  )
+  assert.match(内容.text, /（语音：.+\.wav，2 秒）/)
+  assert.match(内容.text, /（语音转写：今晚早点睡）/)
+  assert.deepEqual(服务.calls.asr, [{ path: 内容.text.match(/（语音：(.+?)，/)[1], opts: { language: 'auto' } }])
+})
+
+test('入站图片：开关开且识图可用时，用描述 + 路径代替 base64 图片', async () => {
+  const dir = 临时目录()
+  const 图 = join(dir, 'qq.png')
+  writeFileSync(图, 'fake-png')
+  const 服务 = new 假服务({ describeText: '一只橘猫趴在键盘上' })
+  const voice = {
+    async fetchImage() {
+      return { buffer: Buffer.from('fake-png'), base64: 'ZmFrZQ==', mime: 'image/png', path: 图, ext: '.png' }
+    },
+  }
+  const 配置 = normalizeConfig({
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    describeInboundImages: true,
+  })
+  const bridge = new Bridge({
+    getConfig: () => 配置,
+    transport: new 假传输(),
+    store: new StateStore({ homeDir: dir }),
+    logger: new Logger({ filePath: join(dir, 'test.log'), level: 'debug' }),
+    voice,
+    delivery: new 假投递(),
+    ai: 建AI(服务),
+    autoTimers: false,
+  })
+  const 内容 = await bridge.buildInbound(
+    { qq: QQ, name: '主人' },
+    { message_id: 'm-img-1', message: [{ type: 'image', data: { file: 'a.png' } }] },
+  )
+  assert.equal(内容.images.length, 0, '识图后不再塞 base64 图片进会话')
+  assert.match(内容.text, /（图片：一只橘猫趴在键盘上；已存到 .+qq\.png）/)
+  assert.match(内容.text, /收到 1 张图片/)
+  assert.deepEqual(服务.calls.vision, [{ path: 图, opts: { mode: 'caption' } }])
+})
+
+test('入站图片：开关关时保持原样，图片附件和路径都在', async () => {
+  const dir = 临时目录()
+  const 图 = join(dir, 'qq.png')
+  writeFileSync(图, 'fake-png')
+  const 服务 = new 假服务({ describeText: '不应该被调用' })
+  const voice = {
+    async fetchImage() {
+      return { buffer: Buffer.from('fake-png'), base64: 'ZmFrZQ==', mime: 'image/png', path: 图, ext: '.png' }
+    },
+  }
+  const 配置 = normalizeConfig({
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    describeInboundImages: false,
+  })
+  const bridge = new Bridge({
+    getConfig: () => 配置,
+    transport: new 假传输(),
+    store: new StateStore({ homeDir: dir }),
+    logger: new Logger({ filePath: join(dir, 'test.log'), level: 'debug' }),
+    voice,
+    delivery: new 假投递(),
+    ai: 建AI(服务),
+    autoTimers: false,
+  })
+  const 内容 = await bridge.buildInbound(
+    { qq: QQ, name: '主人' },
+    { message_id: 'm-img-2', message: [{ type: 'image', data: { file: 'a.png' } }] },
+  )
+  assert.equal(内容.images.length, 1)
+  assert.equal(内容.images[0].base64, 'ZmFrZQ==')
+  assert.match(内容.text, /\[图片\]/)
+  assert.equal(服务.calls.vision.length, 0)
 })
 
 test('出站 [语音:路径]：照常发已有音频文件，不合成', async () => {

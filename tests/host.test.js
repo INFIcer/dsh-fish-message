@@ -77,7 +77,8 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(typeof 状态.stickerDir, 'string')
   assert.ok(状态.stickerDir.length > 0)
   assert.equal(状态.stickerDirExists, true)
-  // 内置 ASR/TTS 已移除：设置页不再有这些字段，也没有 test-voice 路由。
+  // 内置 ASR/TTS 已移除：不再有旧的开关字段，也没有 test-voice 路由。
+  // 新的语音/识图设置走可选本地 AI，字段名见 lib/config.js。
   assert.equal('ttsEnabled' in 状态.config, false)
   assert.equal('transcriptionEnabled' in 状态.config, false)
   assert.equal(routes.has('/dsh-fish-message/test-voice'), false)
