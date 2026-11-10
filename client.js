@@ -707,8 +707,8 @@ window.__ModuleLoader__.load({
       const 转写可用 = Boolean(AI能力.asr)
       const 识图可用 = Boolean(AI能力.vision)
       const 服务提示 = AI能力.installed
-        ? (AI能力.hint || '本地 AI 插件没启动：启动后可发语音、转写语音。')
-        : '未安装本地 AI 插件：装上后可发语音、转写语音。'
+        ? (AI能力.hint || '本地 AI 插件没启动，语音和识图暂不可用。')
+        : '语音和识图暂不可用。'
       const 音色值 = 配置.sayVoice || 'dafeiyu'
       const 音色控件 = (Array.isArray(音色们) && 音色们.length)
         ? h('select', {
@@ -720,7 +720,7 @@ window.__ModuleLoader__.load({
         : 输入(音色值, (v) => 改('sayVoice', v), 'dafeiyu', !语音可用)
 
       const 语音页 = h('div', { style: S.card },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '语音'),
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '本地 AI 服务'),
         AI在线 ? null : h('div', { style: { ...S.hint, marginBottom: 8 } }, 服务提示),
         (AI在线 && !语音可用) ? h('div', { style: { ...S.hint, marginBottom: 8 } }, '本地 AI 的语音合成暂不可用。') : null,
         行('发送语音音色', h('div', null,
@@ -733,9 +733,9 @@ window.__ModuleLoader__.load({
           onChange: (e) => 改('saySpeed', Number(e.target.value)),
         }), null, '0.5 到 2，默认 1。'),
         (AI在线 && !转写可用) ? h('div', { style: { ...S.hint, marginBottom: 8 } }, '本地 AI 的语音识别暂不可用。') : null,
-        行('收到语音后自动转文字', 开关(配置.transcribeInbound, (v) => 改('transcribeInbound', v), !转写可用),
-          '关闭后只把语音文件路径递进会话。', null),
-        行('语音转写语言', h('select', {
+        行('收到语音后自动分析', 开关(配置.transcribeInbound, (v) => 改('transcribeInbound', v), !转写可用),
+          '会识别文字、声纹和情感；不勾选只把语音文件路径递进会话。', null),
+        行('语音分析语言', h('select', {
           style: S.input, value: 配置.asrLanguage || 'auto', disabled: !转写可用 || 配置.transcribeInbound === false,
           onChange: (e) => 改('asrLanguage', e.target.value),
         },
@@ -744,10 +744,15 @@ window.__ModuleLoader__.load({
           h('option', { value: 'en' }, '英语'),
           h('option', { value: 'ja' }, '日语'),
           h('option', { value: 'ko' }, '韩语'),
-          h('option', { value: 'yue' }, '粤语')),
-        null, '不确定时选自动识别。'),
-        行('收到图片后先在本地识图', 开关(配置.describeInboundImages, (v) => 改('describeInboundImages', v), !识图可用),
-          '开启后图片只递文字描述和本地路径；识图失败仍会保留图片。', null),
+          h('option', { value: 'yue' }, '粤语'))),
+        行('收到图片后先在本地识图', h('select', {
+          style: S.input, value: 配置.describeInboundImages || 'inherit', disabled: !AI能力.installed,
+          onChange: (e) => 改('describeInboundImages', e.target.value),
+        },
+          h('option', { value: 'inherit' }, '继承本地 AI 插件'),
+          h('option', { value: 'on' }, '开'),
+          h('option', { value: 'off' }, '关')),
+        AI能力.installed ? '选「继承」时跟随本地 AI 插件的识图开关。' : '需先安装本地 AI 插件。'),
         (AI在线 && !识图可用) ? h('div', { style: { ...S.hint, marginTop: 2 } }, '本地 AI 的识图能力暂不可用。') : null)
 
       const 补投页 = h('div', { style: S.card },

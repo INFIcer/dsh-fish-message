@@ -16,7 +16,7 @@ Transport 适配器（v1：napcat-onebot）
    ▼
 Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
-   ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（可选附转写）
+   ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（可选附说话人/转写）
    ├─ 图片：image → inbox → DSH 附件（可选自动入表情库，可选先本地识图）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
    ├─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
@@ -44,7 +44,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
         ▲
         │ ctx.get('fish.service') 运行时探测
         │
-鱼讯 AiService（lib/ai.js） ── bridge 的入站转写 / 识图、出站合成
+鱼讯 AiService（lib/ai.js） ── bridge 的入站分析 / 识图、出站合成
 ```
 
 ---
@@ -131,7 +131,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 5. 超过窗口的只投一条摘要，包含条数、最早/最近时间；
 6. 摘要投失败只记日志（这些消息已经太旧，不阻塞新消息）。
 
-### 3.6 语音入站（落盘 + 可选转写）
+### 3.6 语音入站（落盘 + 可选分析）
 
 ```text
 record 段
@@ -140,11 +140,13 @@ record 段
   → 存 <家目录>\fish-message-inbox\qq-voice-*
   → 读 wav 头拿时长（读不到就省略秒数）
   → "（语音：<绝对路径>，N 秒）" 交给会话
-  → 可选：fish.service.asr → 追加 "（语音转写：<文字>）"
+  → 可选：fish.service.asr → 同一行追加 "；说话人：<名字>；转写：<文字>"
 ```
 
-转写默认开启（`transcribeInbound`），语言由 `asrLanguage` 决定（默认 `auto`）。
-服务不可用或转写失败时只记 debug 日志，路径那条消息照常递，**不会因此丢消息**。
+分析默认开启（`transcribeInbound`），语言由 `asrLanguage` 决定（默认 `auto`）。
+服务不可用或分析失败时只记 debug 日志，路径那条消息照常递，**不会因此丢消息**。
+声纹信息来自 asr 结果的 `speaker.name`，没有识别出来就不写「说话人」；
+当前契约没有情感字段，所以情感还递不进会话。
 落盘失败会降级成 `[语音（保存失败：…）]`，也不会把整条消息丢掉。
 
 ### 3.7 图片入站
@@ -159,10 +161,11 @@ image / mface 段
 
 最多 4 张；超过 `maxImageMB` 跳过。
 
-开了 `describeInboundImages` 且本地识图可用时，先调
+入站识图是设置项 `describeInboundImages`，取值 `inherit`（默认，跟随本地 AI 插件的
+识图开关）/ `on` / `off`（强制）。开启后先调
 `fish.service.visionDescribe(path, { mode:'caption' })`，用
 「（图片：<描述>；已存到 <路径>）」代替 base64 附件，省会话 token。
-识图失败或关闭时保持「图片附件 + 路径」，不丢图。
+插件没装、没有 `visionPrefs` 或识图失败时保持「图片附件 + 路径」，不丢图。
 
 ---
 
@@ -357,9 +360,9 @@ v1 不实现群聊。将来要加群：
 | 历史接口失败 | 记日志/状态；下一轮重试；WS 事件仍可收 |
 | DSH 会话没开 | 不推进水位；消息留在队列，下一轮重试 |
 | followup 失败 | 同上，并记错误 |
-| 语音落盘失败 | 消息降级为 `[语音（保存失败）]`，不丢整条；转写跳过 |
+| 语音落盘失败 | 消息降级为 `[语音（保存失败）]`，不丢整条；分析跳过 |
 | `[语音]文字[/语音]` | 服务缺失/能力缺时只提示一句，不发语音；同轮其它内容照发 |
-| 入站语音转写失败 | 只递「语音：路径」，不影响消息投递 |
+| 入站语音分析失败 | 只递「语音：路径」，不影响消息投递 |
 | 入站图片识图失败 | 退回图片附件 + 路径，不丢图 |
 | 文字/图片/文件发送失败 | 入持久化出站队列；恢复后按 FIFO 补发 |
 | `record` 发送失败 | 三种 file 形态重试 3 次；仍失败存路径入队 |
@@ -399,16 +402,22 @@ v1 不实现群聊。将来要加群：
 `{ available, ready, reason }`。`status()` 汇总成
 `{ installed, online, tts, asr, vision, hint }` 给设置页。
 
+入站识图还要读插件自己的开关：`visionPrefs() → { localDescribe }`（契约 v0.4）。
+同样用 `typeof` 防御；插件没装、没有这个方法、抛错或返回值不认识时一律当作
+「没有偏好」（`{known:false}`），由 `入站识图开关()` 按「开」兜底。
+`asr()` 还会把 `items[0].speaker` 归成 `{ name, score, known }`，供入站消息带出说话人。
+
 ### 9.3 降级策略
 
 | 情况 | 行为 |
 |---|---|
-| 没装插件 / 没启动 | 设置页「语音」分区顶部一行提示，控件禁用；发语音只回一句提示 |
+| 没装插件 / 没启动 | 设置页「本地 AI 服务」分区顶部一行提示，控件禁用；发语音只回一句提示 |
 | 服务在但能力缺失 | 只禁用对应控件；该能力调用前就返回 `not_supported`/原因码 |
 | `tts`/`asr` 返回 `{ok:false}` | 取 `code` 和 `hint`，转成用户能懂的一句话，不抛原始错误 |
 | 服务抛错、`lastError` 有码 | 按 `code`、`httpStatus` 映射（507 → 显存不足，503 → 模型未就绪） |
-| 入站转写失败 | 只递语音路径，消息照常进会话 |
+| 入站语音分析失败 | 只递语音路径，消息照常进会话 |
 | 入站识图失败 | 退回「图片附件 + 路径」，不丢图 |
+| 插件的 `visionPrefs` 调不到 | 当作没偏好，入站识图按「开」；识图失败仍退附件 |
 
 所有能力调用都包在 `try/catch` 里，失败返回 `{ ok:false, code, hint }`。发送语音失败
 时，同一轮其它内容照发；只有整轮都没发出去才在会话里投一次提示（同一会话 60 秒节流），
@@ -420,8 +429,8 @@ v1 不实现群聊。将来要加群：
 |---|---|---|
 | `sayVoice` | `dafeiyu` | 发送语音的音色；有 `voices()` 时给下拉，否则文本输入 |
 | `saySpeed` | `1` | 发送语音的语速，0.5~2 |
-| `transcribeInbound` | `true` | 收到语音后自动转文字 |
-| `asrLanguage` | `auto` | 转写语言：auto/zh/en/ja/ko/yue |
-| `describeInboundImages` | `false` | 收到图片后先在本地识图，用描述代替 base64 |
+| `transcribeInbound` | `true` | 收到语音后自动分析（文字、说话人） |
+| `asrLanguage` | `auto` | 分析语言：auto/zh/en/ja/ko/yue |
+| `describeInboundImages` | `inherit` | 入站识图：inherit 跟随本地 AI 插件，on/off 强制；旧布尔值 true→on、false→off |
 
 `sayVoice` 是鱼讯自己的发送音色，与本地 AI 插件「朗读音色」是两套独立设置，互不覆盖。

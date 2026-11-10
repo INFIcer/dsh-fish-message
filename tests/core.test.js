@@ -61,11 +61,13 @@ class 假语音 {
 
 /** 假本地 AI 服务：只实现鱼讯会调的那几个方法，形状按 fish.service 的公开契约。 */
 class 假服务 {
-  constructor({ ttsOk = true, asrText = '', describeText = '', caps = {} } = {}) {
+  constructor({ ttsOk = true, asrText = '', describeText = '', speaker = null, caps = {}, visionPrefs } = {}) {
     this.ttsOk = ttsOk
     this.asrText = asrText
     this.describeText = describeText
-    this.calls = { tts: [], asr: [], vision: [] }
+    this.speaker = speaker
+    this.visionPrefs结果 = visionPrefs
+    this.calls = { tts: [], asr: [], vision: [], prefs: 0 }
     this.voices = [{ name: 'dafeiyu' }, { name: 'test_voice' }]
     this.capabilities = {
       tts: { available: ttsOk, ready: ttsOk },
@@ -81,7 +83,18 @@ class 假服务 {
   }
   async asr(path, opts) {
     this.calls.asr.push({ path, opts })
-    return { ok: true, items: [{ text: this.asrText, language: opts?.language }] }
+    return {
+      ok: true,
+      items: [{
+        text: this.asrText,
+        language: opts?.language,
+        ...(this.speaker ? { speaker: this.speaker } : {}),
+      }],
+    }
+  }
+  async visionPrefs() {
+    this.calls.prefs += 1
+    return this.visionPrefs结果
   }
   async visionDescribe(path, opts) {
     this.calls.vision.push({ path, opts })
@@ -141,6 +154,54 @@ function 建桥({ dir = 临时目录(), 历史 = {}, config = {}, ai = null } = 
   store.setWatermark(QQ, { timestamp: 1, messageId: '' })
   return { dir, store, logger, transport, delivery, voice, 配置, bridge }
 }
+
+/** 入站解析用的最小桥：只关心 voice、配置和可选的本地 AI。 */
+function 建入站桥({ dir, 服务 = null, voice, config = {} }) {
+  const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
+  const 配置 = normalizeConfig({
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    reorderBufferMs: 0,
+    ...config,
+  })
+  return new Bridge({
+    getConfig: () => 配置,
+    transport: new 假传输(),
+    store: new StateStore({ homeDir: dir }),
+    logger,
+    voice,
+    delivery: new 假投递(),
+    ai: 服务 ? 建AI(服务, logger) : null,
+    autoTimers: false,
+  })
+}
+
+function 建语音桥(dir, 服务) {
+  const 原始 = join(dir, 'from-qq.wav')
+  writeFileSync(原始, 造wav(2))
+  const transport = new 假传输()
+  transport.getRecord = async () => ({ file: 原始 })
+  const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
+  const voice = new VoiceService({
+    getConfig: () => normalizeConfig({ maxVoiceMB: 20 }),
+    logger,
+    transport,
+    inboxDir: join(dir, 'inbox'),
+  })
+  return 建入站桥({ dir, 服务, voice })
+}
+
+function 建图片桥(dir, 服务, config = {}) {
+  const 图 = join(dir, 'qq.png')
+  writeFileSync(图, 'fake-png')
+  const voice = {
+    async fetchImage() {
+      return { buffer: Buffer.from('fake-png'), base64: 'ZmFrZQ==', mime: 'image/png', path: 图, ext: '.png' }
+    },
+  }
+  return { bridge: 建入站桥({ dir, 服务, voice, config }), 图 }
+}
+
+const 图片消息 = (id) => ({ message_id: id, message: [{ type: 'image', data: { file: 'a.png' } }] })
 
 test('补投：乱序到达按时间升序，同一 message_id 只投一次', async () => {
   const 现在 = Math.floor(Date.now() / 1000)
@@ -414,71 +475,35 @@ test('出站语音：服务在但 tts 能力关时降级提示，不抛错', asy
   assert.match(结果.hint, /模型还没准备好/)
 })
 
-test('入站语音：本地 AI 正常时在路径后附转写文字', async () => {
+test('入站语音：本地 AI 正常时把声纹和转写写进同一行路径消息', async () => {
   const dir = 临时目录()
-  const 原始 = join(dir, 'from-qq.wav')
-  writeFileSync(原始, 造wav(2))
-  const 服务 = new 假服务({ asrText: '今晚早点睡' })
-  const transport = new 假传输()
-  transport.getRecord = async () => ({ file: 原始 })
-  const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
-  const voice = new VoiceService({
-    getConfig: () => normalizeConfig({ maxVoiceMB: 20 }),
-    logger,
-    transport,
-    inboxDir: join(dir, 'inbox'),
-  })
-  const 配置 = normalizeConfig({
-    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
-    reorderBufferMs: 0,
-  })
-  const bridge = new Bridge({
-    getConfig: () => 配置,
-    transport,
-    store: new StateStore({ homeDir: dir }),
-    logger,
-    voice,
-    delivery: new 假投递(),
-    ai: 建AI(服务, logger),
-    autoTimers: false,
-  })
+  const 服务 = new 假服务({ asrText: '今晚早点睡', speaker: { name: '主人', score: 0.93, known: true } })
+  const bridge = 建语音桥(dir, 服务)
   const 内容 = await bridge.buildInbound(
     { qq: QQ, name: '主人' },
     { message_id: 'm-voice-2', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
   )
-  assert.match(内容.text, /（语音：.+\.wav，2 秒）/)
-  assert.match(内容.text, /（语音转写：今晚早点睡）/)
+  assert.match(内容.text, /^（语音：.+\.wav，2 秒；说话人：主人；转写：今晚早点睡）$/)
   assert.deepEqual(服务.calls.asr, [{ path: 内容.text.match(/（语音：(.+?)，/)[1], opts: { language: 'auto' } }])
+})
+
+test('入站语音：没有声纹时只附转写', async () => {
+  const dir = 临时目录()
+  const 服务 = new 假服务({ asrText: '晚安' })
+  const bridge = 建语音桥(dir, 服务)
+  const 内容 = await bridge.buildInbound(
+    { qq: QQ, name: '主人' },
+    { message_id: 'm-voice-3', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
+  )
+  assert.match(内容.text, /，2 秒；转写：晚安）$/)
+  assert.doesNotMatch(内容.text, /说话人/)
 })
 
 test('入站图片：开关开且识图可用时，用描述 + 路径代替 base64 图片', async () => {
   const dir = 临时目录()
-  const 图 = join(dir, 'qq.png')
-  writeFileSync(图, 'fake-png')
   const 服务 = new 假服务({ describeText: '一只橘猫趴在键盘上' })
-  const voice = {
-    async fetchImage() {
-      return { buffer: Buffer.from('fake-png'), base64: 'ZmFrZQ==', mime: 'image/png', path: 图, ext: '.png' }
-    },
-  }
-  const 配置 = normalizeConfig({
-    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
-    describeInboundImages: true,
-  })
-  const bridge = new Bridge({
-    getConfig: () => 配置,
-    transport: new 假传输(),
-    store: new StateStore({ homeDir: dir }),
-    logger: new Logger({ filePath: join(dir, 'test.log'), level: 'debug' }),
-    voice,
-    delivery: new 假投递(),
-    ai: 建AI(服务),
-    autoTimers: false,
-  })
-  const 内容 = await bridge.buildInbound(
-    { qq: QQ, name: '主人' },
-    { message_id: 'm-img-1', message: [{ type: 'image', data: { file: 'a.png' } }] },
-  )
+  const { bridge, 图 } = 建图片桥(dir, 服务, { describeInboundImages: 'on' })
+  const 内容 = await bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-1'))
   assert.equal(内容.images.length, 0, '识图后不再塞 base64 图片进会话')
   assert.match(内容.text, /（图片：一只橘猫趴在键盘上；已存到 .+qq\.png）/)
   assert.match(内容.text, /收到 1 张图片/)
@@ -487,36 +512,70 @@ test('入站图片：开关开且识图可用时，用描述 + 路径代替 base
 
 test('入站图片：开关关时保持原样，图片附件和路径都在', async () => {
   const dir = 临时目录()
-  const 图 = join(dir, 'qq.png')
-  writeFileSync(图, 'fake-png')
   const 服务 = new 假服务({ describeText: '不应该被调用' })
-  const voice = {
-    async fetchImage() {
-      return { buffer: Buffer.from('fake-png'), base64: 'ZmFrZQ==', mime: 'image/png', path: 图, ext: '.png' }
-    },
-  }
-  const 配置 = normalizeConfig({
-    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
-    describeInboundImages: false,
-  })
-  const bridge = new Bridge({
-    getConfig: () => 配置,
-    transport: new 假传输(),
-    store: new StateStore({ homeDir: dir }),
-    logger: new Logger({ filePath: join(dir, 'test.log'), level: 'debug' }),
-    voice,
-    delivery: new 假投递(),
-    ai: 建AI(服务),
-    autoTimers: false,
-  })
-  const 内容 = await bridge.buildInbound(
-    { qq: QQ, name: '主人' },
-    { message_id: 'm-img-2', message: [{ type: 'image', data: { file: 'a.png' } }] },
-  )
+  const { bridge } = 建图片桥(dir, 服务, { describeInboundImages: 'off' })
+  const 内容 = await bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-2'))
   assert.equal(内容.images.length, 1)
   assert.equal(内容.images[0].base64, 'ZmFrZQ==')
   assert.match(内容.text, /\[图片\]/)
   assert.equal(服务.calls.vision.length, 0)
+  assert.equal(服务.calls.prefs, 0, '强制关时不必问插件偏好')
+})
+
+test('入站图片：继承时跟随本地 AI 插件的识图开关', async () => {
+  const 关目录 = 临时目录()
+  const 关服务 = new 假服务({ describeText: '不该出现', visionPrefs: { localDescribe: false } })
+  const 关桥 = 建图片桥(关目录, 关服务).bridge
+  const 关内容 = await 关桥.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-3'))
+  assert.equal(关服务.calls.prefs, 1)
+  assert.equal(关服务.calls.vision.length, 0)
+  assert.equal(关内容.images.length, 1, '插件关着识图时图片照常递附件')
+
+  const 开目录 = 临时目录()
+  const 开服务 = new 假服务({ describeText: '一只猫', visionPrefs: { localDescribe: true } })
+  const 开内容 = await 建图片桥(开目录, 开服务).bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-4'))
+  assert.equal(开服务.calls.vision.length, 1)
+  assert.match(开内容.text, /（图片：一只猫；已存到 /)
+})
+
+test('入站图片：on/off 覆盖插件开关；拿不到偏好时继承按开', async () => {
+  const 一目录 = 临时目录()
+  const 一服务 = new 假服务({ describeText: '一只猫', visionPrefs: { localDescribe: false } })
+  await 建图片桥(一目录, 一服务, { describeInboundImages: 'on' }).bridge
+    .buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-5'))
+  assert.equal(一服务.calls.vision.length, 1, '选「开」时不看插件偏好')
+
+  const 二目录 = 临时目录()
+  const 二服务 = new 假服务({ describeText: '一只猫', visionPrefs: { localDescribe: true } })
+  await 建图片桥(二目录, 二服务, { describeInboundImages: 'off' }).bridge
+    .buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-6'))
+  assert.equal(二服务.calls.vision.length, 0, '选「关」时不看插件偏好')
+
+  // 插件还没有 visionPrefs（本轮契约刚加）：当 unknown，按「开」处理。
+  const 三目录 = 临时目录()
+  const 三服务 = new 假服务({ describeText: '一只猫' })
+  const 三内容 = await 建图片桥(三目录, 三服务).bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-7'))
+  assert.equal(三服务.calls.prefs, 1)
+  assert.equal(三服务.calls.vision.length, 1)
+  assert.match(三内容.text, /（图片：一只猫/)
+})
+
+test('入站图片：识图失败时退回图片附件，不丢图', async () => {
+  const dir = 临时目录()
+  const 服务 = new 假服务({ visionPrefs: { localDescribe: true } })
+  服务.visionDescribe = async () => ({ ok: false, code: 'busy', hint: '本地 AI 正忙' })
+  const { bridge } = 建图片桥(dir, 服务)
+  const 内容 = await bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-8'))
+  assert.equal(内容.images.length, 1)
+  assert.match(内容.text, /\[图片\]/)
+})
+
+test('入站图片：没有本地 AI 插件时按原样递图', async () => {
+  const dir = 临时目录()
+  const { bridge } = 建图片桥(dir, null)
+  const 内容 = await bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-9'))
+  assert.equal(内容.images.length, 1)
+  assert.match(内容.text, /\[图片\]/)
 })
 
 test('出站 [语音:路径]：照常发已有音频文件，不合成', async () => {
@@ -529,6 +588,19 @@ test('出站 [语音:路径]：照常发已有音频文件，不合成', async (
   assert.equal(transport.sent.length, 1)
   assert.equal(transport.sent[0].segments[0].type, 'record')
   assert.equal(transport.sent[0].segments[0].data.file, 音频.replace(/\\/g, '/'))
+})
+
+test('旧配置：布尔识图开关迁移成三态（true→on，false→off，缺失→inherit）', () => {
+  const 读 = (内容) => {
+    const dir = 临时目录()
+    writeFileSync(join(dir, 'fish-message-config.json'), JSON.stringify(内容), 'utf8')
+    return new ConfigStore({ homeDir: dir }).load({})
+  }
+  assert.equal(读({ describeInboundImages: true }).describeInboundImages, 'on')
+  assert.equal(读({ describeInboundImages: false }).describeInboundImages, 'off')
+  assert.equal(读({}).describeInboundImages, 'inherit')
+  // 已经是三态的配置原样读回
+  assert.equal(读({ describeInboundImages: 'off' }).describeInboundImages, 'off')
 })
 
 test('旧配置：残留的 ASR/TTS 字段被静默忽略并从落盘文件清理', () => {

@@ -89,19 +89,57 @@ test('本地 AI：tts 正常时把音色和语速传给服务，并返回 wavPat
   assert.deepEqual(收到, { text: '晚安', opts: { voice: 'test_voice', speed: 2 } })
 })
 
-test('本地 AI：asr 正常时返回文字，非法语言回退 auto', async () => {
+test('本地 AI：asr 正常时返回文字和声纹，非法语言回退 auto', async () => {
   let 收到 = null
   const 服务 = 造服务({
     async asr(path, opts) {
       收到 = { path, opts }
-      return { ok: true, items: [{ text: '今晚早点睡' }] }
+      return { ok: true, items: [{ text: '今晚早点睡', speaker: { name: '主人', score: 0.91, known: true } }] }
     },
   })
   const ai = 建(() => 服务)
   const 结果 = await ai.asr('C:/a.wav', { language: 'klingon' })
   assert.equal(结果.ok, true)
   assert.equal(结果.text, '今晚早点睡')
+  assert.deepEqual(结果.speaker, { name: '主人', score: 0.91, known: true })
   assert.deepEqual(收到, { path: 'C:/a.wav', opts: { language: 'auto' } })
+
+  // 服务没给 speaker（或没识别出来）时是 null，不影响转写。
+  const 空结果 = await 建(() => 造服务()).asr('C:/a.wav')
+  assert.equal(空结果.speaker, null)
+})
+
+test('本地 AI：识图偏好读 visionPrefs，接口缺失或返回不认识时算 unknown', async () => {
+  const 有 = 造服务({ async visionPrefs() { return { localDescribe: false } } })
+  assert.deepEqual(await 建(() => 有).visionPrefs(), { known: true, localDescribe: false })
+
+  const 开 = 造服务({ async visionPrefs() { return { localDescribe: true } } })
+  assert.deepEqual(await 建(() => 开).visionPrefs(), { known: true, localDescribe: true })
+
+  assert.deepEqual(await 建(() => 造服务()).visionPrefs(), { known: false }, '接口还没实现')
+  assert.deepEqual(await 建(() => null).visionPrefs(), { known: false }, '没装插件')
+
+  const 抛错 = 造服务({ async visionPrefs() { throw new Error('还没实现') } })
+  assert.deepEqual(await 建(() => 抛错).visionPrefs(), { known: false })
+
+  const 怪值 = 造服务({ async visionPrefs() { return { localDescribe: '大概吧' } } })
+  assert.deepEqual(await 建(() => 怪值).visionPrefs(), { known: false })
+})
+
+test('本地 AI：三态识图开关 on/off 直接生效，继承时跟随插件、拿不到按开', async () => {
+  const 关偏好 = 造服务({ async visionPrefs() { return { localDescribe: false } } })
+  const 关 = 建(() => 关偏好)
+  assert.equal(await 关.入站识图开关('on'), true)
+  assert.equal(await 关.入站识图开关('off'), false)
+  assert.equal(await 关.入站识图开关('inherit'), false)
+  assert.equal(await 关.入站识图开关(), false, '缺省按继承处理')
+
+  const 开偏好 = 造服务({ async visionPrefs() { return { localDescribe: true } } })
+  assert.equal(await 建(() => 开偏好).入站识图开关('inherit'), true)
+
+  // 没装插件、或者插件还没有 visionPrefs：按「开」处理，识图失败会退回原图。
+  assert.equal(await 建(() => null).入站识图开关('inherit'), true)
+  assert.equal(await 建(() => 造服务()).入站识图开关('inherit'), true)
 })
 
 test('本地 AI：识图按 caption 模式调用，并压掉多余空白', async () => {
@@ -155,23 +193,29 @@ test('能力状态：有方法但 capabilities 为 false 时判不可用', () =>
   assert.equal(状态.reason, 'not_supported')
 })
 
-test('配置：语音相关新字段有默认值，非法值被钳回', () => {
+test('配置：语音相关字段有默认值，识图开关兼容旧布尔值', () => {
   const 默认 = normalizeConfig({})
   assert.equal(默认.sayVoice, 'dafeiyu')
   assert.equal(默认.saySpeed, 1)
   assert.equal(默认.transcribeInbound, true)
   assert.equal(默认.asrLanguage, 'auto')
-  assert.equal(默认.describeInboundImages, false)
+  assert.equal(默认.describeInboundImages, 'inherit', '默认跟随本地 AI 插件')
 
   const 改过 = normalizeConfig({
     sayVoice: 'test_voice', saySpeed: 9, transcribeInbound: false,
-    asrLanguage: 'fr', describeInboundImages: true,
+    asrLanguage: 'fr', describeInboundImages: 'off',
   })
   assert.equal(改过.sayVoice, 'test_voice')
   assert.equal(改过.saySpeed, 2)
   assert.equal(改过.transcribeInbound, false)
   assert.equal(改过.asrLanguage, 'auto')
-  assert.equal(改过.describeInboundImages, true)
+  assert.equal(改过.describeInboundImages, 'off')
+
+  // 旧版本存的是布尔值：true → on，false → off；缺失或不认识 → inherit。
+  assert.equal(normalizeConfig({ describeInboundImages: true }).describeInboundImages, 'on')
+  assert.equal(normalizeConfig({ describeInboundImages: false }).describeInboundImages, 'off')
+  assert.equal(normalizeConfig({ describeInboundImages: 'maybe' }).describeInboundImages, 'inherit')
+  assert.equal(normalizeConfig({ describeInboundImages: 'ON' }).describeInboundImages, 'on')
 
   assert.equal(normalizeConfig({ saySpeed: 0.1 }).saySpeed, 0.5)
   assert.equal(normalizeConfig({ asrLanguage: 'yue' }).asrLanguage, 'yue')
