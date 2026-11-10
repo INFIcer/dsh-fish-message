@@ -179,17 +179,18 @@ window.__ModuleLoader__.load({
     const 指标 = (文本, 说明) => h('span', { style: { marginRight: 12, whiteSpace: 'nowrap' } },
       文本, 说明 ? 问号(说明) : null)
 
-    function 输入(值, onChange, 占位 = '') {
+    function 输入(值, onChange, 占位 = '', 禁用 = false) {
       return h('input', {
         style: S.input,
         value: 值 == null ? '' : String(值),
         placeholder: 占位,
+        disabled: !!禁用,
         onChange: (e) => onChange(e.target.value),
       })
     }
 
-    function 开关(值, onChange) {
-      return h('input', { type: 'checkbox', checked: !!值, onChange: (e) => onChange(e.target.checked) })
+    function 开关(值, onChange, 禁用 = false) {
+      return h('input', { type: 'checkbox', checked: !!值, disabled: !!禁用, onChange: (e) => onChange(e.target.checked) })
     }
 
     // 路径输入 +「打开文件夹」：地址不存在时按钮置灰，越界等校验在宿主路由。
@@ -551,6 +552,23 @@ window.__ModuleLoader__.load({
       const [说, 设说] = React.useState('')
       // 表情包的网格占用面积大，放在独立视图里，设置页只留入口。
       const [视图, 设视图] = React.useState('main')
+      // 发送音色下拉：只在本地 AI 的语音能力可用时拉一次；失败就退回文本输入。
+      const [音色们, 设音色们] = React.useState(null)
+      const [音色提示, 设音色提示] = React.useState('')
+      const 可拉音色 = Boolean(态 && 态.ai && 态.ai.tts)
+      React.useEffect(() => {
+        if (!可拉音色) return undefined
+        let 有效 = true
+        get('/ai/voices').then((r) => {
+          if (!有效) return
+          if (r && r.ok && Array.isArray(r.voices) && r.voices.length) 设音色们(r.voices)
+          else {
+            设音色们(null)
+            设音色提示(String((r && r.hint) || '暂时读不到音色列表，可直接填写音色名。'))
+          }
+        })
+        return () => { 有效 = false }
+      }, [可拉音色])
 
       const 拉 = async () => {
         const s = await get('/state')
@@ -683,6 +701,55 @@ window.__ModuleLoader__.load({
           null,
           '开启时只发标记内的部分；关闭时整条发送，标记会被去掉。'))
 
+      const AI能力 = 态.ai || {}
+      const AI在线 = Boolean(AI能力.online)
+      const 语音可用 = Boolean(AI能力.tts)
+      const 转写可用 = Boolean(AI能力.asr)
+      const 识图可用 = Boolean(AI能力.vision)
+      const 服务提示 = AI能力.installed
+        ? (AI能力.hint || '本地 AI 插件没启动：启动后可发语音、转写语音。')
+        : '未安装本地 AI 插件：装上后可发语音、转写语音。'
+      const 音色值 = 配置.sayVoice || 'dafeiyu'
+      const 音色控件 = (Array.isArray(音色们) && 音色们.length)
+        ? h('select', {
+          style: S.input, value: 音色值, disabled: !语音可用,
+          onChange: (e) => 改('sayVoice', e.target.value),
+        },
+          音色们.includes(音色值) ? null : h('option', { value: 音色值 }, 音色值),
+          音色们.map((名) => h('option', { key: 名, value: 名 }, 名)))
+        : 输入(音色值, (v) => 改('sayVoice', v), 'dafeiyu', !语音可用)
+
+      const 语音页 = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '语音'),
+        AI在线 ? null : h('div', { style: { ...S.hint, marginBottom: 8 } }, 服务提示),
+        (AI在线 && !语音可用) ? h('div', { style: { ...S.hint, marginBottom: 8 } }, '本地 AI 的语音合成暂不可用。') : null,
+        行('发送语音音色', h('div', null,
+          音色控件,
+          (!Array.isArray(音色们) && 音色提示 && 语音可用) ? h('div', { style: S.hint }, 音色提示) : null),
+        '用于把 [语音] 文字[/语音] 合成为语音条。', null),
+        行('发送语音语速', h('input', {
+          style: S.small, type: 'number', min: 0.5, max: 2, step: 0.1,
+          value: 配置.saySpeed ?? 1, disabled: !语音可用,
+          onChange: (e) => 改('saySpeed', Number(e.target.value)),
+        }), null, '0.5 到 2，默认 1。'),
+        (AI在线 && !转写可用) ? h('div', { style: { ...S.hint, marginBottom: 8 } }, '本地 AI 的语音识别暂不可用。') : null,
+        行('收到语音后自动转文字', 开关(配置.transcribeInbound, (v) => 改('transcribeInbound', v), !转写可用),
+          '关闭后只把语音文件路径递进会话。', null),
+        行('语音转写语言', h('select', {
+          style: S.input, value: 配置.asrLanguage || 'auto', disabled: !转写可用 || 配置.transcribeInbound === false,
+          onChange: (e) => 改('asrLanguage', e.target.value),
+        },
+          h('option', { value: 'auto' }, '自动识别'),
+          h('option', { value: 'zh' }, '中文'),
+          h('option', { value: 'en' }, '英语'),
+          h('option', { value: 'ja' }, '日语'),
+          h('option', { value: 'ko' }, '韩语'),
+          h('option', { value: 'yue' }, '粤语')),
+        null, '不确定时选自动识别。'),
+        行('收到图片后先在本地识图', 开关(配置.describeInboundImages, (v) => 改('describeInboundImages', v), !识图可用),
+          '开启后图片只递文字描述和本地路径；识图失败仍会保留图片。', null),
+        (AI在线 && !识图可用) ? h('div', { style: { ...S.hint, marginTop: 2 } }, '本地 AI 的识图能力暂不可用。') : null)
+
       const 补投页 = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '同步与补发'),
         行('离线消息补发范围（小时）', h('input', {
@@ -751,7 +818,7 @@ window.__ModuleLoader__.load({
             指标(`已跳过 ${桥.stats?.skippedOld || 0} 条`, '早于补发范围的旧消息。'),
             指标(`出错 ${桥.stats?.errors || 0} 次`)),
           (桥.lastSyncError || 桥.stats?.lastError) ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近一次出错：${桥.lastSyncError || 桥.stats.lastError}`) : null),
-        连接页, 绑定页, 行为页, 补投页, h(表情设置, {
+        连接页, 绑定页, 行为页, 语音页, 补投页, h(表情设置, {
           配置,
           改,
           打开: () => 设视图('stickers'),
