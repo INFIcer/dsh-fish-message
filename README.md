@@ -1,517 +1,124 @@
 # dsh-fish-message
 
-DSH 的 QQ 私聊桥。v1 只做私聊：**QQ 私聊 ↔ 一间 DSH 会话**，支持文字、图片、语音文件、表情包、离线补投、转义标记和持久化出站队列。设置页/诊断走本地 HTTP 路由，程序调用走 `fish.message` Cordis 服务。
-
-> **职责边界：鱼讯只做 QQ 传输。** 入站语音只落盘、把本地路径和时长递给会话；出站只发已有音频文件。
-> 语音识别 / 合成在 `dsh-fish-ops`（调 `fish.service` 的 ASR / TTS，再经 `fish.message` 发回 QQ）。
-
-- 插件名：`dsh-fish-message`
-- 版本：`0.1.0`
-- 传输：NapCat / OneBot 11（WebSocket 优先，HTTP 轮询兜底）
-- 语音能力：**无内置 ASR/TTS**；`[语音:路径]` 发文件，`[语音]文字[/语音]` 会返回 `tts_moved_to_ops`
-- 代码目录：`E:\dsh-fish-message`
-- 家目录文件：`<DSH 家目录>\fish-message-*`（默认 `C:\Users\Administrator\.dsh`）
-
-> 本插件替换第三方 `dsh-qq-bridge`。两个插件不要同时启用，否则同一条 QQ 消息会被转两次。
+DSH 的 QQ 私聊通道。它把 QQ 私聊与 DSH 会话连接起来，双向传递文字、图片和语音文件，
+并在 DSH 未运行或 QQ 暂时离线时保留消息、等待恢复后补发。
 
 ---
 
-## 1. 它解决的三个老问题
+## 1. 用途
 
-1. **能发语音**：支持 `[语音:路径]` 直接发已有音频；「合成 + 发送」用 `dsh-fish-ops`
-   的 `fish_say_and_send`（鱼讯只负责 record 段的传输）。
-2. **消息不漏**：旧桥只看「上次时间」，机器人/DSH 没启动期间收到的消息不会补。
-   本插件给每个私聊维护 `last_message_id` / `last_timestamp` 水位，并持久化到状态文件；
-   启动、WS 重连、定时器、HTTP 轮询都会从历史补齐，按时间升序、按 `message_id` 去重。
-3. **发不出去也不丢**：DSH 的回复在 QQ 离线/发送失败时写进
-   `<家目录>\fish-message-outbox.json`，恢复后按 `createdAt` FIFO 补发；
-   相同内容 10 分钟内只留一条，失败指数退避，TTL 24 小时，单条最多试 20 次。
+- 在 QQ 私聊与 DSH 会话之间互传消息，目前仅支持私聊。
+- 支持文字、图片、语音文件的收发，以及普通文件的发送。
+- 支持按名称或标签发送表情包，并可管理自己的表情包。
+- DSH 或 QQ 未运行期间收到的消息，会在恢复后补发；暂时发不出去的消息先保存在本机，
+  恢复后按顺序重试，不会直接丢失。
+- 语音的识别与合成由「鱼操作集」完成，鱼讯只负责传递语音文件。
 
 ---
 
-## 2. 目录结构
+## 2. 安装
+
+### 2.1 准备
+
+- 已安装并可正常使用的 DSH。
+- 本机已安装 QQ 登录服务（如 NapCat），并已登录需要使用的 QQ 号。
+- Node.js 20 或更高版本。
+
+### 2.2 安装插件
+
+在本目录执行：
+
+```powershell
+pnpm install
+dsh plugin --profile desktop add .
+```
+
+然后确认 DSH 的插件配置中已启用鱼讯。
+
+### 2.3 避免重复接收
+
+如果之前使用过其他 QQ 桥接插件，请先停用，否则同一条 QQ 消息会被处理两次。
+
+### 2.4 重启 DSH
+
+重启后打开「设置 → 鱼讯 QQ」。
+
+> 若当前正在 DSH 会话中，重启会结束该会话，请另开一个终端执行重启。
+
+---
+
+## 3. 使用
+
+### 3.1 连接 QQ
+
+在设置页「连接设置」中填写 QQ 登录服务地址；服务启用了鉴权时再填写访问令牌。
+连接正常时，页面顶部显示「在线」。
+
+### 3.2 绑定会话
+
+在「私聊绑定」中，为每个 QQ 号选择一间 DSH 会话。关闭「启用」后，该 QQ 号不再收发消息。
+每行第一列的称呼仅用于区分不同联系人。
+
+### 3.3 发送消息
+
+DSH 的回复默认只发送 `[QQ]…[/QQ]` 标记内的内容，其余部分留在 DSH。若希望整条回复都发送，
+可在「消息处理」中关闭该限制，此时标记本身会被去掉。
 
 ```text
-E:\dsh-fish-message
-├─ package.json            # DSH 插件声明（dsh.bundle.patch / dsh.client.inject）
-├─ cordis.patch.yml        # 把插件插进 profile 的 loader patch
-├─ client.js               # 设置页（纯原生 JS + 平台自带 React；含表情包分区）
-├─ lib
-│  ├─ host.js              # 宿主入口：组装、路由、session/event 监听
-│  ├─ bridge.js            # 收/发核心：队列、去重、水位、补投、出站
-│  ├─ format.js            # [QQ] 块、反斜杠转义、图片/语音/文件/表情指令
-│  ├─ config.js            # 默认配置、旧桥迁移、范围钳制、schemastery schema
-│  ├─ storage.js           # 水位 / 已处理 id / 统计 / 最近事件
-│  ├─ outbox.js            # 持久化出站队列：去重 / FIFO / 退避 / TTL
-│  ├─ queue.js             # 每个聊天的乱序缓冲队列
-│  ├─ voice.js             # 入站语音 get_record/落盘/时长、图片落盘（无 ASR/TTS）
-│  ├─ delivery.js          # agent.followup + 图片附件
-│  ├─ stickers.js          # 表情库：索引、sha256 去重、标签、搜索、导入、清理
-│  ├─ sticker-routes.js    # /stickers HTTP 路由（multipart、取图防穿越）
-│  ├─ tools.js             # fish_sticker_list / fish_sticker_send
-│  ├─ logger.js            # 内存日志环 + 滚动文件
-│  ├─ fs-util.js           # 原子写 JSON
-│  └─ transport
-│     ├─ base.js           # Transport 适配器接口
-│     └─ napcat-onebot.js  # v1 的 NapCat / OneBot 11 实现
-├─ docs
-│  ├─ FORMAT.md            # 语法、转义、代码块约定
-│  ├─ ARCHITECTURE.md      # 数据流、补投算法、出站队列状态机、扩展点
-│  └─ ACCEPTANCE.md        # 真机验收清单与命令
-└─ tests                   # 单测 + mock OneBot 集成测试
-```
-
----
-
-## 3. 安装到 DSH profile
-
-### 3.1 先备份
-
-```powershell
-$profileDir = 'C:\Users\Administrator\.dsh\profiles\desktop'
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-Copy-Item "$profileDir\package.json" "$profileDir\package.json.bak-fish-message-$stamp"
-Copy-Item "$profileDir\cordis.patch.yml" "$profileDir\cordis.patch.yml.bak-fish-message-$stamp"
-```
-
-### 3.2 安装插件
-
-在 `E:\dsh-fish-message` 已经 `pnpm install` 过（依赖 `ws`、`@deepseek-ai/schemastery`）的前提下：
-
-```powershell
-dsh plugin --profile desktop add E:\dsh-fish-message
-```
-
-这会做两件事：
-
-- 在 profile 的 `package.json` 写入 `dsh-fish-message` 依赖；
-- 把声明了 `dsh.bundle.patch` 的包追加到 `dsh.profile.bundles`。
-
-### 3.3 禁用旧桥
-
-编辑 `C:\Users\Administrator\.dsh\profiles\desktop\package.json`，从 `dsh.profile.bundles` 里删掉：
-
-```json
-"dsh-qq-bridge"
-```
-
-**保留** `dependencies` 里的 `dsh-qq-bridge`，这样回滚时不用重新下载。旧桥的数据文件
-`~/.dsh/qq-bridge-config.json`、`qq-bridge-state.json` 也全部保留、不改、不删。
-
-### 3.4 重启 DSH
-
-**注意：如果你此刻正在 DSH 会话里，重启会杀掉当前会话。** 不要在会话里直接执行；
-让父 agent / 另一个终端执行：
-
-```powershell
-pwsh -NoProfile -File C:\Users\Administrator\.dsh\_restart\dsh-restart.ps1 `
-  -SessionId session-a3e56af2-2285-44e6-b32d-863efb9e7d8b `
-  -WakeText '【dsh-fish-message 已启用】检查 /dsh-fish-message/health，并按 docs/ACCEPTANCE.md 做真机验收。'
-```
-
-或者用本仓库的薄包装（参数会转给上面那个脚本）：
-
-```powershell
-pwsh -NoProfile -File E:\dsh-fish-message\tools\restart-dsh.ps1
-```
-
-重启后打开 **DSH 设置 → 鱼讯 QQ**。
-
----
-
-## 4. 配置
-
-配置文件：`<DSH 家目录>\fish-message-config.json`。设置页保存的也是它。
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `napcatBaseUrl` | `http://127.0.0.1:3000` | OneBot 11 HTTP 根地址 |
-| `napcatToken` | 空 | OneBot access_token；没有就留空 |
-| `wsEnabled` | `true` | 优先 WebSocket |
-| `wsUrl` | 自动推导 | http→ws，https→wss |
-| `bindings` | `[]` | `[{ qq, session, name, enabled }]`，v1 只支持私聊 |
-| `onlyInsideMarkers` | `true` | 只发 `[QQ]…[/QQ]` 块内 |
-| `backfillWindowHours` | `24` | 补投窗口；超过只发摘要 |
-| `outboxTtlHours` | `24` | 出站队列 TTL；过期丢弃并记统计 |
-| `outboxDedupMinutes` | `10` | 相同 fingerprint 去重窗口 |
-| `outboxFlushIntervalMs` | `10000` | 出站队列心跳补发间隔 |
-| `pollIntervalMs` | `2000` | WS 不可用时的 HTTP 轮询间隔 |
-| `historyIntervalMs` | `60000` | 即使 WS 连着也定期拉历史兜底 |
-| `reorderBufferMs` | `1500` | 乱序缓冲 |
-| `historyCount` | `100` | 每次拉多少条历史 |
-| `maxImageMB` | `10` | 图片上限 |
-| `maxVoiceMB` | `20` | 语音上限（base64 兜底也受它限制） |
-| `requestTimeoutMs` | `15000` | OneBot HTTP 超时 |
-| `stickerDir` | `<家目录>\fish-message-stickers` | 表情库目录：`index.json` + `gif/` + `img/` |
-| `autoSaveStickers` | `false` | 入站图片自动入库（标签留空、来源 `qq-auto`） |
-| `stickerMaxCount` | `2000` | 表情库条数上限；超了提示清理，不静默删 |
-| `stickerMaxMB` | `1024` | 表情库总大小上限（MB） |
-| `logLevel` | `info` | `debug` / `info` / `warn` / `error` |
-
-旧桥配置会在第一次启动时被读取并迁移到内存（`NapCat`、`绑定`、`只发标记内`、
-`轮询间隔毫秒` 等）。保存设置后才会写新的 `fish-message-config.json`。
-
-**已移除的 ASR/TTS 字段**：`transcriptionEnabled`、`asrBaseUrl`、`asrCommand`、
-`asrTimeoutMs`、`ttsEnabled`、`ttsBaseUrl`、`ttsVoice`、`ttsTimeoutMs`。
-旧配置里残留这些键时：加载**直接忽略、不报错**，并静默把落盘文件里的这些键清掉
-（配置文件本身保留，不删用户文件）。设置页也不再显示对应区块。
-
----
-
-## 5. 消息语法
-
-完整语法和例子见 [`docs/FORMAT.md`](docs/FORMAT.md)，这里只列最常用的：
-
-```text
-这句只留在 DSH，不会发出去。
-
-[QQ]这句会发到 QQ。[/QQ]
+[QQ]这段会发送到 QQ。[/QQ]
 
 [QQ]第一段[/QQ]
-[QQ]第二段（两段会拼成一条，中间换行）[/QQ]
-
-[QQ]我想发字面量 \[\/QQ] 结束[/QQ]
+[QQ]第二段（两段会合并为一条消息）[/QQ]
 ```
 
-- 标记只认**未转义**、且**不在代码块 / 行内代码**里的 `[QQ]` / `[/QQ]`。
-- `\[` → `[`，`\]` → `]`，`\\` → `\`；额外认 `\/` → `/`，所以 `\[\/QQ]` 也能发字面量 `[/QQ]`。
-- 只写 `[QQ]` 没写 `[/QQ]`：按「`[QQ]` 之后全是要发的」处理。
-- 多个块按出现顺序用换行拼接。
-- 关掉「只发标记内」：整条发，但标记本身会剥掉；代码块里的标记不剥。
-
-显式指令：
+### 3.4 发送图片、语音与文件
 
 ```text
-[图片:C:\pics\a.png]
-[图片:https://example.com/a.png]
-[语音:C:\audio\a.wav]
-[文件:D:\docs\a.pdf]
+[图片:C:\图片\示例.png]
+[语音:C:\音频\示例.wav]
+[文件:D:\文档\示例.pdf]
+```
+
+语音只发送本机已有的音频文件，不做识别或合成。需要识别语音或合成语音时，请使用「鱼操作集」。
+文件能否发送成功，取决于 QQ 登录服务的版本与权限。
+
+### 3.5 表情包
+
+在设置页「表情包」中可设置保存位置、自动保存、数量上限与占用空间上限，并点击「管理表情包」
+进入独立的管理页。管理页支持上传、从默认表情库导入、搜索、编辑标签与描述、删除和直接发送。
+
+发送表情时，可使用名称或标签：
+
+```text
 [表情:打哈欠]
 [表情:#睡觉]
-[表情:3b23f496681f]
 ```
 
-> `[语音]文字[/语音]` 已不再合成：遇到时鱼讯不发消息，只返回
-> `code: 'tts_moved_to_ops'`，提示改用 ops 的 `fish_say_and_send` / `fish_say_voice`。
+找不到对应表情时会在 DSH 会话中提示，不会静默跳过。
 
-表情指令支持名字、`#标签`、id，大小写不敏感；一次可以写多个。找不到时会在会话里明确提示
-（不会静默跳过），名字以设置页「表情包」里显示的文件名/标签为准。
+### 3.6 离线补发与待发消息
 
-> `[文件:…]` 依赖 NapCat 版本是否支持 `file` 段；不支持时会在日志和状态里报错，
-> 不会静默假装成功。
+DSH 或 QQ 未运行期间收到的消息，会在恢复后按时间顺序补发；超过「离线消息补发范围」的旧消息
+只发送一条汇总提示。暂时发不出去的消息会先保存在本机，可在「待发消息」中查看积压情况、
+立即重试或清空。清空后这些消息不再补发。
 
----
+### 3.7 日志
 
-## 6. 语音
-
-> 鱼讯只做传输：不识别、不合成。识别/合成见 `dsh-fish-ops` 的
-> `fish_say_and_send`、`fish_voice_reply`、`fish_say_voice`、`fish_voice_note_analyze`。
-
-### 入站
-
-1. 收到 `record` 段；
-2. 调 OneBot `get_record(file, out_format=wav)` 拿 wav；失败则下载 `url` / 解 `base64://`；
-3. 原文件保存到 `<家目录>\fish-message-inbox\`；
-4. 从 wav 头读时长（读不到就不显示秒数）；
-5. 把 `（语音：<绝对路径>，N 秒）` 递进会话——**不转写、不带声纹、不调 7880**。
-
-落盘失败时消息不丢：会变成 `[语音（保存失败：…）]`，错误同时进日志/状态。
-
-### 出站
-
-```text
-[QQ][语音:C:\audio\a.wav][/QQ]
-```
-
-发送顺序：本地绝对路径（正斜杠）→ `file:///` → `base64://`，失败自动重试，最多 3 次。
-仍失败时只存路径入队，补发时文件不存在会丢弃并记错；不会把音频字节写进队列。
-`[语音]文字[/语音]` 不再合成，返回 `tts_moved_to_ops`（见第 5 节）。
+设置页底部显示最近日志，可滚动查看。日志只保留最近一段时间，重启后重新开始记录。
 
 ---
 
-## 7. 离线补投（核心）
+## 4. 已知缺陷
 
-每个绑定维护：
-
-```json
-{
-  "watermarks": {
-    "1696117435": { "timestamp": 1794200000, "messageId": "123456" }
-  },
-  "seen": ["123456", "123457"]
-}
-```
-
-逻辑：
-
-1. 启动时先从旧桥 `qq-bridge-state.json` 搬一次水位和已转 id（只读，不修改旧文件）；
-2. 每次同步拉 `get_friend_msg_history`；
-3. 只保留对方发来的私聊消息（`user_id == 绑定 QQ`），过滤自己发出去的；
-4. 过滤已处理 `message_id` 和水位之前的历史；
-5. 按 `time` / `message_seq` / `message_id` 升序；
-6. 在补投窗口内逐条 `agent.followup`；超过窗口的只发一条「离线补投摘要」；
-7. 只有**真正投进 DSH** 才推进水位；会话没开/投递失败会保留，下一轮重试；
-8. 水位在每次成功后原子落盘，重启不丢。
-
-WS 连接、WS 重连、每 60 秒、HTTP 轮询都会触发这个同步；同步是串行的，不会并发重复拉。
+- 仅支持私聊，群聊暂不支持。
+- 文件发送依赖 QQ 登录服务的版本与权限，部分环境可能无法发送。
+- 待发消息严格按顺序补发：前一条长期发送失败时，后面的消息会一起等待。
+- 极少数情况下补发可能重复一次（消息已送达但记录尚未清除时）。
+- 表情包预览使用原图，较大的动图加载会稍慢。
+- 表情包达到上限后需要手动清理，不会自动删除旧表情。
+- 更换表情包保存位置后，原有图片不会自动迁移。
+- 语音只传递文件，识别与合成能力由「鱼操作集」提供。
 
 ---
 
-## 8. 持久化出站队列（发送不丢）
-
-文件：`<DSH 家目录>\fish-message-outbox.json`，原子写，结构 `{ version, items: [...] }`。
-
-什么时候入队：
-
-1. 网络错误 / 超时 / 连接拒绝；
-2. OneBot HTTP 非 2xx；
-3. `retcode != 0` 或 `status != ok`；
-4. 传输层已停止；
-5. 补发进行中 / 队列已有积压（新消息排到队尾，保持顺序）。
-
-补发时机：WS 恢复、每 10 秒心跳、启动 0.8 秒、`POST /outbox/flush` 手动。
-按 `createdAt` FIFO，失败指数退避 `min(5s × 1.8^attempts, 300s)`；
-默认 TTL 24 小时、单条最多 20 次、最多 1000 条（超出丢最旧）。
-
-去重：`fingerprint = sha256(qq + 规范化 segments)`，默认 10 分钟内相同内容只留一条。
-语音只存已有文件路径、补发时不合成；音频/图片/文件路径失效直接丢弃并报错。
-
-设置页「出站队列」显示「积压 N 条 / 最老 X 秒」，可「立即补发」「清空」。
-更细的状态机见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#44-持久化出站队列)。
-
----
-
-## 9. 表情包
-
-### 9.1 库与索引
-
-默认目录 `<DSH 家目录>\fish-message-stickers\`（配置 `stickerDir`，改完保存即生效，不用重启）：
-
-```text
-fish-message-stickers/
-├─ index.json          # 索引，原子写
-├─ gif/*.gif           # 动图（原字节复制，不转码）
-└─ img/*.png|jpg|webp|bmp
-```
-
-索引条目：
-
-```json
-{
-  "id": "3b23f496681f",
-  "file": "gif/3b23f496681f.gif",
-  "type": "gif",
-  "sha256": "3b23f496…",
-  "size_kb": 1473,
-  "width": 180,
-  "height": 180,
-  "frames": 62,
-  "duration_s": 5.16,
-  "tags": ["打哈欠", "睡觉"],
-  "desc": "Q版蓝发鲸鱼娘…",
-  "source": "QQ 主人发送",
-  "added_at": "2026-11-08T16:18:26",
-  "used_count": 0,
-  "last_used_at": ""
-}
-```
-
-- 按 `sha256` 去重：同内容只留一份文件，重复入库只合并标签/描述；
-- 上限默认 2000 条 / 1024MB（`stickerMaxCount` / `stickerMaxMB`）。超限**只报错并提示清理**，
-  不会自动删已有表情；
-- 改名只改库内文件名，id 不变；删除可选是否连文件一起删。
-
-### 9.2 收（入站保存）
-
-- 默认**不自动入库**（避免刷屏）；打开 `autoSaveStickers` 后入站图片按 `source: 'qq-auto'` 自动入库，
-  标签留空，按 sha 去重；
-- 设置页「最近收到的图片」列出 `<家目录>\fish-message-inbox\` 最近 20 个 `qq-image-*`，
-  每张可填标签/描述后「存为表情」；
-- 「清空最近图片」只删 `qq-image-*`，不碰收件箱里的其它文件。
-
-### 9.3 管（设置页「表情包」）
-
-- 网格预览：GIF 直接动，`loading="lazy"` 惰性加载；
-- 搜索框（标签/描述/文件名/id）、标签筛选、按用量/加入时间/文件名排序；
-- 每张卡片可改标签、改描述、删除、复制路径、选绑定 QQ 后直接发送；
-- 顶部：多选/拖拽上传、一键导入、统计（条数/占用/上限）、清理（删未使用 / 去重 / 清空最近图片）。
-
-### 9.4 发（指令 + 服务）
-
-```text
-[QQ][表情:打哈欠][/QQ]
-[QQ]先看这个 [表情:#睡觉] 再看这个 [表情:3b23f496681f][/QQ]
-```
-
-- 名字解析顺序：精确 id → 文件名（带/不带扩展名）→ `#标签` → 描述/文件名模糊匹配；
-- 标签命中多个时优先挑「用得最少、最久没用」的，形成轮换；
-- 发送走现有 `image` 段逻辑（NapCat 图片，GIF 保留动图）；直接发成功后 `used_count+1`、
-  `last_used_at` 更新；进了补发队列的，在真正补发成功时再计数；
-- 找不到时不会静默：日志/状态记错，并在对应 DSH 会话里投一条明确提示，指出该用
-  `[表情:名字]`、`[表情:#标签]` 还是 `[表情:id]`。
-
-### 9.5 一键导入
-
-`POST /dsh-fish-message/stickers/import`（设置页按钮）读取 `D:\dsh_ws\表情库\index.json`：
-
-- 兼容 `{ version, stickers: [...] }` 或裸数组；`type` 里的 `jpg/png` 统一转成 `img`；
-- 逐条重新计算 sha256（不信任源里的 sha），按本库去重合并标签；已存在则 `merged++`；
-- 保留源 id（不冲突时）、标签、描述、来源、加入时间；GIF 的 frames/duration 优先用源值；
-- 源条目路径跑出库目录、文件不存在、格式不认识都会进 `errors` 并计入 `skipped`，
-  不中断其余条目。
-
-### 9.6 工具与 Cordis 服务
-
-- Agent 工具：`fish_sticker_list`（只读搜索）、`fish_sticker_send`（发到 QQ，`qq` 省略用第一条绑定）；
-- `fish.message` 服务：`stickers.list / save / get / send(qq, name)`，`capabilities().stickers === true`；
-- 所有工具/服务返回值**不含 base64**。
-
----
-
-## 10. HTTP 接口和日志
-
-| 方法 | 路径 | 用途 |
-|---|---|---|
-| GET | `/dsh-fish-message/state` | 在线状态、配置、绑定、水位、出站队列统计、日志 |
-| GET | `/dsh-fish-message/health` | 轻量健康检查，桥在跑返回 200 |
-| POST | `/dsh-fish-message/save` | 保存配置（设置页用） |
-| POST | `/dsh-fish-message/test-send` | 发一条固定测试文字 |
-| GET | `/dsh-fish-message/logs` | 最近 200 行日志 |
-| GET | `/dsh-fish-message/outbox?limit=` | 出站队列列表 + 统计 |
-| POST | `/dsh-fish-message/outbox/flush` | 立即补发 |
-| POST | `/dsh-fish-message/outbox/clear` | 清空队列 |
-| DELETE | `/dsh-fish-message/outbox/{id}` | 丢弃单条 |
-| GET | `/dsh-fish-message/stickers?q=&tag=&limit=&offset=&sort=` | 表情列表/搜索 |
-| POST | `/dsh-fish-message/stickers/save` | 入库：multipart 上传或 `{path,tags,desc}` |
-| POST | `/dsh-fish-message/stickers/update` | 改标签/描述/文件名 |
-| POST | `/dsh-fish-message/stickers/delete` | 删除（默认连文件） |
-| POST | `/dsh-fish-message/stickers/send` | `{qq,name,count?}` 发到 QQ |
-| GET | `/dsh-fish-message/stickers/file?path=` | 取库内图片（只允许库目录，防穿越） |
-| GET | `/dsh-fish-message/stickers/recent` | inbox 最近 20 张收到的图片 |
-| GET | `/dsh-fish-message/stickers/recent/file?name=` | 取 inbox 图片（只认文件名） |
-| POST | `/dsh-fish-message/stickers/import` | 导入指定表情库目录 |
-| POST | `/dsh-fish-message/stickers/cleanup` | `{mode:'unused'\|'dedupe'\|'inbox'}` |
-
-HTTP 路由只给本地设置页/诊断用；程序调用请用 `fish.message` 服务。
-全部只监听 `127.0.0.1`、无鉴权（与现有路由一致）。
-
-日志：
-
-- 内存环：设置页显示最近 200 行；
-- 落盘：`<DSH 家目录>\fish-message.log`，超过 5 MB 滚动为 `fish-message.log.1`。
-
----
-
-## 11. 测试
-
-```powershell
-cd E:\dsh-fish-message
-pnpm install
-npm test
-```
-
-测试不需要连 QQ，也不需要 DSH：
-
-- `tests/format.test.js`：块、转义、多个块、未闭合、代码块、显式指令；
-- `tests/core.test.js`：补投排序/去重、水位持久化、窗口摘要、WS 乱序、出站、语音重试、入站语音只落盘、`tts_moved_to_ops`、旧配置清理；
-- `tests/outbox.test.js`：出站队列落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、离线入队→恢复补发、路径失效丢弃；
-- `tests/integration.test.js`：Node 内起 mock OneBot HTTP + WS，验证收/发/补投/轮询/重启；
-- `tests/host.test.js`：假 ctx 下验证 DSH 路由、状态、`session/event` 出站；
-- `tests/stickers.test.js`：入库/去重/搜索/改名/删除/bump/上限/导入/GIF 保留/服务门面/工具/Bridge 指令；
-- `tests/stickers-route.test.js`：`/stickers` 参数校验、multipart、发送、取图穿越防护、导入、清理。
-
-当前共 93 项，全部离线（不需要 QQ / DSH / 本地 AI）。
-
----
-
-## 12. Cordis 服务：`fish.message`
-
-插件加载时通过 `ctx.provide('fish.message', api)` 暴露一个**很薄**的服务门面（`lib/service.js`），
-给 `dsh-fish-ops` 等插件用，不需要它们知道 QQ 号映射、出站队列和补发细节。
-卸载时由 `ctx.effect` 自动注销，服务消失后依赖它的工具会被上层插件摘掉。
-
-```js
-const message = ctx.get('fish.message')
-message.apiVersion        // '0.1'
-message.capabilities()    // {sendText,sendImage,sendRecord,sendRecordFile,sendFile,fetchHistory,stickers:true,transcribe:{text:false,speaker:false}}
-await message.sendText(qq, text)          // {ok, sent, queued, pending, id?}
-await message.sendImage(qq, absolutePath) // {ok, sent, queued, pending, id?}
-await message.sendRecord(qq, absolutePath)
-await message.sendRecordFile(qq, absolutePath) // 等价别名：发已有音频文件（不合成）
-await message.sendFile(qq, absolutePath, name?)
-await message.fetchHistory(qq, { count, beforeMessageId }) // OneBot 原始消息数组
-await message.latestVoice(qq, { messageId?, count? })      // {ok, filePath, messageId, time?, sender?}
-await message.stickers.list({ q?, tag?, limit?, offset?, sort? })
-await message.stickers.save(absolutePath, { tags?, desc?, source?, name? }) // 按 sha 去重
-await message.stickers.get(name)          // id / 文件名 / #标签 / 模糊名 → 条目
-await message.stickers.send(qq, name)     // 发一张，走 Bridge 直发/出站队列
-message.bindings()        // [{qq, session, name}]
-message.getConfig()       // 只读公开配置（令牌打码）
-message.events            // EventEmitter：received / sent / outbox-flushed
-message.health()          // 不触发网络的本地诊断
-```
-
-约定：
-
-- 发送全部复用 `Bridge`：直发失败自动进持久化出站队列，返回 `queued:true`；**不重复实现发送逻辑**；
-- `fetchHistory` 复用 `Transport`；`latestVoice` 复用 `Transport.fetchHistory` + `VoiceService.recordToFile`；
-- 失败抛 `FishMessageError`（`code` 以 `fish_message_` 开头，带 `hint`/`detail`），
-  不抛裸字符串；`toPublic()` 可直接得到工具层失败包；
-- **不返回 base64、不返回令牌**；`getConfig()` 里 `napcatToken` 只会是 `***已设置***` 或空串；
-- 语音识别/合成能力在 fish-service（由 dsh-fish-ops 编排），这里 `capabilities().transcribe` 固定为 `false`；
-- `sendRecord` / `sendRecordFile` 只发本机已有音频文件，不做任何合成；
-- `latestVoice` 只能看到「最近 N 条」历史（默认 50，上限 100），指定 `messageId` 时如果不在窗口内会明确报
-  `fish_message_message_not_found`，不会悄悄换一条。
-
-测试：`tests/service.test.js` 用 mock Bridge/Transport/VoiceService 覆盖方法转发、参数校验、
-错误传播、服务注册/卸载和 `sent` / `outbox-flushed` 事件；表情服务/工具在
-`tests/stickers.test.js` 里用真实 `StickerStore` + 临时目录覆盖。
-
-Agent 工具（`ctx.tools.register`，与 dsh-fish-service 同一套写法）：
-
-| 工具 | 参数 | 说明 |
-|---|---|---|
-| `fish_sticker_list` | `{q?, tag?, limit?, sort?}` | 只读搜索表情库 |
-| `fish_sticker_send` | `{qq?, name, count?}` | 发到 QQ；`qq` 省略用第一条绑定 |
-
----
-
-## 13. 真机验收与回滚
-
-真机验收步骤、命令、预期结果见 [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)。
-其中「停掉 NapCat → 发 2 条 → 启动 NapCat → 自动补投」是关键项。
-
-### 回滚到旧桥
-
-1. 从 profile 的 `dsh.profile.bundles` 里删掉 `dsh-fish-message`；
-2. 把 `dsh-qq-bridge` 加回 `dsh.profile.bundles`（依赖和代码一直保留着）；
-3. 保留 `fish-message-config.json` / `fish-message-state.json` 以便以后切回来；
-4. 重启 DSH。
-
-旧桥的 `qq-bridge-config.json` / `qq-bridge-state.json` 全程未被修改，可直接继续用。
-
----
-
-## 14. 已知限制 / 风险
-
-- v1 **只做私聊**；群聊、其它 IM 只留 `Transport` 接口和文档，不实现。
-- `[文件:…]` 是否可用取决于 NapCat 版本/权限；不可用会明确报错。
-- 出站语音只发已有文件，不做变声、不做自动长文本切分；合成请用 `dsh-fish-ops` 的 `fish_say_and_send`。
-- `[语音]文字[/语音]` 已停用：返回 `tts_moved_to_ops`，不会入队、不会静默换成文字发送。
-- 出站队列的单条失败会阻塞后面的积压（严格保序）；正常发送在失败后立刻释放锁，不会被永久卡死。
-- 严格保序的代价：积压里有一条长期失败时，新消息会先入队等它重试/丢弃，而不是插队先发。
-- 补发是「至少一次」语义：发送成功但删除队列条目前进程被杀，重启后可能重发一次（极小窗口）。
-- 入站语音只给路径和时长；识别/声纹请用 `fish_voice_note_analyze`（ops）。
-- 水位之前的旧历史会被静默标记为已处理，不会补投（避免刚装好就灌几年历史）。
-- 插件只监听绑定会话的 assistant 消息；群聊和未绑定会话不会外发。
-- `fish.message` 的 `latestVoice` 只按「最近 N 条」历史找语音（默认 50，上限 100），
-  更早的语音要先把 `count` 调大或改用文件路径；服务版本仍是 0.x，破坏性改动必须升 `requires`。
-- 2026-11-09 本机实测：`ws://127.0.0.1:3000` 握手超时（NapCat 当前只开了 HTTP），
-  插件自动降级为 2 秒 HTTP 轮询，`/state` 里 `transport.mode = "http"`；
-  WS 服务一旦在 NapCat 里启用，插件会按指数退避自动连回去。
-- 表情库不做缩略图，预览直接用原图（GIF 也是原动图）；超大 GIF 在设置页里加载会慢一点。
-- 改 `stickerDir` 只切换读取目录，**不会自动搬旧文件**；旧目录原样保留，想迁移自己复制。
-- 一键导入依赖 `D:\dsh_ws\表情库\index.json` 及 `gif/`、`img/` 的文件布局；源库缺失/格式不对会在
-  设置页显示错误，不会动本库已有条目。
-- 表情名模糊匹配命中多个时按「用得最少」轮换，不保证每次是你想的那张；要精确请用 id 或 `#标签`。
-- 表情上限是「条目 + 总字节」双限制；到上限后新入库直接报错，需要手动清理（不会自动淘汰）。
+开发、验收与数据结构说明见 [`docs/`](docs/)。
