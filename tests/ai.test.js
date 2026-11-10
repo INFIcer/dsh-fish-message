@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { AiService, 友好提示, 能力状态, 情绪中文, 背景中文 } from '../lib/ai.js'
-import { normalizeConfig } from '../lib/config.js'
+import { normalizeConfig, 默认识图提示词, 入站识图提示词, 识图提示词上限 } from '../lib/config.js'
 
 function 造服务(补丁 = {}) {
   return {
@@ -207,6 +207,20 @@ test('本地 AI：识图按 caption 模式调用，并压掉多余空白', async
   assert.deepEqual(收到, { path: 'C:/a.png', opts: { mode: 'caption' } })
 })
 
+test('本地 AI：自定义识图提示词作为 prompt 覆盖参数传下去', async () => {
+  let 收到 = null
+  const 服务 = 造服务({
+    async visionDescribe(path, opts) {
+      收到 = { path, opts }
+      return { ok: true, items: [{ path, text: '一只猫' }] }
+    },
+  })
+  const ai = 建(() => 服务)
+  const 结果 = await ai.describeImage('C:/a.png', { prompt: '  描述这张表情包  ' })
+  assert.equal(结果.ok, true)
+  assert.deepEqual(收到, { path: 'C:/a.png', opts: { mode: 'caption', prompt: '描述这张表情包' } })
+})
+
 test('本地 AI：服务抛错时读 lastError 转成中文提示，不把原始错误抛给调用方', async () => {
   const 服务 = 造服务({
     async tts() { throw new Error('CUDA out of memory') },
@@ -250,6 +264,7 @@ test('配置：语音相关字段有默认值，识图开关兼容旧布尔值',
   assert.equal(默认.transcribeInbound, true)
   assert.equal(默认.asrLanguage, 'auto')
   assert.equal(默认.describeInboundImages, 'inherit', '默认跟随本地 AI 插件')
+  assert.equal(默认.inboundImagePrompt, '', '识图提示词默认留空，实际用内置默认')
 
   const 改过 = normalizeConfig({
     sayVoice: 'test_voice', saySpeed: 9, transcribeInbound: false,
@@ -269,4 +284,28 @@ test('配置：语音相关字段有默认值，识图开关兼容旧布尔值',
 
   assert.equal(normalizeConfig({ saySpeed: 0.1 }).saySpeed, 0.5)
   assert.equal(normalizeConfig({ asrLanguage: 'yue' }).asrLanguage, 'yue')
+})
+
+test('配置：识图提示词留空即默认，非法值回退默认', () => {
+  assert.equal(入站识图提示词(normalizeConfig({})), 默认识图提示词, '留空时实际用内置默认')
+  assert.equal(入站识图提示词(), 默认识图提示词, '没有配置时也用内置默认')
+
+  const 自定义 = normalizeConfig({ inboundImagePrompt: '  看看这个表情包是什么梗  ' })
+  assert.equal(自定义.inboundImagePrompt, '看看这个表情包是什么梗', '去掉首尾空白')
+  assert.equal(入站识图提示词(自定义), '看看这个表情包是什么梗')
+
+  // 旧配置没有这个字段：补空串，用内置默认。
+  const 旧 = normalizeConfig({ describeInboundImages: 'on' })
+  assert.equal(旧.inboundImagePrompt, '')
+  assert.equal(入站识图提示词(旧), 默认识图提示词)
+
+  // 非字符串、超长都回退默认（空串）；正好到上限的保留。
+  assert.equal(normalizeConfig({ inboundImagePrompt: 123 }).inboundImagePrompt, '')
+  assert.equal(normalizeConfig({ inboundImagePrompt: null }).inboundImagePrompt, '')
+  assert.equal(normalizeConfig({ inboundImagePrompt: '长'.repeat(识图提示词上限 + 1) }).inboundImagePrompt, '')
+  assert.equal(
+    normalizeConfig({ inboundImagePrompt: '长'.repeat(识图提示词上限) }).inboundImagePrompt.length,
+    识图提示词上限,
+    '正好上限保留',
+  )
 })

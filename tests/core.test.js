@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { Bridge } from '../lib/bridge.js'
 import { VoiceService } from '../lib/voice.js'
 import { StateStore } from '../lib/storage.js'
-import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig } from '../lib/config.js'
+import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig, 默认识图提示词 } from '../lib/config.js'
 import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
 
@@ -577,7 +577,46 @@ test('入站图片：开关开且识图可用时，用描述 + 路径代替 base
   assert.equal(内容.images.length, 0, '识图后不再塞 base64 图片进会话')
   assert.match(内容.text, /（图片：一只橘猫趴在键盘上；已存到 .+qq\.png）/)
   assert.match(内容.text, /收到 1 张图片/)
-  assert.deepEqual(服务.calls.vision, [{ path: 图, opts: { mode: 'caption' } }])
+  assert.deepEqual(服务.calls.vision, [{ path: 图, opts: { mode: 'caption', prompt: 默认识图提示词 } }])
+})
+
+test('入站图片：自定义识图提示词作为 prompt 传给本地 AI', async () => {
+  const dir = 临时目录()
+  const 服务 = new 假服务({ describeText: '一只猫' })
+  const { bridge, 图 } = 建图片桥(dir, 服务, {
+    describeInboundImages: 'on',
+    inboundImagePrompt: '看看这张表情包是什么梗',
+  })
+  await bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-prompt'))
+  assert.deepEqual(服务.calls.vision, [{
+    path: 图,
+    opts: { mode: 'caption', prompt: '看看这张表情包是什么梗' },
+  }])
+})
+
+test('入站图片：提示词留空时用内置默认，识图失败仍退回图片附件', async () => {
+  const dir = 临时目录()
+  const 服务 = new 假服务({ describeText: '一只猫' })
+  const { bridge } = 建图片桥(dir, 服务, { describeInboundImages: 'on' })
+  const 内容 = await bridge.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-prompt-default'))
+  assert.equal(服务.calls.vision[0].opts.prompt, 默认识图提示词, '留空时用内置默认')
+  assert.equal(内容.images.length, 0)
+
+  // 提示词是自定义的也一样：识图不可用时只影响文字，不改变降级路径。
+  const 坏目录 = 临时目录()
+  const 坏服务 = new 假服务()
+  坏服务.visionDescribe = async (path, opts) => {
+    坏服务.calls.vision.push({ path, opts })
+    return { ok: false, code: 'busy', hint: '本地 AI 正忙' }
+  }
+  const { bridge: 坏桥 } = 建图片桥(坏目录, 坏服务, {
+    describeInboundImages: 'on',
+    inboundImagePrompt: '自定义提示',
+  })
+  const 坏内容 = await 坏桥.buildInbound({ qq: QQ, name: '主人' }, 图片消息('m-img-prompt-fail'))
+  assert.equal(坏服务.calls.vision[0].opts.prompt, '自定义提示')
+  assert.equal(坏内容.images.length, 1)
+  assert.match(坏内容.text, /\[图片\]/)
 })
 
 test('入站图片：开关关时保持原样，图片附件和路径都在', async () => {
@@ -671,6 +710,12 @@ test('旧配置：布尔识图开关迁移成三态（true→on，false→off，
   assert.equal(读({}).describeInboundImages, 'inherit')
   // 已经是三态的配置原样读回
   assert.equal(读({ describeInboundImages: 'off' }).describeInboundImages, 'off')
+
+  // 新增的识图提示词：旧配置缺字段 → 补空串（用内置默认）；非法值也回退默认。
+  assert.equal(读({}).inboundImagePrompt, '')
+  assert.equal(读({ inboundImagePrompt: 123 }).inboundImagePrompt, '')
+  assert.equal(读({ inboundImagePrompt: '长'.repeat(4001) }).inboundImagePrompt, '')
+  assert.equal(读({ inboundImagePrompt: '  自定义提示  ' }).inboundImagePrompt, '自定义提示')
 })
 
 test('旧配置：残留的 ASR/TTS 字段被静默忽略并从落盘文件清理', () => {

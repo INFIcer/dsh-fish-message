@@ -164,8 +164,10 @@ image / mface 段
 
 入站识图是设置项 `describeInboundImages`，取值 `inherit`（默认，跟随本地 AI 插件的
 识图开关）/ `on` / `off`（强制）。开启后先调
-`fish.service.visionDescribe(path, { mode:'caption' })`，用
-「（图片：<描述>；已存到 <路径>）」代替 base64 附件，省会话 token。
+`fish.service.visionDescribe(path, { mode:'caption', prompt })`，提示词来自设置项
+`inboundImagePrompt`（空串时用内置默认），用「（图片：<描述>；已存到 <路径>）」代替
+base64 附件，省会话 token。提示词只用于鱼讯自己的入站识图，作为显式覆盖参数传下去，
+与本地 AI 插件的会话识图、工具识图提示词相互独立。
 插件没装、没有 `visionPrefs` 或识图失败时保持「图片附件 + 路径」，不丢图。
 
 ---
@@ -396,7 +398,7 @@ v1 不实现群聊。将来要加群：
 |---|---|---|
 | 语音合成 | `tts(text, { voice, speed })` | `capabilities.tts` |
 | 语音识别 | `asr(path, { language })` | `capabilities.asr` |
-| 本地识图 | `visionDescribe(path, { mode:'caption' })` | `capabilities.vision` |
+| 本地识图 | `visionDescribe(path, { mode:'caption', prompt? })` | `capabilities.vision` |
 
 `visionDescribe` 用 `typeof 服务.visionDescribe === 'function'` 防御；没有这个方法
 就按「不识图」处理，不影响其它能力。`capabilities` 子项既可以是布尔，也可以是
@@ -409,6 +411,8 @@ v1 不实现群聊。将来要加群：
 `asr()` 还会把 `items[0].speaker` 归成 `{ name, score, known }`，供入站消息带出说话人；
 `emotion` 经 `情绪中文()` 映射成短中文（未知名与缺失都是空串），`events` 经 `背景中文()`
 按「笑声 > 掌声 > 音乐」挑一个，同样以空串表示没有。
+入站识图还会带上 `inboundImagePrompt`（空串用内置默认）作为显式 prompt 覆盖；
+这个提示词是鱼讯自己的设置，不会改动本地 AI 插件的会话识图/工具识图提示词。
 
 ### 9.3 降级策略
 
@@ -435,5 +439,7 @@ v1 不实现群聊。将来要加群：
 | `transcribeInbound` | `true` | 收到语音后自动分析（文字、说话人、情感） |
 | `asrLanguage` | `auto` | 分析语言：auto/zh/en/ja/ko/yue |
 | `describeInboundImages` | `inherit` | 入站识图：inherit 跟随本地 AI 插件，on/off 强制；旧布尔值 true→on、false→off |
+| `inboundImagePrompt` | 空串 | 入站图片/表情包识图提示词；空串用内置默认，最长 4000 字，非字符串/超长回退默认 |
 
 `sayVoice` 是鱼讯自己的发送音色，与本地 AI 插件「朗读音色」是两套独立设置，互不覆盖。
+`inboundImagePrompt` 只影响鱼讯的入站识图，与本地 AI 插件的会话识图/工具识图提示词互不覆盖。

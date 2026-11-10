@@ -530,7 +530,8 @@ window.__ModuleLoader__.load({
         background-color: var(--dsw-alias-state-business-primary, #2f6fed);
         color: #ffffff;
       }
-      .fish-msg-settings input::placeholder { color: var(--dsw-alias-label-secondary, #888); opacity: 1; }
+      .fish-msg-settings input::placeholder,
+      .fish-msg-settings textarea::placeholder { color: var(--dsw-alias-label-secondary, #888); opacity: 1; }
       .fish-msg-settings input[type="checkbox"] { accent-color: var(--dsw-alias-state-business-primary, #2f6fed); }
     `
 
@@ -710,6 +711,8 @@ window.__ModuleLoader__.load({
         ? (AI能力.hint || '本地 AI 插件没启动，语音和识图暂不可用。')
         : '语音和识图暂不可用。'
       const 音色值 = 配置.sayVoice || 'dafeiyu'
+      // 识图提示词留空时用内置默认；默认文案由宿主 /state 下发，前端不另写一份。
+      const 默认识图提示词 = String((态.defaults && 态.defaults.inboundImagePrompt) || '')
       const 音色控件 = (Array.isArray(音色们) && 音色们.length)
         ? h('select', {
           style: S.input, value: 音色值, disabled: !语音可用,
@@ -753,7 +756,27 @@ window.__ModuleLoader__.load({
           h('option', { value: 'on' }, '开'),
           h('option', { value: 'off' }, '关')),
         AI能力.installed ? '选「继承」时跟随本地 AI 插件的识图开关。' : '需先安装本地 AI 插件。'),
-        (AI在线 && !识图可用) ? h('div', { style: { ...S.hint, marginTop: 2 } }, '本地 AI 的识图能力暂不可用。') : null)
+        (AI在线 && !识图可用) ? h('div', { style: { ...S.hint, marginTop: 2 } }, '本地 AI 的识图能力暂不可用。') : null,
+        行('图片识别提示词', h('div', null,
+          h('textarea', {
+            style: {
+              ...S.input, minHeight: 64, resize: 'vertical', lineHeight: 1.6, fontFamily: 'inherit',
+            },
+            rows: 3,
+            maxLength: 4000,
+            value: 配置.inboundImagePrompt || '',
+            placeholder: 默认识图提示词,
+            disabled: !AI能力.installed,
+            onChange: (e) => 改('inboundImagePrompt', e.target.value),
+          }),
+          配置.inboundImagePrompt
+            ? h('div', { style: { marginTop: 6 } },
+              h('button', {
+                type: 'button', style: S.btn, disabled: !AI能力.installed,
+                onClick: () => 改('inboundImagePrompt', ''),
+              }, '恢复默认'))
+            : null),
+        'QQ 收到的图片和表情包用这段提示词在本机识别，留空用默认。'))
 
       const 补投页 = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '同步与补发'),

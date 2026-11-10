@@ -22,6 +22,8 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   const server = await new MockOneBotServer().start()
   const dir = mkdtempSync(join(tmpdir(), 'fish-host-'))
   process.env.DSH_HOME = dir
+  // 必须在 DSH_HOME 指向临时目录之后再加载配置模块，否则默认表情库目录会落到真实家目录。
+  const { 默认识图提示词 } = await import('../lib/config.js')
 
   const routes = new Map()
   const 监听 = new Map()
@@ -77,6 +79,9 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(typeof 状态.stickerDir, 'string')
   assert.ok(状态.stickerDir.length > 0)
   assert.equal(状态.stickerDirExists, true)
+  // 设置页的「图片识别提示词」要知道留空时用哪段默认；默认文案由宿主下发。
+  assert.equal(状态.defaults.inboundImagePrompt, 默认识图提示词)
+  assert.equal(状态.config.inboundImagePrompt, '')
   // 内置 ASR/TTS 已移除：不再有旧的开关字段，也没有 test-voice 路由。
   // 新的语音/识图设置走可选本地 AI，字段名见 lib/config.js。
   assert.equal('ttsEnabled' in 状态.config, false)
