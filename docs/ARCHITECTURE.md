@@ -16,11 +16,12 @@ Transport 适配器（v1：napcat-onebot）
    ▼
 Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
-   ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（不转写）
-   ├─ 图片：image → inbox → DSH 附件（可选自动入表情库）
+   ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（可选附转写）
+   ├─ 图片：image → inbox → DSH 附件（可选自动入表情库，可选先本地识图）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
-   └─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
-        └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
+   ├─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
+   │    └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
+   └─ 可选能力：AiService → fish.service（TTS / ASR / 识图；没有就降级）
    │
    ▼
 Delivery（lib/delivery.js）
@@ -33,13 +34,17 @@ DSH 会话（模型照常开一轮）
 `/dsh-fish-message/*` 本地路由；表情库另有 `lib/stickers.js`（纯磁盘逻辑）和
 `lib/sticker-routes.js`（HTTP 门面）两层。
 
-**职责边界：鱼讯只做 QQ 传输。** 入站语音只落盘、不识别；出站只发已有音频文件、
-不合成。语音识别 / 合成在 `dsh-fish-ops`（它调 `fish.service` 的 ASR / TTS，
-再经 `fish.message.sendRecord` 发回 QQ）：
+**职责边界：鱼讯只做 QQ 传输。** 语音和图片的基础链路（落盘、发送、补发）始终可用；
+语音识别 / 合成 / 本地识图是**可选能力**，由本地 AI 插件提供的 `fish.service` 支持。
+鱼讯不直连本地 AI 服务，也不把它当硬依赖：没装插件时，收发文字/图片/文件、表情、
+离线补投等原有功能照常，语音相关设置灰掉，发语音时只回一句提示。
 
 ```text
-dsh-fish-ops ── fish.service.tts / fish.service.asr   （本地 AI 服务）
-             └─ fish.message.sendRecord                （鱼讯只负责发 record 段）
+dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
+        ▲
+        │ ctx.get('fish.service') 运行时探测
+        │
+鱼讯 AiService（lib/ai.js） ── bridge 的入站转写 / 识图、出站合成
 ```
 
 ---
@@ -56,6 +61,7 @@ dsh-fish-ops ── fish.service.tts / fish.service.asr   （本地 AI 服务）
 | `lib/queue.js` | 每个聊天的乱序缓冲 | 不做持久化 |
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
 | `lib/voice.js` | 入站语音 get_record / 落盘 / 读时长；图片落盘 | 不做 ASR / TTS / 转码 |
+| `lib/ai.js` | 可选本地 AI 门面：能力探测、参数校验、错误转人话 | 不实现 AI，不直连服务端口 |
 | `lib/outbox.js` | 持久化出站队列：去重、FIFO、退避、TTL、计数 | 不做网络发送 |
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 | `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
@@ -125,7 +131,7 @@ dsh-fish-ops ── fish.service.tts / fish.service.asr   （本地 AI 服务）
 5. 超过窗口的只投一条摘要，包含条数、最早/最近时间；
 6. 摘要投失败只记日志（这些消息已经太旧，不阻塞新消息）。
 
-### 3.6 语音入站（只做传输）
+### 3.6 语音入站（落盘 + 可选转写）
 
 ```text
 record 段
@@ -134,12 +140,12 @@ record 段
   → 存 <家目录>\fish-message-inbox\qq-voice-*
   → 读 wav 头拿时长（读不到就省略秒数）
   → "（语音：<绝对路径>，N 秒）" 交给会话
+  → 可选：fish.service.asr → 追加 "（语音转写：<文字>）"
 ```
 
-**不调 `/asr`、不调 `/media/to_wav`、不带声纹。** 需要文字/声纹时用
-`dsh-fish-ops` 的 `fish_voice_note_analyze`（它通过 `fish.message.latestVoice`
-或历史拿同一条语音文件，再调 `fish.service.asr`）。落盘失败会降级成
-`[语音（保存失败：…）]`，不会把整条消息丢掉。
+转写默认开启（`transcribeInbound`），语言由 `asrLanguage` 决定（默认 `auto`）。
+服务不可用或转写失败时只记 debug 日志，路径那条消息照常递，**不会因此丢消息**。
+落盘失败会降级成 `[语音（保存失败：…）]`，也不会把整条消息丢掉。
 
 ### 3.7 图片入站
 
@@ -152,6 +158,11 @@ image / mface 段
 ```
 
 最多 4 张；超过 `maxImageMB` 跳过。
+
+开了 `describeInboundImages` 且本地识图可用时，先调
+`fish.service.visionDescribe(path, { mode:'caption' })`，用
+「（图片：<描述>；已存到 <路径>）」代替 base64 附件，省会话 token。
+识图失败或关闭时保持「图片附件 + 路径」，不丢图。
 
 ---
 
@@ -172,11 +183,11 @@ image / mface 段
 ```text
 extractOutbound(text, onlyInsideMarkers)
   ├─ parseQQBlock：转义扫描 → 块内反转义 → 多块拼接 / 未闭合容错
-  └─ parseDirectives：text / ttsMoved / image / voiceFile / file / sticker 有序 token
+  └─ parseDirectives：text / tts / image / voiceFile / file / sticker 有序 token
 ```
 
-`[语音]文字[/语音]` 只识别成 `ttsMoved`（不再合成）；发送层会跳过它并返回
-`code: 'tts_moved_to_ops'`，提示改用 ops 的 `fish_say_and_send`。
+`[语音]文字[/语音]` 解析成 `tts` token。发送时先调 `fish.service.tts` 合成；
+成功拿 `wavPath` 走 `record` 段。服务不可用或能力缺失时只回一句提示，不抛错刷屏。
 
 详细语法见 [`FORMAT.md`](FORMAT.md)。
 
@@ -186,7 +197,7 @@ extractOutbound(text, onlyInsideMarkers)
 |---|---|
 | `text` | `send_private_msg`，`text` 段 |
 | `image` | 本地图读 base64；网络图交 URL |
-| `ttsMoved` | **不发送**，记日志并返回 `tts_moved_to_ops`（TTS 已移到 dsh-fish-ops） |
+| `tts` | 调 `fish.service.tts`，成功转 `record` 段；失败只提示，同轮其它 token 照发 |
 | `voiceFile` | 直接 `record` 段（已有音频文件） |
 | `file` | `file` 段（NapCat 支持时） |
 | `sticker` | 发送时查 `StickerStore` → 本地图片 → `image` 段；带 `stickerId` 供成功计数 |
@@ -232,7 +243,7 @@ extractOutbound(text, onlyInsideMarkers)
 
 - `fingerprint = sha256(qq + 规范化 segments)`；同一条消息重试不会变成多条。
 - 语音只入队**已有文件路径**（`record`），不再存 `record_text`；旧版本遗留的
-  `record_text` 条目补发时直接判死并给出「改用 fish_say_and_send」的原因。
+  `record_text` 条目补发时直接判死并提示改用 `[语音]文字[/语音]` 重新发送。
 - 补发与正常发送共用 `this.发送链`（Promise 串行锁）；补发期间或已有积压时，新消息直接入队，保持顺序。
 - 补发失败一条就停，下一轮再试；不会因为积压把正常发送永久卡死（新消息仍会持久化受理，等前面的发完/丢弃后继续）。
 - 队列计数写进 `fish-message-state.json` 的 `stats.outbox*`，`/state` 的 `outbox` 只读汇总。
@@ -346,8 +357,10 @@ v1 不实现群聊。将来要加群：
 | 历史接口失败 | 记日志/状态；下一轮重试；WS 事件仍可收 |
 | DSH 会话没开 | 不推进水位；消息留在队列，下一轮重试 |
 | followup 失败 | 同上，并记错误 |
-| 语音落盘失败 | 消息降级为 `[语音（保存失败）]`，不丢整条；需要识别时用 ops |
-| `[语音]文字[/语音]` | 不合成、不发送；返回 `tts_moved_to_ops`，提示改用 ops |
+| 语音落盘失败 | 消息降级为 `[语音（保存失败）]`，不丢整条；转写跳过 |
+| `[语音]文字[/语音]` | 服务缺失/能力缺时只提示一句，不发语音；同轮其它内容照发 |
+| 入站语音转写失败 | 只递「语音：路径」，不影响消息投递 |
+| 入站图片识图失败 | 退回图片附件 + 路径，不丢图 |
 | 文字/图片/文件发送失败 | 入持久化出站队列；恢复后按 FIFO 补发 |
 | `record` 发送失败 | 三种 file 形态重试 3 次；仍失败存路径入队 |
 | 出站队列写盘失败 | 日志报错；本次消息可能丢（磁盘满等硬故障） |
@@ -357,3 +370,58 @@ v1 不实现群聊。将来要加群：
 | 表情找不到 | 记日志/状态；会话里投「找不到表情」提示；该 token 跳过，其它 token 照发 |
 | 表情库超上限 | 入库/导入返回 `sticker_limit`，提示清理；已有条目和文件不动 |
 | 状态文件写失败 | 日志记错；内存继续，重启可能重投（已知风险） |
+
+---
+
+## 9. 可选扩展：本地 AI
+
+### 9.1 探测方式
+
+- **不是硬依赖**：模块顶层没有 `inject: ['fish.service']`，也没有 `requires`；
+- `host.js` 在 `apply` 里创建 `AiService`，但只在真正用到能力时才调
+  `ctx.get('fish.service')`；插件晚加载、服务重启都能重新取到；
+- 鱼讯不直连本地 AI 服务的端口，只通过 `fish.service` 的公开方法；
+- 取不到服务时 `AiService` 返回 `installed:false`，所有能力判定为不可用。
+
+### 9.2 能力判定
+
+`AiService` 的方法存在、且 `capabilities` 里对应项没有被标成 `available:false`，
+才算可用：
+
+| 能力 | 服务方法 | 能力键 |
+|---|---|---|
+| 语音合成 | `tts(text, { voice, speed })` | `capabilities.tts` |
+| 语音识别 | `asr(path, { language })` | `capabilities.asr` |
+| 本地识图 | `visionDescribe(path, { mode:'caption' })` | `capabilities.vision` |
+
+`visionDescribe` 用 `typeof 服务.visionDescribe === 'function'` 防御；没有这个方法
+就按「不识图」处理，不影响其它能力。`capabilities` 子项既可以是布尔，也可以是
+`{ available, ready, reason }`。`status()` 汇总成
+`{ installed, online, tts, asr, vision, hint }` 给设置页。
+
+### 9.3 降级策略
+
+| 情况 | 行为 |
+|---|---|
+| 没装插件 / 没启动 | 设置页「语音」分区顶部一行提示，控件禁用；发语音只回一句提示 |
+| 服务在但能力缺失 | 只禁用对应控件；该能力调用前就返回 `not_supported`/原因码 |
+| `tts`/`asr` 返回 `{ok:false}` | 取 `code` 和 `hint`，转成用户能懂的一句话，不抛原始错误 |
+| 服务抛错、`lastError` 有码 | 按 `code`、`httpStatus` 映射（507 → 显存不足，503 → 模型未就绪） |
+| 入站转写失败 | 只递语音路径，消息照常进会话 |
+| 入站识图失败 | 退回「图片附件 + 路径」，不丢图 |
+
+所有能力调用都包在 `try/catch` 里，失败返回 `{ ok:false, code, hint }`。发送语音失败
+时，同一轮其它内容照发；只有整轮都没发出去才在会话里投一次提示（同一会话 60 秒节流），
+不会刷屏。
+
+### 9.4 设置项
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `sayVoice` | `dafeiyu` | 发送语音的音色；有 `voices()` 时给下拉，否则文本输入 |
+| `saySpeed` | `1` | 发送语音的语速，0.5~2 |
+| `transcribeInbound` | `true` | 收到语音后自动转文字 |
+| `asrLanguage` | `auto` | 转写语言：auto/zh/en/ja/ko/yue |
+| `describeInboundImages` | `false` | 收到图片后先在本地识图，用描述代替 base64 |
+
+`sayVoice` 是鱼讯自己的发送音色，与本地 AI 插件「朗读音色」是两套独立设置，互不覆盖。

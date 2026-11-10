@@ -116,7 +116,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 ---
 
-## 4. 入站语音（只落盘，不转写）
+## 4. 入站语音（落盘 + 可选转写）
 
 用主人 QQ 发一条 2–5 秒语音，说：
 
@@ -124,30 +124,25 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 这是语音验收。
 ```
 
-期望 DSH 会话收到的是**路径 + 时长**，不是文字：
+期望 DSH 会话收到**路径 + 时长**；本地 AI 可用且开启转写时，后面再跟一行文字：
 
 ```text
 （语音：C:\Users\<你>\.dsh\fish-message-inbox\qq-voice-xxx.wav，3.2 秒）
+（语音转写：这是语音验收。）
 ```
 
 同时：
 
 - `<家目录>\fish-message-inbox\qq-voice-*` 有原文件；
-- 日志里**没有** `/asr`、没有声纹相关记录；
-- 想验证「不调网络」：断掉本地 AI 服务（7880）再发一条，这条消息仍应正常落到会话；
+- 转写关掉、或本地 AI 插件没装/没启动时，只收到路径那行，消息不丢；
+- 日志里能看到转写失败的原因，但不会刷屏；
 - 时长读不出来时只显示 `（语音：<路径>）`，不影响消息投递。
-
-需要识别 / 声纹时用 ops：
-
-```text
-fish_voice_note_analyze(qq="<主人QQ>")
-```
 
 ---
 
 ## 5. 出站语音
 
-### 5.1 `[语音]文字[/语音]`：应被拒绝（TTS 已移走）
+### 5.1 `[语音]文字[/语音]`：本地 AI 正常时合成并发送
 
 在 DSH 会话里发：
 
@@ -157,23 +152,18 @@ fish_voice_note_analyze(qq="<主人QQ>")
 
 期望：
 
-- **QQ 什么也收不到**（不合成、不发文字、不发语音）；
-- 日志/状态里能看到 `code: 'tts_moved_to_ops'`，提示改用 `fish_say_and_send`；
-- `fish-message.log` 有对应 warn，不产生新的出站队列条目。
-
-### 5.2 合成并发送（现在走 ops）
-
-在 DSH 里调：
-
-```text
-fish_say_and_send(text="【验收 3】这是 DSH 发出来的语音。")
-```
-
-期望：
-
 - QQ 收到一条语音条，点开是 TTS 声音；
-- 返回 `{ok:true, wavPath, qq, sent|queued, pending}`；
-- 失败时按 `fish.message` 的出站队列语义入队（`queued:true`）。
+- 音色、语速取设置页「语音」里的「发送音色 / 发送语速」；
+- `fish-message.log` 有对应记录，不产生出站队列条目。
+
+### 5.2 本地 AI 不可用时：只提示，不刷屏
+
+停掉本地 AI 插件（或禁用语音能力）后再发同样一句。期望：
+
+- QQ 什么也收不到（不合成、不发文字、不发语音）；
+- 当前 DSH 会话收到一句「本地 AI 插件没装或没启动，暂时发不了语音，其它功能不受影响」；
+- 返回 `code: 'service_not_installed'`（能力缺失时是对应原因码），不抛原始错误；
+- 同一轮里的文字/图片/表情照常发。
 
 ### 5.3 `[语音:路径]`：照常发已有音频
 
@@ -284,20 +274,21 @@ Invoke-RestMethod -Method Post -Uri "$base/dsh-fish-message/outbox/flush" | Conv
 
 日志里应出现：`补发成功（积压 N 条，延迟 X 秒）`。
 
-### 9.2 语音（已解耦，不再有 test-voice）
+### 9.2 语音（可选本地 AI，不再有 test-voice）
 
 鱼讯不再提供 `/dsh-fish-message/test-voice`，也没有 `record_text` 补发。
-验证解耦：
+验证可选扩展：
 
 ```powershell
-# 1) 设置页「鱼讯」里应看不到「入站语音转写 / 出站语音合成 / TTS 地址 / ASR 地址」等区块
-# 2) 旧 config.json 里如果残留 ttsVoice 等键，加载后会被静默清掉（文件仍在）
+# 1) 设置页「鱼讯」→「语音」分区：发送音色、发送语速、收到语音后自动转文字、
+#    语音转写语言、收到图片后先在本地识图
+# 2) 没装本地 AI 插件时，分区顶部有一行提示，控件禁用；装上后恢复正常
+# 3) 旧 config.json 里残留的 ttsVoice 等键会在加载时静默清掉（文件仍在）
 Get-Content "$env:USERPROFILE\.dsh\fish-message-config.json" -Raw
-# 3) 发一条语音：会话应收到「（语音：<路径>，N 秒）」
+# 4) 发一条语音：会话应收到「（语音：<路径>，N 秒）」；转写可用时再加一行文字
 ```
 
-`[语音]文字[/语音]` 现在返回 `tts_moved_to_ops`，不会入队；要发合成语音请用
-`fish_say_and_send`。
+`[语音]文字[/语音]` 在本地 AI 正常时合成发送；不可用时只提示，不会入队。
 
 ### 9.3 设置页
 
@@ -345,26 +336,26 @@ notepad "$profileDir\package.json"
 
 ### 已做（不依赖 DSH 重载）
 
-- 全部 93 项单测 + mock 集成测试通过；
+- 全部 121 项单测 + mock 集成测试通过；
 - 出站队列：落盘/重启恢复、fingerprint 去重、TTL、1000 条上限、退避/20 次放弃、
   离线入队→恢复补发、路径失效丢弃、队列接口；
-- 解耦：入站语音只落盘并递路径（有 fetch 调用计数断言）、`[语音]文字` 返回
-  `tts_moved_to_ops` 且不发消息、`[语音:路径]` 照常发、旧 ASR/TTS 配置字段被静默清理；
+- 可选本地 AI：入站语音转写、出站 `[语音]文字` 合成、能力缺失/服务缺失降级、
+  入站图片识图开关、音色/语速参数、配置默认值；`[语音:路径]` 照常发；
+  旧 ASR/TTS 配置字段仍被静默清理；
 - 真实 NapCat `send_private_msg` 文字 1 条，已回读历史确认；
 - 真实 NapCat 的 `get_friend_msg_history`、`get_login_info` 均验证。
 
 ### 留给父 agent（需要重启 DSH / 用主人 QQ 发消息）
 
-- 重启 DSH，确认设置页「鱼讯」里 ASR/TTS 区块消失；
+- 重启 DSH，确认设置页「鱼讯」出现「语音」分区；没装本地 AI 时控件禁用、顶部有提示；
 - 按第 9 节做「出站队列断网→恢复补发」真机验收；
 - 主人 QQ → DSH 文字；
-- 主人 QQ → DSH 语音：会话应收到「语音：路径」而不是转写；
-- DSH 里调 `fish_say_and_send` → QQ 真收到语音；
-- DSH → QQ `[语音]文字[/语音]` → 返回 `tts_moved_to_ops`，QQ 无消息；
+- 主人 QQ → DSH 语音：会话应收到「语音：路径」；转写可用时再加一行「语音转写」；
+- DSH → QQ `[语音]文字[/语音]` → 本地 AI 正常时收到语音条；停掉后只收到提示；
 - DSH → QQ `[语音:路径]` → 收到语音条；
 - DSH → QQ 字面量 `[/QQ]`；
 - 停 NapCat → 主人发 2 条 → 启动 NapCat → 补投；
-- 可选：图片双向、`[文件:…]`。
+- 可选：图片双向、`[文件:…]`、入站图片识图开关。
 
 ---
 
