@@ -73,6 +73,10 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(状态.bindings.length, 1)
   assert.equal(状态.bindings[0].qq, QQ)
   assert.equal(状态.sessions[0].title, '宿主测试')
+  // 「打开文件夹」按钮要用：状态里带当前表情库目录及是否存在。
+  assert.equal(typeof 状态.stickerDir, 'string')
+  assert.ok(状态.stickerDir.length > 0)
+  assert.equal(状态.stickerDirExists, true)
   // 内置 ASR/TTS 已移除：设置页不再有这些字段，也没有 test-voice 路由。
   assert.equal('ttsEnabled' in 状态.config, false)
   assert.equal('transcriptionEnabled' in 状态.config, false)
@@ -85,6 +89,7 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
 
   // 表情库路由已经在宿主里挂上；空库返回 0 条。
   assert.equal(typeof routes.get('/dsh-fish-message/stickers'), 'function')
+  assert.equal(typeof routes.get('/dsh-fish-message/open-folder'), 'function')
   const 表情响应 = 假响应()
   await routes.get('/dsh-fish-message/stickers')({ method: 'GET', url: '/dsh-fish-message/stickers' }, 表情响应)
   const 表情 = JSON.parse(表情响应.body)
