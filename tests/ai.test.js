@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { AiService, 友好提示, 能力状态 } from '../lib/ai.js'
+import { AiService, 友好提示, 能力状态, 情绪中文, 背景中文 } from '../lib/ai.js'
 import { normalizeConfig } from '../lib/config.js'
 
 function 造服务(补丁 = {}) {
@@ -107,6 +107,56 @@ test('本地 AI：asr 正常时返回文字和声纹，非法语言回退 auto',
   // 服务没给 speaker（或没识别出来）时是 null，不影响转写。
   const 空结果 = await 建(() => 造服务()).asr('C:/a.wav')
   assert.equal(空结果.speaker, null)
+})
+
+test('本地 AI：asr 带出情绪和背景音，旧版插件缺字段时是空串', async () => {
+  const 服务 = 造服务({
+    async asr() {
+      return { ok: true, items: [{ text: '哈哈', emotion: 'HAPPY', events: ['Speech', '[Laughter]'] }] }
+    },
+  })
+  const 结果 = await 建(() => 服务).asr('C:/a.wav')
+  assert.equal(结果.emotion, '开心')
+  assert.equal(结果.background, '笑声')
+
+  // 旧版插件没有 emotion / events：给空串，桥层据此整段省略，不写 undefined。
+  const 旧版 = await 建(() => 造服务()).asr('C:/a.wav')
+  assert.equal(旧版.emotion, '')
+  assert.equal(旧版.background, '')
+})
+
+test('本地 AI：情绪码映射成短中文，未知值和空值一律当没有', () => {
+  assert.equal(情绪中文('NEUTRAL'), '中性')
+  assert.equal(情绪中文('HAPPY'), '开心')
+  assert.equal(情绪中文('SAD'), '难过')
+  assert.equal(情绪中文('ANGRY'), '生气')
+  assert.equal(情绪中文('FEARFUL'), '害怕')
+  assert.equal(情绪中文('FEAR'), '害怕')
+  assert.equal(情绪中文('DISGUSTED'), '厌恶')
+  assert.equal(情绪中文('SURPRISED'), '惊讶')
+
+  // 大小写和空白不敏感；不认识的情绪、缺字段、非字符串都当没有。
+  assert.equal(情绪中文(' happy '), '开心')
+  assert.equal(情绪中文('BORED'), '')
+  assert.equal(情绪中文(''), '')
+  assert.equal(情绪中文(null), '')
+  assert.equal(情绪中文(undefined), '')
+  assert.equal(情绪中文(0), '')
+})
+
+test('本地 AI：events 只挑一个背景音，Speech、空数组和未知事件都忽略', () => {
+  assert.equal(背景中文(['Speech']), '')
+  assert.equal(背景中文([]), '')
+  assert.equal(背景中文(null), '')
+  assert.equal(背景中文(undefined), '')
+  assert.equal(背景中文(['[Laughter]']), '笑声')
+  assert.equal(背景中文(['Music']), '音乐')
+  assert.equal(背景中文(['Cough']), '')
+
+  // 多个事件按「笑声 > 掌声 > 音乐」挑最显眼的一个，不堆字段。
+  assert.equal(背景中文(['Music', '[Applause]', '[Laughter]']), '笑声')
+  assert.equal(背景中文(['BGM', 'Applause']), '掌声')
+  assert.equal(背景中文('Speech,Laughter'), '笑声', '兼容逗号分隔的字符串')
 })
 
 test('本地 AI：识图偏好读 visionPrefs，接口缺失或返回不认识时算 unknown', async () => {
