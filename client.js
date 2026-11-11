@@ -747,7 +747,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '防失联'),
         h('div', { style: S.dim }, '让绑定的会话一直能收发消息。注意会话的审批权限别设得太低，权限不够时可能因为授权被打断。'),
         行('保持绑定会话能收发', 开关(配置.guardEnabled, (v) => 改('guardEnabled', v)),
-          '开启后，绑定的会话里不能用会停下来等人的工具，也不能装卸插件。'),
+          '开启后，绑定的会话里不能用会停下来等人的工具，避免会话卡住等回答。'),
         行('多久没新进展算卡住', h('input', {
           style: S.small, type: 'number', min: 1, max: 120, value: 配置.guardStuckMinutes ?? 10,
           onChange: (e) => 改('guardStuckMinutes', Number(e.target.value)),

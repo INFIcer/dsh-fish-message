@@ -89,7 +89,7 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   // 防失联：默认开启，只盯启用中的绑定会话。
   assert.equal(状态.guard.enabled, true)
   assert.equal(状态.guard.bound, 1)
-  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question', 'plugin_manager'])
+  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question'])
   // 内置 ASR/TTS 已移除：不再有旧的开关字段，也没有 test-voice 路由。
   // 新的语音/识图设置走可选本地 AI，字段名见 lib/config.js。
   assert.equal('ttsEnabled' in 状态.config, false)
@@ -216,7 +216,7 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   assert.equal(提示段们[0].order, 10150)
   assert.match(提示段们[0].text, /子代理/)
   assert.match(工具守卫们[0]({ name: 'ask_user_question' }), /不能用/)
-  assert.match(工具守卫们[0]({ name: 'plugin_manager' }), /不能用/)
+  assert.equal(工具守卫们[0]({ name: 'plugin_manager' }), undefined, '插件装卸不再拦')
   assert.equal(工具守卫们[0]({ name: 'read_file' }), undefined)
 
   // 同一个会话重复收到 created 不重复叠加。
@@ -231,7 +231,7 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   assert.equal(状态.guard.approvalAvailable, true)
   assert.equal(状态.guard.approvalNever, true)
   assert.equal(状态.guard.bound, 1)
-  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question', 'plugin_manager'])
+  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question'])
 
   // 会话销毁：守卫和提示段各撤一次；再收到 disposed 也不重复。
   监听.get('agent/disposed')({ agent })

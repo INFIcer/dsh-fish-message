@@ -1040,7 +1040,7 @@ test('防失联监控：只盯启用的绑定会话', () => {
   assert.equal(监控.快照().bound, 0)
 })
 
-test('防失联工具守卫：只挡会等人/会中断的工具，且给模型看得懂的话', () => {
+test('防失联工具守卫：只挡会等人的工具，不挡插件装卸，且给模型看得懂的话', () => {
   const 守卫 = 构造工具守卫()
   for (const 名 of 拒用工具) {
     const 结果 = 守卫({ name: 名 })
@@ -1049,13 +1049,15 @@ test('防失联工具守卫：只挡会等人/会中断的工具，且给模型�
     assert.match(结果, /QQ/)
   }
   assert.match(守卫({ name: 'ask_user_question' }), /ask_user_question/)
-  assert.match(守卫({ name: 'plugin_manager' }), /plugin_manager/)
+  assert.equal(守卫({ name: 'plugin_manager' }), undefined, '插件装卸不再拦')
   assert.equal(守卫({ name: 'web_search' }), undefined)
   assert.equal(守卫(null), undefined)
   assert.equal(守卫({}), undefined)
   assert.match(守卫规则, /子代理/)
   assert.match(守卫规则, /ask_user_question/)
   assert.match(守卫规则, /\[QQ\]/)
+  assert.doesNotMatch(守卫规则, /卸载\/重装/)
+  assert.match(守卫规则, /dsh_restart/)
 })
 
 test('防失联：连续几轮没发 QQ 就提醒，发过 QQ 清零，15 分钟内不重复', () => {
@@ -1135,6 +1137,37 @@ test('重启工具：安排只落盘，到点且全空闲才拉起重启', () =>
   assert.equal(控制器.状态().scheduled, false)
   assert.ok(控制器.状态().firedAt > 0)
   assert.equal(existsSync(join(目录, 'fish-message-restart.json')), true)
+})
+
+test('重启工具：拉起成功把 PID 和输出摘要记进状态，失败要记原因并 QQ 告知', async () => {
+  const 目录 = 临时目录()
+  const QQ们 = []
+  const 造 = (spawnRestart) => new RestartController({
+    homeDir: 目录,
+    getConfig: () => ({}),
+    getAgents: () => [],
+    sendQQ: (qq, text) => { QQ们.push({ qq, text }) },
+    spawnRestart,
+    logger: { info() {}, warn() {} },
+    autoTimers: false,
+  })
+
+  const 成功 = 造(async () => ({ ok: true, pid: 4321, output: 'PID=4321' }))
+  成功.schedule({ delaySeconds: 10, callerQQ: QQ })
+  成功.到期()
+  await 睡(10)
+  assert.match(成功.状态().lastEvent, /PID 4321/)
+  assert.equal(QQ们.length, 0)
+
+  const 失败 = 造(async () => { throw Object.assign(new Error('WMI ReturnValue=9'), { code: 'spawn_failed' }) })
+  失败.schedule({ delaySeconds: 10, callerQQ: QQ })
+  失败.到期()
+  await 睡(10)
+  assert.match(失败.状态().lastEvent, /重启命令没发出去/)
+  assert.match(失败.状态().lastEvent, /WMI ReturnValue=9/)
+  assert.equal(QQ们.length, 1)
+  assert.match(QQ们[0].text, /重启没起来/)
+  assert.match(QQ们[0].text, /WMI ReturnValue=9/)
 })
 
 test('重启工具：有会话在跑就等，全部空闲才执行', () => {
