@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MockOneBotServer, 等, 睡 } from './mock-onebot.js'
 
+// 心跳常规是 30 秒；测试里调快，才能验证「卡住→提醒」这条链路真的走通。
+process.env.FISH_MESSAGE_GUARD_TICK_MS = '40'
+
 const QQ = '10001'
 const 会话 = 'session-host-test'
 
@@ -223,6 +226,19 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   assert.match(工具守卫们[0]({ name: 'wait_agent' }), /send_message/)
   assert.equal(工具守卫们[0]({ name: 'plugin_manager' }), undefined, '插件装卸不再拦')
   assert.equal(工具守卫们[0]({ name: 'read_file' }), undefined)
+
+  // 长时间没进展：心跳要把提醒真正注入会话。守卫状态里存的是去掉 session- 前缀的短 id，
+  // 而 DSH 的 agent id 带前缀——这里 agents.get 只认完整 id，防止再退回「提醒送不进去」。
+  const 注入们 = []
+  agent.inject = (消息) => { 注入们.push(消息) }
+  监听.get('agent/status')({ agent, status: 'running' })
+  const 监控状态 = app.guard.取状态('host-test')
+  监控状态.statusSince = Date.now() - 11 * 60 * 1000
+  监控状态.lastProgressAt = 监控状态.statusSince
+  await 睡(160)
+  assert.ok(注入们.length >= 1, '卡住时要把提醒注入会话')
+  assert.match(注入们[0].content[0].text, /绑定外部通讯收发/)
+  assert.equal(注入们[0].role, 'user')
 
   // 同一个会话重复收到 created 不重复叠加。
   创建({ agent })
