@@ -955,7 +955,25 @@ test('防失联监控：没进展先提醒，连续满 3 次后不再打扰', ()
   assert.equal(快照.alerts[0].injections, 3)
 })
 
-test('防失联监控：有进展后重新计数，最多再提醒 3 次', () => {
+test('防失联监控：按运行时长算，中途有进展也不重新计时', () => {
+  const { 钟, 监控 } = 建监控()
+  监控.跟踪状态(会话, 'running')
+
+  // 9 分钟时模型还在输出：这算进展，但不算「会话能收到消息」，计时不重置。
+  钟.现在 += 9 * 60000
+  监控.处理事件(会话, { type: 'assistant/message', data: { turn: 1 } })
+  assert.deepEqual(监控.tick(), [])
+
+  // 再过 2 分钟（开跑 11 分钟）：照样提醒——这一轮还在跑，QQ 那边一直收不到回复。
+  钟.现在 += 2 * 60000
+  const 第一次 = 监控.tick()
+  assert.equal(第一次.length, 1)
+  assert.equal(第一次[0].kind, 'remind')
+  assert.equal(第一次[0].minutes, 11)
+  assert.equal(第一次[0].text, 默认长任务提醒文案, '默认长任务提醒文案原文')
+})
+
+test('防失联监控：一轮结束后进入新一轮才重新计时', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
   钟.现在 += 11 * 60000
@@ -965,18 +983,32 @@ test('防失联监控：有进展后重新计数，最多再提醒 3 次', () =>
   钟.现在 += 15 * 60000
   assert.equal(监控.tick().length, 1)
 
-  // 已经提醒满 3 次：不再有任何动作。
+  // 已经提醒满 3 次：这一轮里不再有任何动作。
   钟.现在 += 60 * 60000
   assert.deepEqual(监控.tick(), [])
   assert.equal(监控.快照().alerts[0].injections, 3)
 
-  // 模型又说话了：算新一轮，重新计数。
-  监控.处理事件(会话, { type: 'assistant/message', data: { turn: 2 } })
+  // 这一轮结束、下一轮开始：重新计数。
+  监控.处理事件(会话, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  监控.跟踪状态(会话, 'idle')
+  监控.跟踪状态(会话, 'running')
   钟.现在 += 11 * 60000
   const 再提醒 = 监控.tick()
   assert.equal(再提醒.length, 1)
   assert.equal(再提醒[0].kind, 'remind')
   assert.equal(监控.快照().alerts[0].injections, 1)
+})
+
+test('防失联监控：回合结束后清掉告警', () => {
+  const { 钟, 监控 } = 建监控()
+  监控.跟踪状态(会话, 'running')
+  钟.现在 += 30 * 60000
+  assert.equal(监控.tick().filter((a) => a.kind === 'remind').length, 1)
+  assert.equal(监控.快照().alerts.length, 1)
+
+  // 这一轮正常结束：告警清掉。
+  监控.处理事件(会话, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.equal(监控.快照().alerts.length, 0)
 })
 
 test('防失联监控：会话空闲时不打扰', () => {
@@ -985,25 +1017,6 @@ test('防失联监控：会话空闲时不打扰', () => {
   钟.现在 += 120 * 60000
   assert.deepEqual(监控.tick(), [], '空闲是在等主人，不算卡住')
   assert.equal(监控.快照().alerts.length, 0)
-})
-
-test('防失联监控：有进展就清掉告警', () => {
-  const { 钟, 监控 } = 建监控()
-  监控.跟踪状态(会话, 'running')
-  钟.现在 += 30 * 60000
-  assert.equal(监控.tick().filter((a) => a.kind === 'remind').length, 1)
-  assert.equal(监控.快照().alerts.length, 1)
-
-  // 模型又说话了：算恢复。
-  监控.处理事件(会话, { type: 'assistant/message', data: { turn: 2, message: { content: [{ type: 'text', text: '我还在' }] } } })
-  assert.equal(监控.快照().alerts.length, 0)
-
-  // 恢复之后又长时间没动静：算新的一轮，重新提醒，但不会直接发 QQ。
-  钟.现在 += 120 * 60000
-  const 又提醒 = 监控.tick()
-  assert.equal(又提醒.length, 1)
-  assert.equal(又提醒[0].kind, 'remind')
-  assert.equal(监控.快照().alerts[0].injections, 1)
 })
 
 test('防失联监控：回合被中断立即提醒，短时间内不重复', () => {
