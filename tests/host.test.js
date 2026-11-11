@@ -82,6 +82,10 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   // 设置页的「图片识别提示词」要知道留空时用哪段默认；默认文案由宿主下发。
   assert.equal(状态.defaults.inboundImagePrompt, 默认识图提示词)
   assert.equal(状态.config.inboundImagePrompt, '')
+  // 暂停转发：状态里有待转发队列，默认没在暂停。
+  assert.equal(typeof 状态.forwardFile, 'string')
+  assert.equal(状态.bridge.forward.paused, false)
+  assert.equal(状态.bridge.forward.pending, 0)
   // 内置 ASR/TTS 已移除：不再有旧的开关字段，也没有 test-voice 路由。
   // 新的语音/识图设置走可选本地 AI，字段名见 lib/config.js。
   assert.equal('ttsEnabled' in 状态.config, false)

@@ -218,7 +218,7 @@ window.__ModuleLoader__.load({
       const [忙, 设忙] = React.useState(false)
       const [说, 设说] = React.useState('')
 
-      const 错 = (r) => String((r && (r.error || r.message)) || '未知错误')
+      const 错 = (r) => String((r && (r.error || r.message)) || '没有收到服务响应。')
 
       const 拉 = async () => {
         const p = new URLSearchParams()
@@ -604,14 +604,14 @@ window.__ModuleLoader__.load({
           设说('设置已保存。')
           await 拉()
         } else {
-          设说('保存失败：' + String((r && (r.error || r.message)) || '未知错误'))
+          设说('保存失败：' + String((r && (r.error || r.message)) || '没有收到服务响应，请稍后重试。'))
         }
       }
       const 测试文字 = async () => {
         设忙(true); 设说('正在发送测试消息…')
         const r = await post('/test-send', {})
         设忙(false)
-        if (!r || !r.ok) 设说('测试失败：' + String((r && r.error) || '未知错误'))
+        if (!r || !r.ok) 设说('测试失败：' + String((r && r.error) || '没有收到服务响应，请稍后重试。'))
         else if (r.queued) 设说(`QQ 当前无法发送，测试消息已加入待发列表（积压 ${r.pending ?? '?'} 条），恢复后将自动补发。`)
         else 设说(`已发送至 QQ ${r.qq}`)
       }
@@ -619,7 +619,7 @@ window.__ModuleLoader__.load({
         设忙(true); 设说('正在重试待发消息…')
         const r = await post('/outbox/flush', {})
         设忙(false)
-        if (!r || !r.ok) 设说('重试失败：' + String((r && r.error) || '未知错误'))
+        if (!r || !r.ok) 设说('重试失败：' + String((r && r.error) || '没有收到服务响应，请稍后重试。'))
         else 设说(`重试结束：成功 ${r.sent || 0} 条，失败 ${r.failed || 0} 条，丢弃 ${r.dropped || 0} 条，剩余 ${r.pending || 0} 条。`)
         await 拉()
       }
@@ -631,7 +631,7 @@ window.__ModuleLoader__.load({
         设忙(true); 设说('正在清空待发消息…')
         const r = await post('/outbox/clear', {})
         设忙(false)
-        设说(r && r.ok ? `已清空 ${r.cleared || 0} 条。` : '清空失败：' + String((r && r.error) || '未知错误'))
+        设说(r && r.ok ? `已清空 ${r.cleared || 0} 条。` : '清空失败：' + String((r && r.error) || '没有收到服务响应，请稍后重试。'))
         await 拉()
       }
 
@@ -649,7 +649,12 @@ window.__ModuleLoader__.load({
 
       const 桥 = 态.bridge || {}
       const 传 = 桥.transport || {}
-      const 在线 = Boolean(传.connected)
+      // HTTP 轮询模式下 transport.connected 一直是 false，用宿主算好的在线状态。
+      const 在线 = Boolean(传.online)
+      const 链路 = 在线 ? (传.mode === 'ws' ? '在线·实时' : '在线·轮询') : '离线'
+      const 离线原因 = String(传.lastError || 桥.lastSyncError || 桥.stats?.lastError || '').trim().replace(/[。！？.!?]+$/, '')
+      const 转发 = 桥.forward || {}
+      const 暂停转发 = Boolean(配置.forwardPaused)
       const 会话列表 = Array.isArray(态.sessions) ? 态.sessions : []
 
       const 绑定页 = h('div', { style: S.card },
@@ -680,12 +685,12 @@ window.__ModuleLoader__.load({
           }),
           h('div', null, 开关(b.enabled !== false, (v) => 改绑定(i, { enabled: v }))),
           h('button', { type: 'button', style: S.btn, onClick: () => 删绑定(i) }, '删除'))),
-        绑定们().length === 0 ? h('div', { style: S.dim, margin: '8px 0' }, '尚未添加绑定。') : null,
-        h('div', { style: { marginTop: 8 } }, h('button', { type: 'button', style: S.btn, onClick: 加绑定 }, '添加一条')))
+        绑定们().length === 0 ? h('div', { style: S.dim, margin: '8px 0' }, '还没有绑定。添加一条后，QQ 私聊才会转进 DSH 会话。') : null,
+        h('div', { style: { marginTop: 8 } }, h('button', { type: 'button', style: S.btn, onClick: 加绑定 }, '添加绑定')))
 
       const 连接页 = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '连接设置'),
-        h('div', { style: S.dim }, '消息经本机运行的 QQ 登录服务收发，使用前请先启动该服务。'),
+        h('div', { style: S.dim }, '消息经本机运行的 QQ 服务收发，使用前请先启动该服务。'),
         行('QQ 服务地址', 输入(配置.napcatBaseUrl, (v) => 改('napcatBaseUrl', v), '留空使用默认地址')),
         行('访问令牌（可选）', 输入(配置.napcatToken, (v) => 改('napcatToken', v), '未设置时留空'),
           null,
@@ -697,7 +702,10 @@ window.__ModuleLoader__.load({
 
       const 行为页 = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '消息处理'),
-        h('div', { style: S.dim }, '决定 DSH 的回复中哪些内容会发到 QQ。'),
+        h('div', { style: S.dim }, '控制 QQ 与 DSH 之间的消息如何转发。'),
+        行('暂停转发到会话', 开关(配置.forwardPaused, (v) => 改('forwardPaused', v)),
+          '暂停期间仍会收到 QQ 消息，恢复后按顺序补发；超过 24 小时的消息不再补发。'),
+        暂停转发 ? h('div', { style: { ...S.hint, marginBottom: 6 } }, `待转发 ${转发.pending || 0} 条`) : null,
         行('仅发送 [QQ] 标记内的内容', 开关(配置.onlyInsideMarkers, (v) => 改('onlyInsideMarkers', v)),
           null,
           '开启时只发标记内的部分；关闭时整条发送，标记会被去掉。'))
@@ -709,7 +717,7 @@ window.__ModuleLoader__.load({
       const 识图可用 = Boolean(AI能力.vision)
       const 服务提示 = AI能力.installed
         ? (AI能力.hint || '本地 AI 插件没启动，语音和识图暂不可用。')
-        : '语音和识图暂不可用。'
+        : '本地 AI 插件没装或没启动，语音和识图暂不可用。'
       const 音色值 = 配置.sayVoice || 'dafeiyu'
       // 识图提示词留空时用内置默认；默认文案由宿主 /state 下发，前端不另写一份。
       const 默认识图提示词 = String((态.defaults && 态.defaults.inboundImagePrompt) || '')
@@ -734,10 +742,10 @@ window.__ModuleLoader__.load({
           style: S.small, type: 'number', min: 0.5, max: 2, step: 0.1,
           value: 配置.saySpeed ?? 1, disabled: !语音可用,
           onChange: (e) => 改('saySpeed', Number(e.target.value)),
-        }), null, '0.5 到 2，默认 1。'),
+        }), null, '数值越大语速越快；范围 0.5 到 2，默认 1。'),
         (AI在线 && !转写可用) ? h('div', { style: { ...S.hint, marginBottom: 8 } }, '本地 AI 的语音识别暂不可用。') : null,
         行('收到语音后自动分析', 开关(配置.transcribeInbound, (v) => 改('transcribeInbound', v), !转写可用),
-          '会识别文字、声纹和情感；不勾选只把语音文件路径递进会话。', null),
+          '会识别文字、说话人和情感；不勾选只把语音文件路径递进会话。', null),
         行('语音分析语言', h('select', {
           style: S.input, value: 配置.asrLanguage || 'auto', disabled: !转写可用 || 配置.transcribeInbound === false,
           onChange: (e) => 改('asrLanguage', e.target.value),
@@ -776,7 +784,7 @@ window.__ModuleLoader__.load({
                 onClick: () => 改('inboundImagePrompt', ''),
               }, '恢复默认'))
             : null),
-        'QQ 收到的图片和表情包用这段提示词在本机识别，留空用默认。'))
+        '留空时使用内置默认提示词。'))
 
       const 补投页 = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '同步与补发'),
@@ -792,15 +800,15 @@ window.__ModuleLoader__.load({
         行('定期核对间隔（毫秒）', h('input', {
           style: S.small, type: 'number', min: 5000, max: 600000, value: 配置.historyIntervalMs ?? 60000,
           onChange: (e) => 改('historyIntervalMs', Number(e.target.value)),
-        })),
+        }), '每隔这么久和 QQ 核对一次最近消息，防止漏收。'),
         行('消息排序等待（毫秒）', h('input', {
           style: S.small, type: 'number', min: 0, max: 5000, value: 配置.reorderBufferMs ?? 1500,
           onChange: (e) => 改('reorderBufferMs', Number(e.target.value)),
-        })),
+        }), '收到消息后先等这么久再按时间排序，避免先后颠倒。'),
         行('每次读取条数', h('input', {
           style: S.small, type: 'number', min: 10, max: 500, value: 配置.historyCount ?? 100,
           onChange: (e) => 改('historyCount', Number(e.target.value)),
-        })),
+        }), null, '一次最多读这么多条；取太小可能分多次读取。'),
         行('待发消息保留时长（小时）', h('input', {
           style: S.small, type: 'number', min: 1, max: 720, value: 配置.outboxTtlHours ?? 24,
           onChange: (e) => 改('outboxTtlHours', Number(e.target.value)),
@@ -821,7 +829,7 @@ window.__ModuleLoader__.load({
           指标(`失败 ${出站.failedTotal || 0} 条`),
           指标(`已丢弃 ${出站.droppedTotal || 0} 条`)),
         h('div', { style: S.hint }, 'QQ 暂时不可用时先存本机，恢复后按时间顺序补发。'),
-        出站.lastError ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近一次发送失败：${出站.lastError}`) : null,
+        出站.lastError && !在线 ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近一次发送失败：${出站.lastError}`) : null,
         h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
           h('button', {
             type: 'button', style: S.btn, onClick: 立即补发, disabled: 忙,
@@ -834,9 +842,12 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'fish-msg-settings', style: S.wrap },
         h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
           h('div', { style: S.h1 }, '鱼讯 QQ'),
-          h('span', { style: { ...S.badge, ...(在线 ? S.ok : S.danger) } }, 在线 ? '在线' : '离线'),
+          h('span', {
+            style: { ...S.badge, ...(在线 ? S.ok : S.danger) },
+            title: 在线 ? (传.mode === 'ws' ? '按实时连接接收消息' : '按定时查询接收消息') : '暂时连不上 QQ 服务',
+          }, 链路),
           h('span', { style: S.dim }, `v${态.version || '?'}`)),
-        h('div', { style: S.dim }, '在 QQ 与 DSH 之间互传消息，目前仅支持私聊。'),
+        h('div', { style: S.dim }, '在 QQ 与 DSH 之间互传私聊消息。'),
         h('div', { style: { ...S.card, marginTop: 10 } },
           h('div', { style: S.dim },
             指标(`待发 ${出站.pending || 0} 条`),
@@ -844,8 +855,11 @@ window.__ModuleLoader__.load({
             指标(`已收到 ${桥.stats?.received || 0} 条`),
             指标(`已转达 ${桥.stats?.delivered || 0} 条`, '已送入 DSH 会话。'),
             指标(`已跳过 ${桥.stats?.skippedOld || 0} 条`, '早于补发范围的旧消息。'),
-            指标(`出错 ${桥.stats?.errors || 0} 次`)),
-          (桥.lastSyncError || 桥.stats?.lastError) ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近一次出错：${桥.lastSyncError || 桥.stats.lastError}`) : null),
+            指标(`出错 ${桥.stats?.errors || 0} 次`, '历史累计，不代表当前状态。')),
+          !在线 && 离线原因
+            ? h('div', { style: { ...S.danger, marginTop: 4 } },
+              `离线原因：${离线原因}。请检查 QQ 服务是否已启动、地址是否正确。`)
+            : null),
         连接页, 绑定页, 行为页, 语音页, 补投页, h(表情设置, {
           配置,
           改,
@@ -865,7 +879,7 @@ window.__ModuleLoader__.load({
           }, '刷新状态')),
         说 ? h('div', { style: 说.includes('失败') ? S.danger : S.ok }, 说) : null,
         h('div', { style: { ...S.h, marginTop: 14 } }, '最近日志'),
-        h('pre', { style: S.日志 }, 日志 || '（暂无日志）'))
+        h('pre', { style: S.日志 }, 日志 || '暂无日志。'))
     }
 
     function apply(ctx) {

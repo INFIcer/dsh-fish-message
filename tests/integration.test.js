@@ -72,6 +72,11 @@ test('mock OneBot：HTTP 补投按时间排序、去重、可重发文字', asyn
   await bridge.sync('integration')
 
   assert.deepEqual(delivery.got.map((x) => x.text), ['第一', '第二', '第三'])
+  // HTTP 轮询模式下 connected 一直是 false；最近一次 HTTP 调用成功也算在线。
+  const 连接 = bridge.state().transport
+  assert.equal(连接.online, true)
+  assert.equal(连接.mode, 'http')
+  assert.ok(连接.lastOkAt > 0)
   await bridge.deliverAssistantTurn(会话, '块外 [QQ]发到 QQ 的字[/QQ] 块外')
   assert.equal(server.sent.length, 1)
   assert.deepEqual(server.sent[0].message, [{ type: 'text', data: { text: '发到 QQ 的字' } }])
@@ -108,6 +113,8 @@ test('mock OneBot：WebSocket 收消息，重复 id 不重投', async () => {
   await bridge.start({ syncNow: false })
   const 连上 = await 等(() => transport.getStatus().connected, 3000)
   assert.equal(连上, true, 'WebSocket 应该连上')
+  assert.equal(bridge.state().transport.online, true)
+  assert.equal(bridge.state().transport.mode, 'ws')
 
   const 现在 = Math.floor(Date.now() / 1000)
   const 晚 = 消息(12, '晚一点', 现在 - 5)
@@ -156,4 +163,34 @@ test('mock OneBot：重启后从磁盘水位继续，不重投', async () => {
   assert.deepEqual(第二.delivery.got.map((x) => x.text), ['重启后'])
   await 第二.bridge.stop()
   await server.stop()
+})
+
+test('连接健康：HTTP 调不通时显示离线，不能只看 connected', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fish-int-offline-'))
+  const store = new StateStore({ homeDir: dir })
+  const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
+  const 配置 = normalizeConfig({
+    napcatBaseUrl: 'http://127.0.0.1:1',
+    wsEnabled: false,
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    requestTimeoutMs: 3000,
+    reorderBufferMs: 0,
+  })
+  const transport = new NapCatOneBotTransport({ getConfig: () => 配置, logger })
+  const bridge = new Bridge({
+    getConfig: () => 配置,
+    transport,
+    store,
+    logger,
+    voice: new 假语音(),
+    delivery: new 假投递(),
+    autoTimers: false,
+  })
+  await bridge.start({ syncNow: false })
+  await bridge.sync('offline')
+  const 连接 = bridge.state().transport
+  assert.equal(连接.online, false)
+  assert.equal(连接.mode, 'http')
+  assert.equal(连接.lastOkAt, 0)
+  await bridge.stop()
 })

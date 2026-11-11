@@ -7,11 +7,23 @@ import { randomUUID } from 'node:crypto'
 import { Bridge } from '../lib/bridge.js'
 import { VoiceService } from '../lib/voice.js'
 import { StateStore } from '../lib/storage.js'
-import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig, 默认识图提示词 } from '../lib/config.js'
+import { ForwardQueue } from '../lib/forward-queue.js'
+import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig, publicConfig, 默认识图提示词 } from '../lib/config.js'
 import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
 
 const 睡 = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** 轮询等待条件成立（测试里的 setTimeout 补投是异步的）。 */
+async function 等(条件, 毫秒 = 1000, 间隔 = 20) {
+  const 止 = Date.now() + 毫秒
+  while (Date.now() < 止) {
+    if (await 条件()) return true
+    await 睡(间隔)
+  }
+  return false
+}
+
 const 临时目录 = () => mkdtempSync(join(tmpdir(), 'fish-message-test-'))
 const QQ = '10001'
 const 会话 = 'session-test-0001'
@@ -130,7 +142,7 @@ function 造wav(秒 = 1) {
   return buf
 }
 
-function 建桥({ dir = 临时目录(), 历史 = {}, config = {}, ai = null } = {}) {
+function 建桥({ dir = 临时目录(), 历史 = {}, config = {}, ai = null, forwardQueue = null } = {}) {
   const store = new StateStore({ homeDir: dir })
   const logger = new Logger({ filePath: join(dir, 'test.log'), level: 'debug' })
   const transport = new 假传输(历史)
@@ -151,6 +163,7 @@ function 建桥({ dir = 临时目录(), 历史 = {}, config = {}, ai = null } = 
     logger,
     voice,
     delivery,
+    forwardQueue,
     ai,
     autoTimers: false,
   })
@@ -748,4 +761,118 @@ test('旧配置：残留的 ASR/TTS 字段被静默忽略并从落盘文件清�
   const 再读 = new ConfigStore({ homeDir: 临时目录() }).load({ ttsVoice: 'x', asrCommand: 'y' })
   assert.equal('ttsVoice' in 再读, false)
   assert.equal('asrCommand' in 再读, false)
+})
+
+// ---------------- 暂停转发：待转发队列 ----------------
+
+test('暂停转发：消息照常接收并记统计，但一条都不投进会话', async () => {
+  const 现在 = Math.floor(Date.now() / 1000)
+  const { dir, bridge, delivery, transport, 配置, store } = 建桥()
+  配置.forwardPaused = true
+  bridge.updateConfig()
+  await bridge.start({ syncNow: false })
+  for (const [i, 文] of ['暂停一', '暂停二', '暂停三'].entries()) {
+    transport.emit({ post_type: 'message', message_type: 'private', ...建消息(60 + i, 文, 现在 - 10 + i) })
+  }
+  await 睡(120)
+
+  assert.equal(delivery.got.length, 0, '暂停期间不能投进 DSH 会话')
+  const 态 = bridge.state()
+  assert.equal(态.forward.paused, true)
+  assert.equal(态.forward.pending, 3)
+  assert.equal(态.stats.received, 3, '统计照常记「已收到」')
+  assert.equal(态.stats.delivered, 0, '暂停期间不算「已转达」')
+  assert.ok(store.getWatermark(QQ).timestamp >= 现在 - 10, '水位照常推进，不会重复收')
+  assert.equal(new ForwardQueue({ homeDir: dir }).pending(), 3, '待转发队列要落盘')
+  await bridge.stop()
+})
+
+test('恢复转发：暂停期间的 3 条按原顺序补发，不重复', async () => {
+  const 现在 = Math.floor(Date.now() / 1000)
+  const { bridge, delivery, transport, 配置 } = 建桥()
+  配置.forwardPaused = true
+  bridge.updateConfig()
+  await bridge.start({ syncNow: false })
+  for (const [i, 文] of ['第一', '第二', '第三'].entries()) {
+    transport.emit({ post_type: 'message', message_type: 'private', ...建消息(70 + i, 文, 现在 - 10 + i) })
+  }
+  await 睡(120)
+  assert.equal(delivery.got.length, 0)
+
+  配置.forwardPaused = false
+  bridge.updateConfig()
+  assert.equal(await 等(() => delivery.got.length === 3), true, '恢复后应自动补发')
+  assert.deepEqual(delivery.got.map((x) => x.text), ['第一', '第二', '第三'])
+  assert.equal(bridge.state().forward.pending, 0)
+  assert.equal(bridge.state().stats.delivered, 3)
+
+  // 再补一次不会重复
+  await bridge.flushForwardQueue('again')
+  await 睡(30)
+  assert.equal(delivery.got.length, 3, '补发过的消息不能再来一次')
+  await bridge.stop()
+})
+
+test('暂停时重启：待转发队列从磁盘读回，恢复后照常补发', async () => {
+  const 现在 = Math.floor(Date.now() / 1000)
+  const dir = 临时目录()
+  const 第一 = 建桥({ dir, config: { forwardPaused: true } })
+  await 第一.bridge.start({ syncNow: false })
+  for (const [i, 文] of ['重启一', '重启二', '重启三'].entries()) {
+    第一.transport.emit({ post_type: 'message', message_type: 'private', ...建消息(80 + i, 文, 现在 - 10 + i) })
+  }
+  await 睡(120)
+  assert.equal(第一.bridge.state().forward.pending, 3)
+  assert.equal(第一.delivery.got.length, 0)
+  await 第一.bridge.stop()
+
+  // 新实例用同一个目录（同一个状态文件），暂停标记还在。
+  const 第二 = 建桥({ dir, config: { forwardPaused: true } })
+  assert.equal(第二.bridge.state().forward.pending, 3, '重启后待转发队列还在')
+  await 第二.bridge.start({ syncNow: false })
+  assert.equal(第二.delivery.got.length, 0, '还在暂停，不补发')
+
+  第二.配置.forwardPaused = false
+  第二.bridge.updateConfig()
+  assert.equal(await 等(() => 第二.delivery.got.length === 3), true)
+  assert.deepEqual(第二.delivery.got.map((x) => x.text), ['重启一', '重启二', '重启三'])
+  await 第二.bridge.stop()
+})
+
+test('待转发消息过期：恢复时不补发，只提示一句数量', async () => {
+  const 现在 = Math.floor(Date.now() / 1000)
+  const dir = 临时目录()
+  const forwardQueue = new ForwardQueue({ homeDir: dir, ttlMs: 30 })
+  const { bridge, delivery, transport, 配置 } = 建桥({ dir, forwardQueue })
+  配置.forwardPaused = true
+  bridge.updateConfig()
+  await bridge.start({ syncNow: false })
+  for (const [i, 文] of ['过期一', '过期二', '过期三'].entries()) {
+    transport.emit({ post_type: 'message', message_type: 'private', ...建消息(90 + i, 文, 现在 - 10 + i) })
+  }
+  await 睡(150)
+
+  配置.forwardPaused = false
+  bridge.updateConfig()
+  assert.equal(await 等(() => delivery.got.length >= 1), true)
+  await 睡(60)
+  assert.equal(delivery.got.length, 1, '过期消息不补发，只发一条提示')
+  assert.match(delivery.got[0].text, /3 条/)
+  assert.match(delivery.got[0].text, /过期|保留时间/)
+  assert.equal(bridge.state().forward.pending, 0)
+  assert.equal(bridge.state().stats.delivered, 0, '过期丢弃的不算已转达')
+  await bridge.stop()
+})
+
+test('暂停转发：配置默认关，保存后能读回', () => {
+  assert.equal(normalizeConfig({}).forwardPaused, false)
+  assert.equal(normalizeConfig({ forwardPaused: true }).forwardPaused, true)
+  assert.equal(normalizeConfig({ forwardPaused: 'true' }).forwardPaused, true)
+  assert.equal(normalizeConfig({ forwardPaused: 0 }).forwardPaused, false)
+
+  const dir = 临时目录()
+  const 保存 = new ConfigStore({ homeDir: dir }).save({ forwardPaused: true, bindings: [] })
+  assert.equal(保存.forwardPaused, true)
+  assert.equal(new ConfigStore({ homeDir: dir }).load({}).forwardPaused, true)
+  assert.equal(publicConfig({ forwardPaused: true }).forwardPaused, true)
 })
