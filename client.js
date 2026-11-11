@@ -741,6 +741,10 @@ window.__ModuleLoader__.load({
           null,
           '开启时只发标记内的部分；关闭时整条发送，标记会被去掉。'))
 
+      // 默认文案都由宿主 /state 下发，前端不另写一份（原文只在 lib/config.js 一处）。
+      const 默认识图提示词 = String((态.defaults && 态.defaults.inboundImagePrompt) || '')
+      const 默认长任务提醒 = String((态.defaults && 态.defaults.guardStuckPrompt) || '')
+      const 默认消息通道提醒 = String((态.defaults && 态.defaults.guardQqPrompt) || '')
       const 守护 = 态.guard || {}
       const 守护告警 = Array.isArray(守护.alerts) ? 守护.alerts : []
       const 防失联页 = h('div', { style: S.card },
@@ -808,11 +812,6 @@ window.__ModuleLoader__.load({
         ? (AI能力.hint || '本地 AI 插件没启动，语音和识图暂不可用。')
         : '本地 AI 插件没装或没启动，语音和识图暂不可用。'
       const 音色值 = 配置.sayVoice || 'dafeiyu'
-      // 识图提示词留空时用内置默认；默认文案由宿主 /state 下发，前端不另写一份。
-      const 默认识图提示词 = String((态.defaults && 态.defaults.inboundImagePrompt) || '')
-      // 两条提醒提示词的默认文案同样由宿主 /state 下发（原文只在 lib/config.js 一处）。
-      const 默认长任务提醒 = String((态.defaults && 态.defaults.guardStuckPrompt) || '')
-      const 默认消息通道提醒 = String((态.defaults && 态.defaults.guardQqPrompt) || '')
       const 音色控件 = (Array.isArray(音色们) && 音色们.length)
         ? h('select', {
           style: S.input, value: 音色值, disabled: !语音可用,
