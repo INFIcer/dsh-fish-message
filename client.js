@@ -741,6 +741,32 @@ window.__ModuleLoader__.load({
           null,
           '开启时只发标记内的部分；关闭时整条发送，标记会被去掉。'))
 
+      const 守护 = 态.guard || {}
+      const 守护告警 = Array.isArray(守护.alerts) ? 守护.alerts : []
+      const 防失联页 = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '防失联'),
+        h('div', { style: S.dim }, '让绑定的会话一直能收发消息：不弹提问、不等人、卡住了先提醒，必要时再发 QQ 通知你。'),
+        行('保持绑定会话能收发', 开关(配置.guardEnabled, (v) => 改('guardEnabled', v)),
+          '开启后，绑定的会话里不能用会停下来等人的工具，也不能装卸插件。'),
+        行('多久没新进展算卡住', h('input', {
+          style: S.small, type: 'number', min: 1, max: 120, value: 配置.guardStuckMinutes ?? 10,
+          onChange: (e) => 改('guardStuckMinutes', Number(e.target.value)),
+        }), '超过这个时间没有新内容，就先给会话发一条提醒。'),
+        行('提醒无效时发 QQ', 开关(配置.guardQqFallback, (v) => 改('guardQqFallback', v)),
+          '连续提醒 3 次仍没动静才会发，最多每小时一次。'),
+        守护.enabled
+          ? h('div', { style: { ...S.hint, marginTop: 6 } },
+            `正在看 ${守护.bound || 0} 个绑定会话。${守护.approvalNever ? '需要审批的操作会自动拒绝，不会停下来等人。' : ''}`)
+          : h('div', { style: { ...S.hint, marginTop: 6 } }, '守护已关闭，绑定会话可能被提问或审批卡住。'),
+        守护.degraded && 守护.degraded.length
+          ? h('div', { style: { ...S.danger, marginTop: 4 } },
+            `有 ${守护.degraded.length} 项能力不可用：${守护.degraded.map((x) => x.reason).join('；')}`)
+          : null,
+        守护告警.length
+          ? h('div', { style: { ...S.danger, marginTop: 4 } },
+            `正在提醒：${守护告警.map((a) => `${a.title}（${a.minutes} 分钟）`).join('、')}`)
+          : null)
+
       const AI能力 = 态.ai || {}
       const AI在线 = Boolean(AI能力.online)
       const 语音可用 = Boolean(AI能力.tts)
@@ -906,7 +932,7 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { ...S.danger, marginTop: 4 } },
               `离线原因：${离线原因}。请检查 QQ 服务是否已启动、地址是否正确。`)
             : null),
-        连接页, 绑定页, 行为页, 语音页, 补投页, h(表情设置, {
+        连接页, 绑定页, 行为页, 防失联页, 语音页, 补投页, h(表情设置, {
           配置,
           改,
           打开: () => 设视图('stickers'),

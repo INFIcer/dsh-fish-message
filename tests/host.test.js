@@ -86,6 +86,10 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(typeof 状态.forwardFile, 'string')
   assert.equal(状态.bridge.forward.paused, false)
   assert.equal(状态.bridge.forward.pending, 0)
+  // 防失联：默认开启，只盯启用中的绑定会话。
+  assert.equal(状态.guard.enabled, true)
+  assert.equal(状态.guard.bound, 1)
+  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question', 'plugin_manager'])
   // 内置 ASR/TTS 已移除：不再有旧的开关字段，也没有 test-voice 路由。
   // 新的语音/识图设置走可选本地 AI，字段名见 lib/config.js。
   assert.equal('ttsEnabled' in 状态.config, false)
@@ -117,6 +121,151 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   const 发出 = await 等(() => server.sent.length > 0, 2000)
   assert.equal(发出, true)
   assert.equal(server.sent[0].message[0].data.text, '宿主入口测试')
+
+  await app.停()
+  await 睡(20)
+  await server.stop()
+})
+
+test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async () => {
+  const server = await new MockOneBotServer().start()
+  const dir = mkdtempSync(join(tmpdir(), 'fish-guard-'))
+  process.env.DSH_HOME = dir
+
+  const routes = new Map()
+  const 监听 = new Map()
+  const 工具守卫们 = []
+  const 提示段们 = []
+  const 审批调用 = []
+  let 撤工具 = 0
+  let 撤提示段 = 0
+
+  const agent = {
+    id: 会话,
+    session: { id: 会话 },
+    status: 'idle',
+    ctx: {
+      tools: {
+        guard(fn) {
+          工具守卫们.push(fn)
+          return () => { 撤工具 += 1 }
+        },
+      },
+      systemPrompt: {
+        section(段) {
+          提示段们.push(段)
+          return () => { 撤提示段 += 1 }
+        },
+      },
+    },
+    async followup() {},
+  }
+
+  const ctx = {
+    effect(cb) {
+      const d = cb()
+      return typeof d === 'function' ? d : () => {}
+    },
+    on(事件, fn) {
+      监听.set(事件, fn)
+      return () => 监听.delete(事件)
+    },
+    get(服务) {
+      if (服务 === 'sessions') return { list: () => [{ id: 会话, title: '守卫测试' }], flush: async () => {} }
+      if (服务 === 'sessionTitle') return { get: () => ({ title: '守卫测试' }) }
+      if (服务 === 'workspaceRegistry') return { archivedSessionIds: [] }
+      if (服务 === 'attachments') return { admitPromptContent: async (c) => c, imageHostPath: () => '' }
+      if (服务 === 'approval') {
+        return {
+          effectivePolicy: () => 'ask',
+          setPolicy(a, 策略) { 审批调用.push([a, 策略]) },
+        }
+      }
+      return undefined
+    },
+    // 启动时还没有会话，等 agent/created 再装。
+    agents: { get: (id) => (id === 会话 ? agent : undefined), list: () => [] },
+    webServer: {
+      register({ path, handler }) {
+        routes.set(path, handler)
+        return () => routes.delete(path)
+      },
+    },
+  }
+
+  const host = await import('../lib/host.js?host-guard')
+  const app = host.apply(ctx, {
+    napcatBaseUrl: server.baseUrl,
+    wsUrl: server.wsUrl,
+    wsEnabled: false,
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    pollIntervalMs: 200,
+    reorderBufferMs: 30,
+    requestTimeoutMs: 3000,
+  })
+  await 等(() => app.bridge.running, 2000)
+
+  assert.equal(工具守卫们.length, 0, '启动时没有活着的会话，先不装')
+  const 创建 = 监听.get('agent/created')
+  assert.equal(typeof 创建, 'function')
+  创建({ agent })
+  assert.equal(工具守卫们.length, 1)
+  assert.equal(提示段们.length, 1)
+  assert.deepEqual(审批调用[0], [agent, 'never'])
+  assert.equal(提示段们[0].name, 'fish-message:guard')
+  assert.equal(提示段们[0].order, 10150)
+  assert.match(提示段们[0].text, /子代理/)
+  assert.match(工具守卫们[0]({ name: 'ask_user_question' }), /不能用/)
+  assert.match(工具守卫们[0]({ name: 'plugin_manager' }), /不能用/)
+  assert.equal(工具守卫们[0]({ name: 'read_file' }), undefined)
+
+  // 同一个会话重复收到 created 不重复叠加。
+  创建({ agent })
+  assert.equal(工具守卫们.length, 1)
+  assert.equal(提示段们.length, 1)
+
+  const 状态响应 = 假响应()
+  await routes.get('/dsh-fish-message/state')({}, 状态响应)
+  const 状态 = JSON.parse(状态响应.body)
+  assert.equal(状态.guard.enabled, true)
+  assert.equal(状态.guard.approvalAvailable, true)
+  assert.equal(状态.guard.approvalNever, true)
+  assert.equal(状态.guard.bound, 1)
+  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question', 'plugin_manager'])
+
+  // 会话销毁：守卫和提示段各撤一次；再收到 disposed 也不重复。
+  监听.get('agent/disposed')({ agent })
+  assert.equal(撤工具, 1)
+  assert.equal(撤提示段, 1)
+  监听.get('agent/disposed')({ agent })
+  assert.equal(撤工具, 1)
+  assert.equal(撤提示段, 1)
+
+  // 再建一次会重新装；/save 关掉守护后要拆掉，之后新建的也不装。
+  创建({ agent })
+  assert.equal(工具守卫们.length, 2)
+  const 保存请求 = {
+    method: 'POST',
+    url: '/dsh-fish-message/save',
+    on(事件, fn) {
+      if (事件 === 'data') fn(JSON.stringify({ config: { ...状态.config, guardEnabled: false } }))
+      if (事件 === 'end') fn()
+    },
+  }
+  const 保存响应 = 假响应()
+  await routes.get('/dsh-fish-message/save')(保存请求, 保存响应)
+  assert.equal(JSON.parse(保存响应.body).ok, true)
+  assert.equal(撤工具, 2)
+  assert.equal(撤提示段, 2)
+
+  const 关后响应 = 假响应()
+  await routes.get('/dsh-fish-message/state')({}, 关后响应)
+  const 关后 = JSON.parse(关后响应.body)
+  assert.equal(关后.guard.enabled, false)
+  assert.equal(关后.guard.approvalNever, false)
+
+  监听.get('agent/created')({ agent })
+  assert.equal(工具守卫们.length, 2)
 
   await app.停()
   await 睡(20)
