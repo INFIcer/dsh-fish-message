@@ -37,6 +37,22 @@ window.__ModuleLoader__.load({
         border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.08))',
         borderRadius: 12,
       },
+      // 页面级操作条：吸在设置面板滚动区顶部，滚到哪儿都能保存、返回或刷新。
+      bar: {
+        position: 'sticky',
+        top: 0,
+        zIndex: 5,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '10px 14px',
+        margin: '-12px -14px 10px',
+        background: 'var(--dsw-alias-bg-layer-1, #fff)',
+        borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.08))',
+        borderRadius: '12px 12px 0 0',
+      },
+      barRow: { display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' },
+      barActions: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
       h: { fontSize: 15, fontWeight: 650, margin: '16px 0 8px' },
       h1: { fontSize: 17, fontWeight: 700, margin: '0 0 4px' },
       dim: { opacity: 0.62, fontSize: 12 },
@@ -179,6 +195,9 @@ window.__ModuleLoader__.load({
     const 指标 = (文本, 说明) => h('span', { style: { marginRight: 12, whiteSpace: 'nowrap' } },
       文本, 说明 ? 问号(说明) : null)
 
+    // 提示文案的错误分级：失败、无法、不可用这类按错误色显示，其余按成功提示。
+    const 是错误 = (文本) => /失败|无法|错误|不可用|不能/.test(String(文本 || ''))
+
     function 输入(值, onChange, 占位 = '', 禁用 = false) {
       return h('input', {
         style: S.input,
@@ -206,7 +225,7 @@ window.__ModuleLoader__.load({
     // 网格占用的面积大、条目可能很多，所以从设置页拆出来单独一页；
     // 所有读写仍走宿主路由 /dsh-fish-message/stickers*。
     // 预览直接用 <img> 指向库中原图，GIF 会自己动；loading="lazy" 做惰性加载。
-    function 表情包页({ 绑定们 }) {
+    function 表情包页({ 绑定们, 返回设置 }) {
       const [列表, 设列表] = React.useState({ items: [], total: 0, stats: {}, tags: [] })
       const [最近, 设最近] = React.useState([])
       const [q, 设q] = React.useState('')
@@ -350,8 +369,15 @@ window.__ModuleLoader__.load({
       const 统计 = 列表.stats || {}
       const 卡片们 = Array.isArray(列表.items) ? 列表.items : []
 
-      const 工具条 = h('div', { style: S.card },
-        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+      // 吸顶操作条：返回、标题和整排导入/清理按钮都在这里，滚动时始终可见。
+      const 操作条 = h('div', { style: S.bar },
+        h('div', { style: S.barRow },
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 } },
+            h('button', { type: 'button', style: S.btn, onClick: 返回设置 }, '返回设置'),
+            h('div', { style: { ...S.h1, margin: 0 } }, '表情包管理')),
+          h('div', { style: S.barActions },
+            h('button', { type: 'button', style: S.btn, onClick: 拉, disabled: 忙 }, '刷新'))),
+        h('div', { style: S.barActions },
           h('input', {
             type: 'file', multiple: true, accept: 'image/*', disabled: 忙,
             onChange: (e) => { 上传(e.target.files); e.target.value = '' },
@@ -367,9 +393,12 @@ window.__ModuleLoader__.load({
           }, '清理重复'),
           h('button', {
             type: 'button', style: S.btn, onClick: () => 清理('inbox'), disabled: 忙,
-          }, '清空最近图片'),
-          h('button', { type: 'button', style: S.btn, onClick: 拉, disabled: 忙 }, '刷新')),
-        h('div', { style: S.hint }, '可多选，也可拖入图片。'),
+          }, '清空最近图片')),
+        说 ? h('div', { style: { ...(是错误(说) ? S.danger : S.ok), marginTop: 2 } }, 说) : null)
+
+      // 搜索、标签、排序和统计不常用到必须一直可见，放在操作条下面跟着内容滚。
+      const 筛选条 = h('div', { style: S.card },
+        h('div', { style: S.hint }, '可一次选多张，也可以把图片直接拖进本页。'),
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 } },
           h('input', {
             style: { ...S.input, width: 200 },
@@ -384,8 +413,7 @@ window.__ModuleLoader__.load({
             h('option', { value: 'recent' }, '按加入时间'),
             h('option', { value: 'name' }, '按文件名'))),
         h('div', { style: { ...S.dim, marginTop: 6 } },
-          `共 ${统计.count || 0} 个（上限 ${统计.maxCount || '?'}）｜占用 ${统计.sizeMB || 0}MB（上限 ${统计.maxMB || '?'}MB）｜已使用 ${统计.used || 0} 个｜未使用 ${统计.unused || 0} 个`),
-        说 ? h('div', { style: { ...(String(说).includes('失败') ? S.danger : S.ok), marginTop: 4 } }, 说) : null)
+          `共 ${统计.count || 0} 个（上限 ${统计.maxCount || '?'}）｜占用 ${统计.sizeMB || 0}MB（上限 ${统计.maxMB || '?'}MB）｜已使用 ${统计.used || 0} 个｜未使用 ${统计.unused || 0} 个`))
 
       const 网格 = h('div', { style: { ...S.card } },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, `表情（${列表.total ?? 卡片们.length} 个）`),
@@ -455,7 +483,7 @@ window.__ModuleLoader__.load({
       return h('div', {
         onDragOver: (e) => { e.preventDefault() },
         onDrop: (e) => { e.preventDefault(); 上传(e.dataTransfer && e.dataTransfer.files) },
-      }, 工具条, 网格, 最近块)
+      }, 操作条, 筛选条, 网格, 最近块)
     }
 
     /** 设置页里的表情包入口：只放统计与入口按钮。 */
@@ -550,6 +578,8 @@ window.__ModuleLoader__.load({
       const [态, 设态] = React.useState(null)
       const [脏, 设脏] = React.useState(false)
       const [忙, 设忙] = React.useState(false)
+      // 当前正在执行的动作，用来让吸顶条上的按钮显示「正在保存…」这类状态。
+      const [动作, 设动作] = React.useState('')
       const [说, 设说] = React.useState('')
       // 表情包的网格占用面积大，放在独立视图里，设置页只留入口。
       const [视图, 设视图] = React.useState('main')
@@ -575,6 +605,12 @@ window.__ModuleLoader__.load({
         const s = await get('/state')
         if (s) 设态(s)
       }
+      // 手动刷新：和自动轮询共用一个拉取函数，但要让按钮显示正在做事。
+      const 刷新 = async () => {
+        设忙(true); 设动作('刷新'); 设说('正在刷新状态…')
+        await 拉()
+        设忙(false); 设动作(''); 设说('')
+      }
       React.useEffect(() => { 拉() }, [])
       React.useEffect(() => {
         if (脏) return undefined
@@ -596,9 +632,9 @@ window.__ModuleLoader__.load({
       const 删绑定 = (i) => 改('bindings', 绑定们().filter((_, j) => j !== i))
 
       const 存 = async () => {
-        设忙(true); 设说('保存中…')
+        设忙(true); 设动作('保存'); 设说('正在保存…')
         const r = await post('/save', { config: 配置 })
-        设忙(false)
+        设忙(false); 设动作('')
         if (r && r.ok) {
           设脏(false)
           设说('设置已保存。')
@@ -608,9 +644,9 @@ window.__ModuleLoader__.load({
         }
       }
       const 测试文字 = async () => {
-        设忙(true); 设说('正在发送测试消息…')
+        设忙(true); 设动作('测试'); 设说('正在发送测试消息…')
         const r = await post('/test-send', {})
-        设忙(false)
+        设忙(false); 设动作('')
         if (!r || !r.ok) 设说('测试失败：' + String((r && r.error) || '没有收到服务响应，请稍后重试。'))
         else if (r.queued) 设说(`QQ 当前无法发送，测试消息已加入待发列表（积压 ${r.pending ?? '?'} 条），恢复后将自动补发。`)
         else 设说(`已发送至 QQ ${r.qq}`)
@@ -639,12 +675,7 @@ window.__ModuleLoader__.load({
 
       if (视图 === 'stickers') {
         return h('div', { className: 'fish-msg-settings', style: { ...S.wrap, minHeight: '62vh' } },
-          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 } },
-            h('button', {
-              type: 'button', style: S.btn, onClick: () => 设视图('main'),
-            }, '← 返回设置'),
-            h('div', { style: { ...S.h1, margin: 0 } }, '表情包管理')),
-          h(表情包页, { 绑定们: 绑定们() }))
+          h(表情包页, { 绑定们: 绑定们(), 返回设置: () => 设视图('main') }))
       }
 
       const 桥 = 态.bridge || {}
@@ -839,16 +870,31 @@ window.__ModuleLoader__.load({
           }, '清空待发')))
 
       const 日志 = Array.isArray(态.logs) ? 态.logs.join('\n') : ''
-      return h('div', { className: 'fish-msg-settings', style: S.wrap },
-        h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
-          h('div', { style: S.h1 }, '鱼讯 QQ'),
-          h('span', {
-            style: { ...S.badge, ...(在线 ? S.ok : S.danger) },
-            title: 在线 ? (传.mode === 'ws' ? '按实时连接接收消息' : '按定时查询接收消息') : '暂时连不上 QQ 服务',
-          }, 链路),
-          h('span', { style: S.dim }, `v${态.version || '?'}`)),
+      // 吸顶操作条：标题、在线状态和页面级按钮都收在这里，内容在它下面滚动。
+      const 操作条 = h('div', { style: S.bar },
+        h('div', { style: S.barRow },
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap', minWidth: 0 } },
+            h('div', { style: { ...S.h1, margin: 0 } }, '鱼讯 QQ'),
+            h('span', {
+              style: { ...S.badge, ...(在线 ? S.ok : S.danger) },
+              title: 在线 ? (传.mode === 'ws' ? '按实时连接接收消息' : '按定时查询接收消息') : '暂时连不上 QQ 服务',
+            }, 链路),
+            h('span', { style: S.dim }, `v${态.version || '?'}`)),
+          h('div', { style: S.barActions },
+            h('button', {
+              type: 'button', style: S.btnOn, onClick: 存, disabled: 忙,
+            }, 忙 && 动作 === '保存' ? '正在保存…' : '保存设置'),
+            h('button', {
+              type: 'button', style: S.btn, onClick: 测试文字, disabled: 忙,
+            }, 忙 && 动作 === '测试' ? '正在发送…' : '发送测试消息'),
+            h('button', {
+              type: 'button', style: S.btn, onClick: 刷新, disabled: 忙,
+            }, 忙 && 动作 === '刷新' ? '正在刷新…' : '刷新状态'))),
         h('div', { style: S.dim }, '在 QQ 与 DSH 之间互传私聊消息。'),
-        h('div', { style: { ...S.card, marginTop: 10 } },
+        说 ? h('div', { style: { ...(是错误(说) ? S.danger : S.ok), marginTop: 2 } }, 说) : null)
+      return h('div', { className: 'fish-msg-settings', style: S.wrap },
+        操作条,
+        h('div', { style: S.card },
           h('div', { style: S.dim },
             指标(`待发 ${出站.pending || 0} 条`),
             指标(`最近同步 ${桥.lastSyncAt ? new Date(桥.lastSyncAt).toLocaleTimeString('zh-CN', { hour12: false }) : '—'}`),
@@ -867,17 +913,6 @@ window.__ModuleLoader__.load({
           已保存目录: 态.stickerDir || '',
           目录存在: Boolean(态.stickerDirExists),
         }), 出站页,
-        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' } },
-          h('button', {
-            type: 'button', style: S.btnOn, onClick: 存, disabled: 忙,
-          }, 忙 ? '处理中…' : '保存设置'),
-          h('button', {
-            type: 'button', style: S.btn, onClick: 测试文字, disabled: 忙,
-          }, '发送测试消息'),
-          h('button', {
-            type: 'button', style: S.btn, onClick: 拉, disabled: 忙,
-          }, '刷新状态')),
-        说 ? h('div', { style: 说.includes('失败') ? S.danger : S.ok }, 说) : null,
         h('div', { style: { ...S.h, marginTop: 14 } }, '最近日志'),
         h('pre', { style: S.日志 }, 日志 || '暂无日志。'))
     }
