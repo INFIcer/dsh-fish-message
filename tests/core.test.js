@@ -10,7 +10,7 @@ import { StateStore } from '../lib/storage.js'
 import { ForwardQueue } from '../lib/forward-queue.js'
 import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig, publicConfig, 默认识图提示词 } from '../lib/config.js'
 import {
-  GuardMonitor, 构造工具守卫, 守卫规则, QQ简报文案, 拒用工具,
+  GuardMonitor, 构造工具守卫, 守卫规则, 拒用工具,
 } from '../lib/guard.js'
 import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
@@ -886,8 +886,7 @@ test('暂停转发：配置默认关，保存后能读回', () => {
 test('防失联：配置默认开启，时长钳制，保存后能读回', () => {
   assert.equal(normalizeConfig({}).guardEnabled, true)
   assert.equal(normalizeConfig({ guardEnabled: false }).guardEnabled, false)
-  assert.equal(normalizeConfig({}).guardQqFallback, true)
-  assert.equal(normalizeConfig({ guardQqFallback: false }).guardQqFallback, false)
+  assert.equal('guardQqFallback' in normalizeConfig({}), false, 'QQ 兜底已移除')
   assert.equal(normalizeConfig({}).guardStuckMinutes, 10)
   assert.equal(normalizeConfig({ guardStuckMinutes: 3 }).guardStuckMinutes, 3)
   assert.equal(normalizeConfig({ guardStuckMinutes: 0 }).guardStuckMinutes, 1, '太小钳到 1 分钟')
@@ -895,18 +894,19 @@ test('防失联：配置默认开启，时长钳制，保存后能读回', () =>
 
   const dir = 临时目录()
   const 保存 = new ConfigStore({ homeDir: dir }).save({
-    guardEnabled: false, guardStuckMinutes: 25, guardQqFallback: false, bindings: [],
+    guardEnabled: false, guardStuckMinutes: 25, guardQqFallback: true, bindings: [],
   })
   assert.equal(保存.guardEnabled, false)
   assert.equal(保存.guardStuckMinutes, 25)
+  assert.equal('guardQqFallback' in 保存, false, '旧字段不会写回')
   const 读回 = new ConfigStore({ homeDir: dir }).load({})
   assert.equal(读回.guardEnabled, false)
-  assert.equal(读回.guardQqFallback, false)
+  assert.equal('guardQqFallback' in 读回, false)
   assert.equal(publicConfig({ guardEnabled: false }).guardEnabled, false)
 })
 
 /** 防失联测试用：可控时钟 + 一个绑定会话。 */
-function 建监控(配置 = { guardStuckMinutes: 10, guardQqFallback: true }) {
+function 建监控(配置 = { guardStuckMinutes: 10 }) {
   const 钟 = { 现在: 1_000_000 }
   const 监控 = new GuardMonitor({ now: () => 钟.现在, getConfig: () => 配置 })
   // 标题表按会话 id（去掉 session- 前缀）索引，和 GuardMonitor 内部一致。
@@ -914,7 +914,7 @@ function 建监控(配置 = { guardStuckMinutes: 10, guardQqFallback: true }) {
   return { 钟, 监控, 配置 }
 }
 
-test('防失联监控：没进展先提醒，连续提醒满 3 次且够久才发 QQ', () => {
+test('防失联监控：没进展先提醒，连续满 3 次后不再打扰', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
   assert.equal(监控.是绑定(会话), true, '原样会话 id 能认出来')
@@ -941,18 +941,15 @@ test('防失联监控：没进展先提醒，连续提醒满 3 次且够久才�
   钟.现在 += 15 * 60000
   assert.equal(监控.tick().length, 1)
 
-  // 46 分钟：已经够 45 分钟，发 QQ 兜底。
+  // 46 分钟：提醒已经满 3 次，不再升级，也不再有任何动作。
   钟.现在 += 5 * 60000
-  const 兜底 = 监控.tick()
-  assert.equal(兜底.length, 1)
-  assert.equal(兜底[0].kind, 'qq')
-  assert.match(兜底[0].text, /鱼讯/)
-  assert.match(兜底[0].text, /继续/)
-  assert.doesNotMatch(兜底[0].text, /guard|agent|审批|approval/i)
-
-  // 一小时冷却内不再发。
-  钟.现在 += 10 * 60000
   assert.deepEqual(监控.tick(), [])
+  assert.equal(监控.快照().alerts[0].injections, 3)
+
+  // 一小时后仍然只提醒，不会冒出 qq 动作。
+  钟.现在 += 60 * 60000
+  assert.deepEqual(监控.tick(), [])
+  assert.equal(监控.tick().some((a) => a.kind === 'qq'), false)
 
   const 快照 = 监控.快照()
   assert.equal(快照.bound, 1)
@@ -961,8 +958,8 @@ test('防失联监控：没进展先提醒，连续提醒满 3 次且够久才�
   assert.equal(快照.alerts[0].injections, 3)
 })
 
-test('防失联监控：关掉 QQ 兜底后只提醒，不发 QQ', () => {
-  const { 钟, 监控 } = 建监控({ guardStuckMinutes: 10, guardQqFallback: false })
+test('防失联监控：有进展后重新计数，最多再提醒 3 次', () => {
+  const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
   钟.现在 += 11 * 60000
   assert.equal(监控.tick().length, 1)
@@ -971,10 +968,18 @@ test('防失联监控：关掉 QQ 兜底后只提醒，不发 QQ', () => {
   钟.现在 += 15 * 60000
   assert.equal(监控.tick().length, 1)
 
-  // 已经提醒满 3 次、也超过 45 分钟，但兜底关着：不再有任何动作。
+  // 已经提醒满 3 次：不再有任何动作。
   钟.现在 += 60 * 60000
   assert.deepEqual(监控.tick(), [])
   assert.equal(监控.快照().alerts[0].injections, 3)
+
+  // 模型又说话了：算新一轮，重新计数。
+  监控.处理事件(会话, { type: 'assistant/message', data: { turn: 2 } })
+  钟.现在 += 11 * 60000
+  const 再提醒 = 监控.tick()
+  assert.equal(再提醒.length, 1)
+  assert.equal(再提醒[0].kind, 'remind')
+  assert.equal(监控.快照().alerts[0].injections, 1)
 })
 
 test('防失联监控：会话空闲时不打扰', () => {
@@ -985,7 +990,7 @@ test('防失联监控：会话空闲时不打扰', () => {
   assert.equal(监控.快照().alerts.length, 0)
 })
 
-test('防失联监控：有进展就清掉告警，不再发 QQ', () => {
+test('防失联监控：有进展就清掉告警', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
   钟.现在 += 30 * 60000
@@ -1050,11 +1055,11 @@ test('防失联工具守卫：只挡会等人/会中断的工具，且给模型�
   assert.equal(守卫({}), undefined)
   assert.match(守卫规则, /子代理/)
   assert.match(守卫规则, /ask_user_question/)
-  assert.match(QQ简报文案('测试会话'), /会话「测试会话」/)
+  assert.match(守卫规则, /\[QQ\]/)
 })
 
 test('防失联：连续几轮没发 QQ 就提醒，发过 QQ 清零，15 分钟内不重复', () => {
-  const { 钟, 监控 } = 建监控({ guardStuckMinutes: 10, guardQqFallback: true, guardQqRemindTurns: 3 })
+  const { 钟, 监控 } = 建监控({ guardStuckMinutes: 10, guardQqRemindTurns: 3 })
   const 一轮 = () => 监控.处理事件(会话, { type: 'assistant/message', data: { text: '只在会话里回' } })
 
   assert.deepEqual(一轮(), [])

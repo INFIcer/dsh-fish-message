@@ -735,7 +735,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '消息处理'),
         h('div', { style: S.dim }, '控制 QQ 与 DSH 之间的消息如何转发。'),
         行('暂停转发到会话', 开关(配置.forwardPaused, (v) => 改('forwardPaused', v)),
-          '暂停期间仍会收到 QQ 消息，恢复后按顺序补发；超过 24 小时的消息不再补发。'),
+          '暂停期间仍会收到 QQ 消息，恢复后按顺序补发；停放太久已过期的消息不再补发。'),
         暂停转发 ? h('div', { style: { ...S.hint, marginBottom: 6 } }, `待转发 ${转发.pending || 0} 条`) : null,
         行('仅发送 [QQ] 标记内的内容', 开关(配置.onlyInsideMarkers, (v) => 改('onlyInsideMarkers', v)),
           null,
@@ -745,27 +745,17 @@ window.__ModuleLoader__.load({
       const 守护告警 = Array.isArray(守护.alerts) ? 守护.alerts : []
       const 防失联页 = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '防失联'),
-        h('div', { style: S.dim }, '让绑定的会话一直能收发消息：回复必须发到 QQ、不弹提问、不等人；卡住了先提醒，必要时再发 QQ 通知你。需要重启时会先等所有会话干完手里的活。'),
+        h('div', { style: S.dim }, '让绑定的会话一直能收发消息。注意会话的审批权限别设得太低，权限不够时可能因为授权被打断。'),
         行('保持绑定会话能收发', 开关(配置.guardEnabled, (v) => 改('guardEnabled', v)),
           '开启后，绑定的会话里不能用会停下来等人的工具，也不能装卸插件。'),
         行('多久没新进展算卡住', h('input', {
           style: S.small, type: 'number', min: 1, max: 120, value: 配置.guardStuckMinutes ?? 10,
           onChange: (e) => 改('guardStuckMinutes', Number(e.target.value)),
-        }), '超过这个时间没有新内容，就先给会话发一条提醒。'),
+        }), '主会话单独一轮跑太久、又没有新内容时，先提醒智能体把长活拆出去。'),
         行('几轮没发 QQ 就提醒', h('input', {
           style: S.small, type: 'number', min: 1, max: 50, value: 配置.guardQqRemindTurns ?? 3,
           onChange: (e) => 改('guardQqRemindTurns', Number(e.target.value)),
-        }), '连续这么多轮只在会话里回话、没发 QQ，就提醒一次；发过 QQ 就重新计数。'),
-        行('提醒无效时发 QQ', 开关(配置.guardQqFallback, (v) => 改('guardQqFallback', v)),
-          '连续提醒 3 次仍没动静才会发，最多每小时一次。'),
-        守护.enabled
-          ? h('div', { style: { ...S.hint, marginTop: 6 } },
-            `正在看 ${守护.bound || 0} 个绑定会话。${守护.approvalNever ? '需要审批的操作会自动拒绝，不会停下来等人。' : ''}`)
-          : h('div', { style: { ...S.hint, marginTop: 6 } }, '守护已关闭，绑定会话可能被提问或审批卡住。'),
-        守护.degraded && 守护.degraded.length
-          ? h('div', { style: { ...S.danger, marginTop: 4 } },
-            `有 ${守护.degraded.length} 项能力不可用：${守护.degraded.map((x) => x.reason).join('；')}`)
-          : null,
+        }), '主会话连续这么多轮没在 QQ 上发消息时提醒一次；发了 QQ 就重新计数。'),
         守护告警.length
           ? h('div', { style: { ...S.danger, marginTop: 4 } },
             `正在提醒：${守护告警.map((a) => `${a.title}（${a.minutes} 分钟）`).join('、')}`)
