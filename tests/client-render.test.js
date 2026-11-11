@@ -81,7 +81,7 @@ function 完整状态() {
       onlyInsideMarkers: true,
       forwardPaused: false,
       guardEnabled: true,
-      guardStuckMinutes: 10,
+      guardStuckSeconds: 600,
       guardQqRemindTurns: 3,
       guardStuckPrompt: '',
       guardQqPrompt: '',

@@ -752,9 +752,9 @@ window.__ModuleLoader__.load({
         h('div', { style: S.dim }, '让绑定的消息能持续收发；注意调整会话权限设置，权限过低可能因授权问题被中断。'),
         行('保持绑定会话能收发', 开关(配置.guardEnabled, (v) => 改('guardEnabled', v)),
           '开启后，绑定的会话内禁用会导致会话中断的工具'),
-        行('长任务监控（分钟）', h('input', {
-          style: S.small, type: 'number', min: 1, max: 120, value: 配置.guardStuckMinutes ?? 10,
-          onChange: (e) => 改('guardStuckMinutes', Number(e.target.value)),
+        行('长任务监控（秒）', h('input', {
+          style: S.small, type: 'number', min: 1, max: 7200, value: 配置.guardStuckSeconds ?? 600,
+          onChange: (e) => 改('guardStuckSeconds', Number(e.target.value)),
         }), '主会话单轮执行过久时提醒智能体'),
         行('长任务提醒提示词', h('div', null,
           h('textarea', {
@@ -800,7 +800,7 @@ window.__ModuleLoader__.load({
         '留空时使用内置默认提示词。'),
         守护告警.length
           ? h('div', { style: { ...S.danger, marginTop: 4 } },
-            `正在提醒：${守护告警.map((a) => `${a.title}（${a.minutes} 分钟）`).join('、')}`)
+            `正在提醒：${守护告警.map((a) => `${a.title}（已运行 ${a.seconds} 秒）`).join('、')}`)
           : null)
 
       const AI能力 = 态.ai || {}

@@ -884,17 +884,19 @@ test('防失联：配置默认开启，时长钳制，保存后能读回', () =>
   assert.equal(normalizeConfig({}).guardEnabled, true)
   assert.equal(normalizeConfig({ guardEnabled: false }).guardEnabled, false)
   assert.equal('guardQqFallback' in normalizeConfig({}), false, 'QQ 兜底已移除')
-  assert.equal(normalizeConfig({}).guardStuckMinutes, 10)
-  assert.equal(normalizeConfig({ guardStuckMinutes: 3 }).guardStuckMinutes, 3)
-  assert.equal(normalizeConfig({ guardStuckMinutes: 0 }).guardStuckMinutes, 1, '太小钳到 1 分钟')
-  assert.equal(normalizeConfig({ guardStuckMinutes: 999 }).guardStuckMinutes, 120, '太大钳到 120 分钟')
+  assert.equal(normalizeConfig({}).guardStuckSeconds, 600)
+  assert.equal(normalizeConfig({ guardStuckSeconds: 30 }).guardStuckSeconds, 30)
+  assert.equal(normalizeConfig({ guardStuckSeconds: 0 }).guardStuckSeconds, 1, '太小钳到 1 秒')
+  assert.equal(normalizeConfig({ guardStuckSeconds: 99999 }).guardStuckSeconds, 7200, '太大钳到 7200 秒')
+  assert.equal(normalizeConfig({ guardStuckMinutes: 5 }).guardStuckSeconds, 300, '旧配置的分钟换算成秒')
+  assert.equal('guardStuckMinutes' in normalizeConfig({ guardStuckMinutes: 5 }), false, '不再写回分钟字段')
 
   const dir = 临时目录()
   const 保存 = new ConfigStore({ homeDir: dir }).save({
-    guardEnabled: false, guardStuckMinutes: 25, guardQqFallback: true, bindings: [],
+    guardEnabled: false, guardStuckSeconds: 1500, guardQqFallback: true, bindings: [],
   })
   assert.equal(保存.guardEnabled, false)
-  assert.equal(保存.guardStuckMinutes, 25)
+  assert.equal(保存.guardStuckSeconds, 1500)
   assert.equal('guardQqFallback' in 保存, false, '旧字段不会写回')
   const 读回 = new ConfigStore({ homeDir: dir }).load({})
   assert.equal(读回.guardEnabled, false)
@@ -903,7 +905,7 @@ test('防失联：配置默认开启，时长钳制，保存后能读回', () =>
 })
 
 /** 防失联测试用：可控时钟 + 一个绑定会话。 */
-function 建监控(配置 = { guardStuckMinutes: 10 }) {
+function 建监控(配置 = { guardStuckSeconds: 600 }) {
   const 钟 = { 现在: 1_000_000 }
   const 监控 = new GuardMonitor({ now: () => 钟.现在, getConfig: () => 配置 })
   // 标题表按会话 id（去掉 session- 前缀）索引，和 GuardMonitor 内部一致。
@@ -969,7 +971,7 @@ test('防失联监控：按运行时长算，中途有进展也不重新计时',
   const 第一次 = 监控.tick()
   assert.equal(第一次.length, 1)
   assert.equal(第一次[0].kind, 'remind')
-  assert.equal(第一次[0].minutes, 11)
+  assert.equal(第一次[0].seconds, 660)
   assert.equal(第一次[0].text, 默认长任务提醒文案, '默认长任务提醒文案原文')
 })
 
@@ -1078,7 +1080,7 @@ test('防失联工具守卫：挡住会等人的工具（提问/干等），不�
 })
 
 test('防失联：连续几轮没发 QQ 就提醒，发过 QQ 清零，15 分钟内不重复', () => {
-  const { 钟, 监控 } = 建监控({ guardStuckMinutes: 10, guardQqRemindTurns: 3 })
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
   const 一轮 = () => 监控.处理事件(会话, { type: 'assistant/message', data: { text: '只在会话里回' } })
 
   assert.deepEqual(一轮(), [])
@@ -1117,17 +1119,17 @@ test('防失联：没发 QQ 提醒轮数可配置，钳制 1~50 且能保存读�
 
 test('防失联：两条提醒默认用内置文案，自定义文案原样生效', () => {
   // 默认：设置里留空 → 内置原文。
-  const 默认 = 建监控({ guardStuckMinutes: 10, guardQqRemindTurns: 3 })
+  const 默认 = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
   默认.监控.跟踪状态(会话, 'running')
   默认.钟.现在 += 11 * 60000
   assert.equal(默认.监控.tick()[0].text, 默认长任务提醒文案)
-  const 默认通道 = 建监控({ guardStuckMinutes: 10, guardQqRemindTurns: 3 })
+  const 默认通道 = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
   for (let i = 0; i < 2; i += 1) 默认通道.监控.处理事件(会话, { type: 'assistant/message' })
   assert.equal(默认通道.监控.处理事件(会话, { type: 'assistant/message' })[0].text, 默认消息通道提醒文案)
 
   // 自定义：首尾空格去掉后用自定义文案。
   const 自定义 = 建监控({
-    guardStuckMinutes: 10,
+    guardStuckSeconds: 600,
     guardQqRemindTurns: 3,
     guardStuckPrompt: '  自定义长任务提醒  ',
     guardQqPrompt: '自定义消息通道提醒',
