@@ -240,6 +240,17 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   assert.match(注入们[0].content[0].text, /绑定外部通讯收发/)
   assert.equal(注入们[0].role, 'user')
 
+  // 宿主正忙时注入会被拒：提醒先排队，一有空就立刻重试，而不是等下个心跳。
+  agent.inject = () => { throw new Error('session append cannot reenter while another append is being published') }
+  监听.get('session/event')({ id: 会话 }, { type: 'assistant/message', data: {} })
+  监控状态.statusSince = Date.now() - 11 * 60 * 1000
+  监控状态.lastProgressAt = 监控状态.statusSince
+  const 忙后注入 = []
+  await 睡(120)
+  agent.inject = (消息) => { 忙后注入.push(消息) }
+  await 睡(900)
+  assert.equal(忙后注入.length, 1, '排队后重试只塞一条')
+
   // 同一个会话重复收到 created 不重复叠加。
   创建({ agent })
   assert.equal(工具守卫们.length, 1)
