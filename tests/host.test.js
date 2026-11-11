@@ -82,6 +82,9 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   // 设置页的「图片识别提示词」要知道留空时用哪段默认；默认文案由宿主下发。
   assert.equal(状态.defaults.inboundImagePrompt, 默认识图提示词)
   assert.equal(状态.config.inboundImagePrompt, '')
+  // 两条提醒的默认文案由宿主下发，设置页占位文字直接用它。
+  assert.match(状态.defaults.guardStuckPrompt, /绑定外部通讯收发/)
+  assert.match(状态.defaults.guardQqPrompt, /多轮对话无消息出站/)
   // 暂停转发：状态里有待转发队列，默认没在暂停。
   assert.equal(typeof 状态.forwardFile, 'string')
   assert.equal(状态.bridge.forward.paused, false)
@@ -89,7 +92,7 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   // 防失联：默认开启，只盯启用中的绑定会话。
   assert.equal(状态.guard.enabled, true)
   assert.equal(状态.guard.bound, 1)
-  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question'])
+  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question', 'wait_agent'])
   // 内置 ASR/TTS 已移除：不再有旧的开关字段，也没有 test-voice 路由。
   // 新的语音/识图设置走可选本地 AI，字段名见 lib/config.js。
   assert.equal('ttsEnabled' in 状态.config, false)
@@ -216,6 +219,8 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   assert.equal(提示段们[0].order, 10150)
   assert.match(提示段们[0].text, /子代理/)
   assert.match(工具守卫们[0]({ name: 'ask_user_question' }), /不能用/)
+  assert.match(工具守卫们[0]({ name: 'wait_agent' }), /wait_agent/)
+  assert.match(工具守卫们[0]({ name: 'wait_agent' }), /send_message/)
   assert.equal(工具守卫们[0]({ name: 'plugin_manager' }), undefined, '插件装卸不再拦')
   assert.equal(工具守卫们[0]({ name: 'read_file' }), undefined)
 
@@ -231,7 +236,7 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   assert.equal(状态.guard.approvalAvailable, true)
   assert.equal(状态.guard.approvalNever, true)
   assert.equal(状态.guard.bound, 1)
-  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question'])
+  assert.deepEqual([...状态.guard.deniedTools].sort(), ['ask_user_question', 'wait_agent'])
 
   // 会话销毁：守卫和提示段各撤一次；再收到 disposed 也不重复。
   监听.get('agent/disposed')({ agent })

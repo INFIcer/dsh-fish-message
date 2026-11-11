@@ -752,10 +752,48 @@ window.__ModuleLoader__.load({
           style: S.small, type: 'number', min: 1, max: 120, value: 配置.guardStuckMinutes ?? 10,
           onChange: (e) => 改('guardStuckMinutes', Number(e.target.value)),
         }), '主会话单轮执行过久时提醒智能体'),
+        行('长任务提醒提示词', h('div', null,
+          h('textarea', {
+            style: {
+              ...S.input, minHeight: 64, resize: 'vertical', lineHeight: 1.6, fontFamily: 'inherit',
+            },
+            rows: 3,
+            maxLength: 4000,
+            value: 配置.guardStuckPrompt || '',
+            placeholder: 默认长任务提醒,
+            onChange: (e) => 改('guardStuckPrompt', e.target.value),
+          }),
+          配置.guardStuckPrompt
+            ? h('div', { style: { marginTop: 6 } },
+              h('button', {
+                type: 'button', style: S.btn,
+                onClick: () => 改('guardStuckPrompt', ''),
+              }, '恢复默认'))
+            : null),
+        '留空时使用内置默认提示词。'),
         行('消息通道监控（轮）', h('input', {
           style: S.small, type: 'number', min: 1, max: 50, value: 配置.guardQqRemindTurns ?? 3,
           onChange: (e) => 改('guardQqRemindTurns', Number(e.target.value)),
         }), '主会话多轮没有使用鱼讯回复内容时提醒智能体'),
+        行('消息通道提醒提示词', h('div', null,
+          h('textarea', {
+            style: {
+              ...S.input, minHeight: 64, resize: 'vertical', lineHeight: 1.6, fontFamily: 'inherit',
+            },
+            rows: 3,
+            maxLength: 4000,
+            value: 配置.guardQqPrompt || '',
+            placeholder: 默认消息通道提醒,
+            onChange: (e) => 改('guardQqPrompt', e.target.value),
+          }),
+          配置.guardQqPrompt
+            ? h('div', { style: { marginTop: 6 } },
+              h('button', {
+                type: 'button', style: S.btn,
+                onClick: () => 改('guardQqPrompt', ''),
+              }, '恢复默认'))
+            : null),
+        '留空时使用内置默认提示词。'),
         守护告警.length
           ? h('div', { style: { ...S.danger, marginTop: 4 } },
             `正在提醒：${守护告警.map((a) => `${a.title}（${a.minutes} 分钟）`).join('、')}`)
@@ -772,6 +810,9 @@ window.__ModuleLoader__.load({
       const 音色值 = 配置.sayVoice || 'dafeiyu'
       // 识图提示词留空时用内置默认；默认文案由宿主 /state 下发，前端不另写一份。
       const 默认识图提示词 = String((态.defaults && 态.defaults.inboundImagePrompt) || '')
+      // 两条提醒提示词的默认文案同样由宿主 /state 下发（原文只在 lib/config.js 一处）。
+      const 默认长任务提醒 = String((态.defaults && 态.defaults.guardStuckPrompt) || '')
+      const 默认消息通道提醒 = String((态.defaults && 态.defaults.guardQqPrompt) || '')
       const 音色控件 = (Array.isArray(音色们) && 音色们.length)
         ? h('select', {
           style: S.input, value: 音色值, disabled: !语音可用,

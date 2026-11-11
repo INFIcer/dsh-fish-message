@@ -8,9 +8,9 @@ import { Bridge } from '../lib/bridge.js'
 import { VoiceService } from '../lib/voice.js'
 import { StateStore } from '../lib/storage.js'
 import { ForwardQueue } from '../lib/forward-queue.js'
-import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig, publicConfig, 默认识图提示词 } from '../lib/config.js'
+import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig, publicConfig, 默认识图提示词, 默认长任务提醒文案, 默认消息通道提醒文案 } from '../lib/config.js'
 import {
-  GuardMonitor, 构造工具守卫, 守卫规则, 拒用工具,
+  GuardMonitor, 构造工具守卫, 守卫规则, 拒用工具, 长任务提醒文本, 消息通道提醒文本,
 } from '../lib/guard.js'
 import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
@@ -926,7 +926,7 @@ test('防失联监控：没进展先提醒，连续满 3 次后不再打扰', ()
   const 第一次 = 监控.tick()
   assert.equal(第一次.length, 1)
   assert.equal(第一次[0].kind, 'remind')
-  assert.match(第一次[0].text, /11 分钟/)
+  assert.equal(第一次[0].text, 默认长任务提醒文案, '默认长任务提醒文案原文')
 
   // 20 分钟：提醒间隔没到，不重复。
   钟.现在 += 9 * 60000
@@ -1037,7 +1037,7 @@ test('防失联监控：只盯启用的绑定会话', () => {
   assert.equal(监控.快照().bound, 0)
 })
 
-test('防失联工具守卫：只挡会等人的工具，不挡插件装卸，且给模型看得懂的话', () => {
+test('防失联工具守卫：挡住会等人的工具（提问/干等），不挡插件装卸', () => {
   const 守卫 = 构造工具守卫()
   for (const 名 of 拒用工具) {
     const 结果 = 守卫({ name: 名 })
@@ -1046,12 +1046,17 @@ test('防失联工具守卫：只挡会等人的工具，不挡插件装卸，�
     assert.match(结果, /QQ/)
   }
   assert.match(守卫({ name: 'ask_user_question' }), /ask_user_question/)
+  assert.match(守卫({ name: 'wait_agent' }), /wait_agent/)
+  assert.match(守卫({ name: 'wait_agent' }), /send_message/)
+  assert.match(守卫({ name: 'wait_agent' }), /唤醒/)
   assert.equal(守卫({ name: 'plugin_manager' }), undefined, '插件装卸不再拦')
   assert.equal(守卫({ name: 'web_search' }), undefined)
   assert.equal(守卫(null), undefined)
   assert.equal(守卫({}), undefined)
   assert.match(守卫规则, /子代理/)
   assert.match(守卫规则, /ask_user_question/)
+  assert.match(守卫规则, /wait_agent/)
+  assert.match(守卫规则, /send_message/)
   assert.match(守卫规则, /\[QQ\]/)
   assert.doesNotMatch(守卫规则, /卸载\/重装/)
   // 重启不再由鱼讯负责：提示词只指向独立插件，不描述鱼讯自己的重启工具。
@@ -1070,8 +1075,7 @@ test('防失联：连续几轮没发 QQ 就提醒，发过 QQ 清零，15 分钟
   assert.equal(提醒们[0].kind, 'remind')
   assert.equal(提醒们[0].reason, 'no-qq')
   assert.equal(提醒们[0].turns, 3)
-  assert.match(提醒们[0].text, /只在会话里回话/)
-  assert.match(提醒们[0].text, /\[QQ\]/)
+  assert.equal(提醒们[0].text, 默认消息通道提醒文案, '默认消息通道提醒文案原文')
 
   // 还是没发 QQ：15 分钟内不再重复提醒。
   assert.deepEqual(一轮(), [])
@@ -1096,4 +1100,53 @@ test('防失联：没发 QQ 提醒轮数可配置，钳制 1~50 且能保存读�
   const 存 = new ConfigStore({ homeDir: 目录 })
   assert.ok(存.save({ ...normalizeConfig({}), guardQqRemindTurns: 5 }))
   assert.equal(存.load().guardQqRemindTurns, 5)
+})
+
+test('防失联：两条提醒默认用内置文案，自定义文案原样生效', () => {
+  // 默认：设置里留空 → 内置原文。
+  const 默认 = 建监控({ guardStuckMinutes: 10, guardQqRemindTurns: 3 })
+  默认.监控.跟踪状态(会话, 'running')
+  默认.钟.现在 += 11 * 60000
+  assert.equal(默认.监控.tick()[0].text, 默认长任务提醒文案)
+  const 默认通道 = 建监控({ guardStuckMinutes: 10, guardQqRemindTurns: 3 })
+  for (let i = 0; i < 2; i += 1) 默认通道.监控.处理事件(会话, { type: 'assistant/message' })
+  assert.equal(默认通道.监控.处理事件(会话, { type: 'assistant/message' })[0].text, 默认消息通道提醒文案)
+
+  // 自定义：首尾空格去掉后用自定义文案。
+  const 自定义 = 建监控({
+    guardStuckMinutes: 10,
+    guardQqRemindTurns: 3,
+    guardStuckPrompt: '  自定义长任务提醒  ',
+    guardQqPrompt: '自定义消息通道提醒',
+  })
+  自定义.监控.跟踪状态(会话, 'running')
+  自定义.钟.现在 += 11 * 60000
+  assert.equal(自定义.监控.tick()[0].text, '自定义长任务提醒')
+  for (let i = 0; i < 2; i += 1) 自定义.监控.处理事件(会话, { type: 'assistant/message' })
+  assert.equal(自定义.监控.处理事件(会话, { type: 'assistant/message' })[0].text, '自定义消息通道提醒')
+
+  // 工具函数本身：空串/空格回落默认。
+  assert.equal(长任务提醒文本({}), 默认长任务提醒文案)
+  assert.equal(长任务提醒文本({ guardStuckPrompt: '   ' }), 默认长任务提醒文案)
+  assert.equal(长任务提醒文本({ guardStuckPrompt: '自定' }), '自定')
+  assert.equal(消息通道提醒文本({ guardQqPrompt: '' }), 默认消息通道提醒文案)
+  assert.equal(消息通道提醒文本({ guardQqPrompt: '通道' }), '通道')
+})
+
+test('防失联：两条提醒提示词可配置，空串/非字符串/超长回落空', () => {
+  assert.equal(normalizeConfig({}).guardStuckPrompt, '')
+  assert.equal(normalizeConfig({}).guardQqPrompt, '')
+  assert.equal(normalizeConfig({ guardStuckPrompt: '  自定义长任务  ' }).guardStuckPrompt, '自定义长任务')
+  assert.equal(normalizeConfig({ guardQqPrompt: '\n自定义通道\n' }).guardQqPrompt, '自定义通道')
+  assert.equal(normalizeConfig({ guardStuckPrompt: '   ' }).guardStuckPrompt, '')
+  assert.equal(normalizeConfig({ guardQqPrompt: 123 }).guardQqPrompt, '')
+  assert.equal(normalizeConfig({ guardStuckPrompt: 'x'.repeat(4001) }).guardStuckPrompt, '')
+  assert.equal(normalizeConfig({ guardQqPrompt: 'x'.repeat(4000) }).guardQqPrompt, 'x'.repeat(4000))
+
+  const 目录 = 临时目录()
+  const 存 = new ConfigStore({ homeDir: 目录 })
+  assert.ok(存.save({ ...normalizeConfig({}), guardStuckPrompt: '保存长任务', guardQqPrompt: '保存通道' }))
+  const 读回 = 存.load()
+  assert.equal(读回.guardStuckPrompt, '保存长任务')
+  assert.equal(读回.guardQqPrompt, '保存通道')
 })
