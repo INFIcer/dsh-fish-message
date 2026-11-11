@@ -14,6 +14,9 @@ import {
 } from '../lib/guard.js'
 import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
+import {
+  RestartController, buildRestartTool, 解析调用者, 组合唤醒文本,
+} from '../lib/restart.js'
 
 const 睡 = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -1048,4 +1051,182 @@ test('防失联工具守卫：只挡会等人/会中断的工具，且给模型�
   assert.match(守卫规则, /子代理/)
   assert.match(守卫规则, /ask_user_question/)
   assert.match(QQ简报文案('测试会话'), /会话「测试会话」/)
+})
+
+test('防失联：连续几轮没发 QQ 就提醒，发过 QQ 清零，15 分钟内不重复', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckMinutes: 10, guardQqFallback: true, guardQqRemindTurns: 3 })
+  const 一轮 = () => 监控.处理事件(会话, { type: 'assistant/message', data: { text: '只在会话里回' } })
+
+  assert.deepEqual(一轮(), [])
+  assert.deepEqual(一轮(), [])
+  const 提醒们 = 一轮()
+  assert.equal(提醒们.length, 1)
+  assert.equal(提醒们[0].kind, 'remind')
+  assert.equal(提醒们[0].reason, 'no-qq')
+  assert.equal(提醒们[0].turns, 3)
+  assert.match(提醒们[0].text, /只在会话里回话/)
+  assert.match(提醒们[0].text, /\[QQ\]/)
+
+  // 还是没发 QQ：15 分钟内不再重复提醒。
+  assert.deepEqual(一轮(), [])
+  assert.deepEqual(一轮(), [])
+  assert.deepEqual(一轮(), [])
+
+  // 发过 QQ：计数清零；过了去重窗口再攒满一轮才会再提醒。
+  监控.记QQ出站(QQ)
+  钟.现在 += 16 * 60000
+  assert.deepEqual(一轮(), [])
+  assert.deepEqual(一轮(), [])
+  assert.equal(一轮().length, 1)
+})
+
+test('防失联：没发 QQ 提醒轮数可配置，钳制 1~50 且能保存读回', () => {
+  assert.equal(normalizeConfig({}).guardQqRemindTurns, 3)
+  assert.equal(normalizeConfig({ guardQqRemindTurns: 0 }).guardQqRemindTurns, 1)
+  assert.equal(normalizeConfig({ guardQqRemindTurns: 99 }).guardQqRemindTurns, 50)
+  assert.equal(normalizeConfig({ guardQqRemindTurns: '5' }).guardQqRemindTurns, 5)
+
+  const 目录 = 临时目录()
+  const 存 = new ConfigStore({ homeDir: 目录 })
+  assert.ok(存.save({ ...normalizeConfig({}), guardQqRemindTurns: 5 }))
+  assert.equal(存.load().guardQqRemindTurns, 5)
+})
+
+/** 重启工具测试用：可控时钟、记账式拉起、假 agent 列表。 */
+function 建重启({ 目录 = 临时目录(), 配置 = { bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }] }, 钟 = { 现在: 1_000_000 } } = {}) {
+  const 重启调用 = []
+  const QQ们 = []
+  let agent列表 = []
+  const 控制器 = new RestartController({
+    homeDir: 目录,
+    getConfig: () => 配置,
+    getAgents: () => agent列表,
+    sendQQ: (qq, text) => { QQ们.push({ qq, text }) },
+    spawnRestart: (参数) => { 重启调用.push(参数); return Promise.resolve({ ok: true }) },
+    logger: { info() {}, warn() {}, error() {} },
+    now: () => 钟.现在,
+    autoTimers: false,
+  })
+  return { 目录, 钟, 控制器, 重启调用, QQ们, 配置, 设会话: (列表) => { agent列表 = 列表 } }
+}
+
+test('重启工具：安排只落盘，到点且全空闲才拉起重启', () => {
+  const { 目录, 钟, 控制器, 重启调用 } = 建重启()
+  const 安排 = 控制器.schedule({ delaySeconds: 60, wakeText: '（更新）', reason: '测试', callerSession: 会话, callerQQ: QQ })
+  assert.equal(安排.scheduled, true)
+  assert.equal(安排.dueAt, 钟.现在 + 60000)
+  assert.equal(安排.remainingSeconds, 60)
+  assert.equal(安排.callerSession, 会话)
+  assert.equal(重启调用.length, 0, '安排时不能立刻重启')
+
+  钟.现在 += 60000
+  const 动作 = 控制器.到期()
+  assert.equal(动作[0].kind, 'restart')
+  assert.equal(重启调用.length, 1)
+  assert.match(重启调用[0].scriptPath, /_restart[\\/]dsh-restart\.ps1$/)
+  assert.equal(重启调用[0].callerSession, 会话)
+  assert.equal(重启调用[0].wakeText, 组合唤醒文本('（更新）'))
+  assert.equal(重启调用[0].delaySeconds, 3)
+  assert.equal(控制器.状态().scheduled, false)
+  assert.ok(控制器.状态().firedAt > 0)
+  assert.equal(existsSync(join(目录, 'fish-message-restart.json')), true)
+})
+
+test('重启工具：有会话在跑就等，全部空闲才执行', () => {
+  const { 钟, 控制器, 重启调用, 设会话 } = 建重启()
+  设会话([{ status: 'running' }])
+  控制器.schedule({ delaySeconds: 10, callerQQ: QQ })
+  钟.现在 += 10000
+  assert.deepEqual(控制器.到期(), [])
+  assert.equal(控制器.状态().waitingForIdle, true)
+  assert.equal(重启调用.length, 0)
+
+  钟.现在 += 15000
+  控制器.到期()
+  assert.equal(重启调用.length, 0, '还在跑就继续等')
+
+  设会话([])
+  钟.现在 += 15000
+  assert.equal(控制器.到期()[0].kind, 'restart')
+  assert.equal(重启调用.length, 1)
+})
+
+test('重启工具：等太久就放弃并 QQ 告知调用者', () => {
+  const { 钟, 控制器, 重启调用, QQ们, 设会话 } = 建重启()
+  设会话([{ status: 'running' }])
+  控制器.schedule({ delaySeconds: 10, maxWaitMinutes: 1, callerQQ: QQ })
+  钟.现在 += 10000
+  控制器.到期()
+  assert.equal(控制器.状态().waitingForIdle, true)
+
+  钟.现在 += 61 * 1000
+  const 动作 = 控制器.到期()
+  assert.equal(动作[0].kind, 'giveup')
+  assert.equal(重启调用.length, 0)
+  assert.equal(QQ们.length, 1)
+  assert.match(QQ们[0].text, /等太久没空闲/)
+  assert.match(QQ们[0].text, /没重启/)
+  assert.equal(控制器.状态().scheduled, false)
+})
+
+test('重启工具：换实例能从盘上恢复安排，cancel 两种阶段都能取消', () => {
+  const 目录 = 临时目录()
+  const 造 = (现在) => new RestartController({
+    homeDir: 目录,
+    getConfig: () => ({}),
+    autoTimers: false,
+    now: () => 现在,
+    spawnRestart: async () => ({ ok: true }),
+    logger: { info() {}, warn() {} },
+  })
+  const 一 = 造(1000)
+  一.schedule({ delaySeconds: 120, callerSession: 会话 })
+  const 二 = 造(10_000)
+  assert.equal(二.状态().scheduled, true)
+  assert.equal(二.状态().callerSession, 会话)
+  assert.equal(二.状态().remainingSeconds, 111)
+
+  // 刚到点、正在等空闲时也能取消。
+  二.到期 = 二.到期.bind(二)
+  const 取消 = 二.cancel()
+  assert.equal(取消.cancelled, true)
+  assert.equal(二.状态().scheduled, false)
+  const 三 = 造(10_000)
+  assert.equal(三.状态().scheduled, false)
+})
+
+test('重启工具定义：参数校验、调用者来自 exec.agent、status/cancel', async () => {
+  const { 控制器, 配置 } = 建重启()
+  const 工具 = buildRestartTool({ controller: 控制器, getConfig: () => 配置 })
+  assert.equal(工具.name, 'dsh_restart')
+
+  const 空状态 = await 工具.execute({ action: 'status' }, {})
+  assert.equal(空状态.ok, true)
+  assert.equal(空状态.scheduled, false)
+
+  const 安排 = await 工具.execute({ action: 'schedule', delaySeconds: 30, wakeText: '（更新）' }, { agent: { id: 会话 } })
+  assert.equal(安排.ok, true)
+  assert.equal(安排.callerSession, 会话)
+  assert.equal(安排.remainingSeconds, 30)
+
+  const 坏参数 = await 工具.execute({ action: 'schedule', delaySeconds: 5 }, {})
+  assert.equal(坏参数.ok, false)
+  assert.equal(坏参数.code, 'bad_request')
+  assert.match(坏参数.hint, /10~3600/)
+
+  const 坏动作 = await 工具.execute({ action: 'now' }, {})
+  assert.equal(坏动作.ok, false)
+  assert.match(坏动作.hint, /schedule/)
+
+  const 取消 = await 工具.execute({ action: 'cancel' }, {})
+  assert.equal(取消.ok, true)
+  assert.equal(取消.cancelled, true)
+})
+
+test('重启工具：调用者优先 exec.agent，其次用绑定 QQ 兜底', () => {
+  const 配置 = { bindings: [{ qq: QQ, session: 会话, enabled: true }, { qq: '20002', session: 'session-b', enabled: true }] }
+  assert.deepEqual(解析调用者({ agent: { id: 会话 } }, () => 配置), { session: 会话, qq: QQ })
+  assert.deepEqual(解析调用者({ agent: { session: { id: 'session-b' } } }, () => 配置), { session: 'session-b', qq: '20002' })
+  assert.deepEqual(解析调用者({}, () => 配置), { session: '', qq: QQ })
+  assert.deepEqual(解析调用者(null, () => ({ bindings: [] })), { session: '', qq: '' })
 })

@@ -271,3 +271,97 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   await 睡(20)
   await server.stop()
 })
+
+test('重启工具：宿主注册 dsh_restart，schedule/cancel 落盘且状态可读', async () => {
+  const server = await new MockOneBotServer().start()
+  const dir = mkdtempSync(join(tmpdir(), 'fish-restart-'))
+  process.env.DSH_HOME = dir
+
+  const routes = new Map()
+  const 监听 = new Map()
+  const 工具们 = []
+  const 撤销 = []
+
+  const ctx = {
+    effect(cb) {
+      const d = cb()
+      return typeof d === 'function' ? d : () => {}
+    },
+    on(事件, fn) {
+      监听.set(事件, fn)
+      return () => 监听.delete(事件)
+    },
+    get(服务) {
+      if (服务 === 'sessions') return { list: () => [{ id: 会话, title: '重启测试' }], flush: async () => {} }
+      if (服务 === 'sessionTitle') return { get: () => ({ title: '重启测试' }) }
+      if (服务 === 'workspaceRegistry') return { archivedSessionIds: [] }
+      if (服务 === 'attachments') return { admitPromptContent: async (c) => c, imageHostPath: () => '' }
+      return undefined
+    },
+    agents: { get: () => undefined, list: () => [] },
+    tools: {
+      register(定义) {
+        工具们.push(定义)
+        return () => { 撤销.push(定义.name) }
+      },
+    },
+    webServer: {
+      register({ path, handler }) {
+        routes.set(path, handler)
+        return () => routes.delete(path)
+      },
+    },
+  }
+
+  const host = await import('../lib/host.js?host-restart')
+  const app = host.apply(ctx, {
+    napcatBaseUrl: server.baseUrl,
+    wsUrl: server.wsUrl,
+    wsEnabled: false,
+    bindings: [{ qq: QQ, session: 会话, name: '主人', enabled: true }],
+    pollIntervalMs: 200,
+    reorderBufferMs: 30,
+    requestTimeoutMs: 3000,
+  })
+  await 等(() => app.bridge.running, 2000)
+
+  const 工具 = 工具们.find((t) => t.name === 'dsh_restart')
+  assert.ok(工具, '宿主启动后应注册 dsh_restart')
+  assert.match(工具.description, /等所有会话空闲/)
+  assert.deepEqual(工具.parameters.properties.action.enum, ['schedule', 'cancel', 'status'])
+
+  const 状态响应 = 假响应()
+  await routes.get('/dsh-fish-message/state')({}, 状态响应)
+  const 状态 = JSON.parse(状态响应.body)
+  assert.equal(typeof 状态.restart, 'object')
+  assert.equal(状态.restart.scheduled, false)
+  assert.equal(typeof 状态.restart.dueAt, 'number')
+  assert.equal(状态.restart.callerSession, '')
+
+  // 通过工具安排一次重启：调用者会话要落盘，状态里看得到。
+  const 安排 = await 工具.execute({ action: 'schedule', delaySeconds: 10, wakeText: '（测试）', reason: '测试安排' }, { agent: { id: 会话 } })
+  assert.equal(安排.ok, true)
+  assert.equal(安排.callerSession, 会话)
+  assert.equal(安排.remainingSeconds, 10)
+  assert.ok(安排.dueAt > Date.now())
+
+  const 安排响应 = 假响应()
+  await routes.get('/dsh-fish-message/state')({}, 安排响应)
+  const 安排后 = JSON.parse(安排响应.body)
+  assert.equal(安排后.restart.scheduled, true)
+  assert.equal(安排后.restart.callerSession, 会话)
+  assert.equal(安排后.restart.reason, '测试安排')
+
+  // 取消后再看：安排没了。
+  const 取消 = await 工具.execute({ action: 'cancel' }, {})
+  assert.equal(取消.ok, true)
+  assert.equal(取消.cancelled, true)
+  const 取消响应 = 假响应()
+  await routes.get('/dsh-fish-message/state')({}, 取消响应)
+  assert.equal(JSON.parse(取消响应.body).restart.scheduled, false)
+
+  await app.停()
+  assert.ok(撤销.includes('dsh_restart'), '停用插件时应撤销 dsh_restart')
+  await 睡(20)
+  await server.stop()
+})
