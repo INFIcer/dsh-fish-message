@@ -913,7 +913,7 @@ function 建监控(配置 = { guardStuckSeconds: 600 }) {
   return { 钟, 监控, 配置 }
 }
 
-test('防失联监控：没进展先提醒，连续满 3 次后不再打扰', () => {
+test('防失联监控：超时只塞一次，之后不再打扰', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
   assert.equal(监控.是绑定(会话), true, '原样会话 id 能认出来')
@@ -923,38 +923,47 @@ test('防失联监控：没进展先提醒，连续满 3 次后不再打扰', ()
   钟.现在 += 9 * 60000
   assert.deepEqual(监控.tick(), [])
 
-  // 11 分钟：第一条提醒。
+  // 11 分钟：第一条提醒（也是这一轮唯一的一条）。
   钟.现在 += 2 * 60000
   const 第一次 = 监控.tick()
   assert.equal(第一次.length, 1)
   assert.equal(第一次[0].kind, 'remind')
   assert.equal(第一次[0].text, 默认长任务提醒文案, '默认长任务提醒文案原文')
 
-  // 20 分钟：提醒间隔没到，不重复。
+  // 之后不管多久都不再塞：塞进去也只是排队，等模型跑完还要多花时间处理。
   钟.现在 += 9 * 60000
   assert.deepEqual(监控.tick(), [])
-
-  // 26 分钟：第二条；41 分钟：第三条。
-  钟.现在 += 6 * 60000
-  assert.equal(监控.tick().length, 1)
-  钟.现在 += 15 * 60000
-  assert.equal(监控.tick().length, 1)
-
-  // 46 分钟：提醒已经满 3 次，不再升级，也不再有任何动作。
-  钟.现在 += 5 * 60000
+  钟.现在 += 30 * 60000
   assert.deepEqual(监控.tick(), [])
-  assert.equal(监控.快照().alerts[0].injections, 3)
-
-  // 一小时后仍然只提醒，不会冒出 qq 动作。
   钟.现在 += 60 * 60000
   assert.deepEqual(监控.tick(), [])
-  assert.equal(监控.tick().some((a) => a.kind === 'qq'), false)
 
   const 快照 = 监控.快照()
   assert.equal(快照.bound, 1)
   assert.equal(快照.alerts.length, 1)
   assert.equal(快照.alerts[0].title, '测试会话')
-  assert.equal(快照.alerts[0].injections, 3)
+  assert.equal(快照.alerts[0].injections, 1)
+})
+
+test('防失联监控：消息真正发出去以后才重置计时', () => {
+  const { 钟, 监控 } = 建监控()
+  监控.跟踪状态(会话, 'running')
+  钟.现在 += 11 * 60000
+  assert.equal(监控.tick().length, 1)
+
+  // 只进了出站队列、还没发出去：不算能把话带出去，计时不动，也不给再塞第二次。
+  监控.记QQ入队(QQ)
+  钟.现在 += 30 * 60000
+  assert.deepEqual(监控.tick(), [])
+
+  // 真正发出去：从这一刻重新计时，告警清掉。
+  监控.记QQ出站(QQ)
+  assert.equal(监控.快照().alerts.length, 0)
+  钟.现在 += 11 * 60000
+  const 再提醒 = 监控.tick()
+  assert.equal(再提醒.length, 1)
+  assert.equal(再提醒[0].kind, 'remind')
+  assert.equal(监控.快照().alerts[0].injections, 1)
 })
 
 test('防失联监控：按运行时长算，中途有进展也不重新计时', () => {
@@ -980,15 +989,11 @@ test('防失联监控：一轮结束后进入新一轮才重新计时', () => {
   监控.跟踪状态(会话, 'running')
   钟.现在 += 11 * 60000
   assert.equal(监控.tick().length, 1)
-  钟.现在 += 15 * 60000
-  assert.equal(监控.tick().length, 1)
-  钟.现在 += 15 * 60000
-  assert.equal(监控.tick().length, 1)
 
-  // 已经提醒满 3 次：这一轮里不再有任何动作。
+  // 这一轮里已经塞过一条：之后不再有任何动作。
   钟.现在 += 60 * 60000
   assert.deepEqual(监控.tick(), [])
-  assert.equal(监控.快照().alerts[0].injections, 3)
+  assert.equal(监控.快照().alerts[0].injections, 1)
 
   // 这一轮结束、下一轮开始：重新计数。
   监控.处理事件(会话, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
