@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -982,13 +982,13 @@ test('防失联监控：超时只塞一次，之后不再打扰', () => {
   assert.equal(快照.alerts[0].injections, 1)
 })
 
-test('防失联监控：提醒进入会话后才重新计时，和 QQ 出站无关', () => {
+test('防失联监控：提醒进入会话后才重新计时，QQ 出站不能代替', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
   钟.现在 += 11 * 60000
   assert.equal(监控.tick().length, 1)
 
-  // 提醒还排在会话外面：不管过多久、QQ 发没发出去，都别再塞、也别重置。
+  // 发 QQ 会清掉告警计时，但提醒本体还没进会话：仍不会再塞一条。
   监控.记QQ出站(QQ)
   钟.现在 += 30 * 60000
   assert.deepEqual(监控.tick(), [])
@@ -1003,22 +1003,41 @@ test('防失联监控：提醒进入会话后才重新计时，和 QQ 出站无�
   assert.equal(监控.快照().alerts[0].injections, 1)
 })
 
-test('防失联监控：按运行时长算，中途有进展也不重新计时', () => {
+test('防失联监控：持续有模型输出算进展，不会每 15 分钟误报', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
 
-  // 9 分钟时模型还在输出：这算进展，但不算「会话能收到消息」，计时不重置。
-  钟.现在 += 9 * 60000
-  监控.处理事件(会话, { type: 'assistant/message', data: { turn: 1 } })
-  assert.deepEqual(监控.tick(), [])
+  // 每 9 分钟一次新的模型输出/工具调用：一直在干活，跨过 15、30 分钟都不提醒。
+  for (const 步 of [9, 18, 27, 36]) {
+    钟.现在 += 9 * 60000
+    监控.处理事件(会话, { type: 'assistant/message', data: { turn: 1, step: 步 } })
+    assert.deepEqual(监控.tick(), [])
+  }
 
-  // 再过 2 分钟（开跑 11 分钟）：照样提醒——这一轮还在跑，QQ 那边一直收不到回复。
-  钟.现在 += 2 * 60000
+  // 最后一次输出之后 11 分钟没有任何新输出：这才是卡住。
+  钟.现在 += 11 * 60000
   const 第一次 = 监控.tick()
   assert.equal(第一次.length, 1)
   assert.equal(第一次[0].kind, 'remind')
-  assert.equal(第一次[0].seconds, 660)
+  assert.equal(第一次[0].seconds, 660, '从最后一次进展算起')
   assert.equal(第一次[0].text, 默认长任务提醒文案, '默认长任务提醒文案原文')
+})
+
+test('防失联监控：真发出去的 QQ 算进展，卡住计时重置', () => {
+  const { 钟, 监控 } = 建监控()
+  监控.跟踪状态(会话, 'running')
+  钟.现在 += 9 * 60000
+  assert.deepEqual(监控.tick(), [])
+
+  // QQ 真到了用户手里：会话还能把话带出去，计时从这一刻重新开始。
+  监控.记QQ出站(QQ)
+  钟.现在 += 2 * 60000
+  assert.deepEqual(监控.tick(), [], '从发 QQ 重新算，还没到 10 分钟')
+
+  钟.现在 += 9 * 60000
+  const 提醒 = 监控.tick()
+  assert.equal(提醒.length, 1)
+  assert.equal(提醒[0].seconds, 660, '从发 QQ 那一刻算起')
 })
 
 test('防失联监控：提醒没送进去就退回，下个心跳重试', () => {
@@ -1371,4 +1390,26 @@ test('防失联：两条提醒提示词可配置，空串/非字符串/超长回
   const 读回 = 存.load()
   assert.equal(读回.guardStuckPrompt, '保存长任务')
   assert.equal(读回.guardQqPrompt, '保存通道')
+})
+
+test('持久化：待转发队列/状态/配置损坏时先留档，再按空值继续', () => {
+  const dir = 临时目录()
+  const logger = new Logger({ filePath: join(dir, 'bad.log'), level: 'debug' })
+  const 写坏 = (名) => writeFileSync(join(dir, 名), '{坏掉的 JSON', 'utf8')
+  写坏('fish-message-forward-queue.json')
+  写坏('fish-message-state.json')
+  写坏('fish-message-config.json')
+
+  const 转发 = new ForwardQueue({ homeDir: dir, logger })
+  assert.equal(转发.pending(), 0)
+  const 状态 = new StateStore({ homeDir: dir, logger })
+  assert.equal(状态.snapshot().stats.received, 0)
+  const 配置 = new ConfigStore({ homeDir: dir, logger }).load({})
+  assert.equal(配置.guardEnabled, true, '配置坏了回默认值')
+
+  const 文件们 = readdirSync(dir)
+  for (const 名 of ['fish-message-forward-queue.json', 'fish-message-state.json', 'fish-message-config.json']) {
+    assert.equal(文件们.filter((n) => n.startsWith(`${名}.bad-`)).length, 1, `${名} 应留档`)
+  }
+  assert.match(logger.recent().join('\n'), /留档/)
 })

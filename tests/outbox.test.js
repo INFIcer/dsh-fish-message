@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Outbox, 计算指纹, 消息摘要, 退避毫秒 } from '../lib/outbox.js'
@@ -306,6 +306,29 @@ test('Bridge：旧的占位语音积压条目被丢弃时，错误文案也说�
   assert.match(错误, /占位符/)
   assert.ok(错误.includes('「路径」'))
   await bridge.stop()
+})
+
+test('出站队列：文件坏了先留档再按空队列继续，不静默覆盖', () => {
+  const dir = 临时目录()
+  const 文件 = join(dir, 'fish-message-outbox.json')
+  writeFileSync(文件, '{ 这不是 JSON', 'utf8')
+  const logger = new Logger({ filePath: join(dir, 'outbox.log'), level: 'debug' })
+  const 队列 = new Outbox({ homeDir: dir, getConfig: () => normalizeConfig({}), logger })
+
+  assert.equal(队列.pending(), 0)
+  assert.equal(existsSync(文件), false)
+  assert.equal(readdirSync(dir).filter((n) => n.startsWith('fish-message-outbox.json.bad-')).length, 1, '原文件改名留档')
+  assert.match(logger.recent().join('\n'), /留档/)
+})
+
+test('出站队列：结构不对的文件也留档，不当空文件直接覆盖', () => {
+  const dir = 临时目录()
+  const 文件 = join(dir, 'fish-message-outbox.json')
+  writeFileSync(文件, JSON.stringify({ version: 1, items: '不是数组' }), 'utf8')
+  const 队列 = new Outbox({ homeDir: dir, getConfig: () => normalizeConfig({}), logger: new Logger({ filePath: join(dir, 'outbox.log') }) })
+
+  assert.equal(队列.pending(), 0)
+  assert.equal(readdirSync(dir).filter((n) => n.startsWith('fish-message-outbox.json.bad-')).length, 1)
 })
 
 test('Bridge：出站队列落盘后换一个 Bridge 实例还能补发', async () => {

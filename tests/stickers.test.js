@@ -5,11 +5,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -331,6 +333,36 @@ test('清理：删未使用、去重、清空最近图片（只删 qq-image-*）
   assert.equal(readdirSync(inbox).includes('别删我.txt'), true)
 })
 
+test('清理过期缓存：只删过期的 qq-image-* / qq-voice-*，表情库与其它文件不动', () => {
+  const inbox = mkdtempSync(join(tmpdir(), 'fish-inbox-ttl-'))
+  const { dir, 库 } = 造库({}, { inboxDir: inbox })
+  const 旧图 = join(inbox, 'qq-image-old.png')
+  const 旧语音 = join(inbox, 'qq-voice-old.wav')
+  const 新图 = join(inbox, 'qq-image-new.png')
+  const 别的 = join(inbox, '别删我.txt')
+  for (const 路径 of [旧图, 旧语音, 新图]) writeFileSync(路径, 小PNG)
+  writeFileSync(别的, 'x')
+  const 三十天前 = new Date(Date.now() - 30 * 24 * 3600 * 1000)
+  utimesSync(旧图, 三十天前, 三十天前)
+  utimesSync(旧语音, 三十天前, 三十天前)
+
+  // 表情库里的文件不能被当成缓存删掉。
+  const 条目 = 库.save(小PNG, { name: 'keep.png' }).entry
+  const 库文件 = join(dir, 条目.file)
+
+  const 结果 = 库.清理过期缓存(14 * 24 * 3600 * 1000)
+  assert.equal(结果.removed, 2)
+  assert.ok(结果.freedBytes > 0)
+  assert.deepEqual(readdirSync(inbox).sort(), ['qq-image-new.png', '别删我.txt'].sort())
+  assert.equal(existsSync(库文件), true)
+  assert.equal(库.stats().count, 1)
+
+  // 保留期算错（0/负数）时什么都不删，避免误清空整个缓存。
+  assert.equal(库.清理过期缓存(0).removed, 0)
+  assert.equal(库.清理过期缓存(-1).removed, 0)
+  assert.equal(readdirSync(inbox).length, 2)
+})
+
 test('标签与图片头解析：中文/分隔符/去重；PNG 尺寸', () => {
   assert.deepEqual(规整标签('猫, 可爱、#猫#新'), ['猫', '可爱', '新'])
   assert.deepEqual(规整标签(['  ', 'a', 'A']), ['a'])
@@ -372,6 +404,7 @@ test('fish.message 服务：stickers.list/save/get/send 与错误码', async () 
 
   const 发 = await api.stickers.send('10001', '#晚安')
   assert.equal(发.sent, true)
+  assert.equal(发.sticker.id, 存.entry.id, 'send 返回实际解析到的条目')
   assert.equal(调用[0].qq, '10001')
   assert.equal(调用[0].段们[0].type, 'image')
   assert.equal(调用[0].段们[0].data.stickerId, 存.entry.id)
@@ -419,6 +452,30 @@ test('表情工具：fish_sticker_list / fish_sticker_send / fish_sticker_save �
   assert.equal(发.queued, true)
   assert.equal(调用.length, 2)
   assert.equal(JSON.stringify(发).includes('base64'), false)
+
+  // 标签命中多个时按用量轮换：返回的 id/file 必须是真正发出去的那条，而不是第一次解析的。
+  库.save(造GIF({ frames: 5 }), { name: '晚安2.gif', tags: ['晚安'] })
+  const 实发 = []
+  const 桥2 = {
+    outbox: { pending: () => 0 },
+    async sendOutbound(qq, 段们) {
+      实发.push({ qq, 段们 })
+      库.bump(段们[0].data.stickerId)
+      return { ok: true, sent: true, queued: false, pending: 0 }
+    },
+  }
+  const api2 = createFishMessageApi({
+    bridge: 桥2,
+    stickers: 库,
+    getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }),
+  })
+  const 定义2 = buildStickerToolDefinitions({ api: api2, getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }) })
+  const 轮换 = await 定义2[1].execute({ name: '#晚安', count: 2 })
+  assert.equal(轮换.ok, true)
+  assert.equal(实发.length, 2)
+  assert.notEqual(实发[0].段们[0].data.stickerId, 实发[1].段们[0].data.stickerId, '按用量应轮到不同表情')
+  assert.deepEqual(轮换.stickers.map((x) => x.id), 实发.map((x) => x.段们[0].data.stickerId))
+  assert.deepEqual(轮换.stickers.map((x) => x.file), 实发.map((x) => 库.get(x.段们[0].data.stickerId).file))
 
   const 找不到 = await 定义[1].execute({ name: '不存在' })
   assert.equal(找不到.ok, false)
@@ -524,7 +581,7 @@ test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时只记错�
 })
 test('fish_sticker_save：path 入库，中文标签/描述、默认 source=agent', async () => {
   const { 库 } = 造库()
-  const 工具 = 取工具('fish_sticker_save', 建表情api(库), () => ({ stickerMaxMB: 1024 }))
+  const 工具 = 取工具('fish_sticker_save', 建表情api(库), () => ({ stickerMaxFileMB: 1024 }))
   const gif = 造GIF({ width: 5, height: 6, frames: 2, delay: 15 })
   const 源 = 写临时图(gif, '大肥鱼.gif')
 
@@ -590,14 +647,15 @@ test('fish_sticker_save：非图片 → not_image，超单张上限 → too_larg
   assert.equal(不是图.code, 'not_image')
   assert.match(不是图.hint, /仅支持/)
 
-  // 上限取配置里的 stickerMaxMB：配成约 1KB 后，4KB 的图必须在读取前就被挡掉。
-  const 小库 = 造库({ stickerMaxMB: 0.001 })
-  const 小工具 = 取工具('fish_sticker_save', 建表情api(小库.库), () => ({ stickerMaxMB: 0.001 }))
+  // 单张上限取 stickerMaxFileMB（不借用库总容量）：配成约 1KB 后，4KB 的图必须在读取前就被挡掉。
+  const { 库: 小库 } = 造库()
+  const 小工具 = 取工具('fish_sticker_save', 建表情api(小库), () => ({ stickerMaxFileMB: 0.001 }))
   const 大图 = 写临时图(造GIF({ 额外字节: 4096 }), 'big.gif')
   const 太大 = await 小工具.execute({ path: 大图 })
   assert.equal(太大.ok, false)
   assert.equal(太大.code, 'too_large')
-  assert.equal(小库.库.stats().count, 0)
+  assert.match(太大.hint, /单张上限/)
+  assert.equal(小库.stats().count, 0)
 })
 
 test('fish_sticker_save：同 sha256 去重 → created=false，只合并标签、不覆盖描述与名字', async () => {

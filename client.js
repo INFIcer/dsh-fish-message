@@ -528,6 +528,10 @@ window.__ModuleLoader__.load({
           style: S.small, type: 'number', min: 1, max: 10240, value: 配置.stickerMaxMB ?? 1024,
           onChange: (e) => 改('stickerMaxMB', Number(e.target.value)),
         })),
+        行('单张文件上限（MB）', h('input', {
+          style: S.small, type: 'number', min: 1, max: 1024, value: 配置.stickerMaxFileMB ?? 64,
+          onChange: (e) => 改('stickerMaxFileMB', Number(e.target.value)),
+        }), null, '入库前先按文件大小挡掉超大文件，避免整读进内存；超过这个值会提示换小图。'),
         h('div', { style: { ...S.dim, marginTop: 8 } },
           `共 ${数量} 个（上限 ${配置.stickerMaxCount ?? 2000}）｜占用 ${统计.sizeMB || 0}MB（上限 ${配置.stickerMaxMB ?? 1024}MB）｜已使用 ${统计.used || 0} 个｜未使用 ${统计.unused || 0} 个`),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 } },
@@ -900,6 +904,10 @@ window.__ModuleLoader__.load({
           style: S.small, type: 'number', min: 1, max: 720, value: 配置.outboxTtlHours ?? 24,
           onChange: (e) => 改('outboxTtlHours', Number(e.target.value)),
         }), '超过此时间不再补发，以免恢复后集中发送过期内容。'),
+        行('入站缓存保留天数', h('input', {
+          style: S.small, type: 'number', min: 1, max: 365, value: 配置.inboxTtlDays ?? 14,
+          onChange: (e) => 改('inboxTtlDays', Number(e.target.value)),
+        }), null, '收到的图片和语音在本机最多留这么久，到期自动清理；表情库不受影响。'),
         行('重复消息合并窗口（分钟）', h('input', {
           style: S.small, type: 'number', min: 0, max: 1440, value: 配置.outboxDedupMinutes ?? 10,
           onChange: (e) => 改('outboxDedupMinutes', Number(e.target.value)),

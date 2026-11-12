@@ -251,6 +251,20 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   await 睡(900)
   assert.equal(忙后注入.length, 1, '排队后重试只塞一条')
 
+  // 出站入队不等于送达：只有真正发出去（sent）才清「发过 QQ」并重置卡住计时。
+  const 出站状态 = app.guard.取状态('host-test')
+  出站状态.待判定回合 = true
+  出站状态.本回合发过QQ = false
+  出站状态.statusSince = Date.now() - 20 * 60 * 1000
+  app.服务事件.emit('outbound-queued', { qq: QQ, reason: 'test' })
+  assert.equal(出站状态.待判定回合, true, '只入队，用户还没收到，不能算发过 QQ')
+  assert.equal(出站状态.本回合发过QQ, false)
+  assert.ok(Date.now() - 出站状态.statusSince > 19 * 60 * 1000, '入队不算进展，卡住计时不动')
+  app.服务事件.emit('sent', { qq: QQ })
+  assert.equal(出站状态.待判定回合, false, '真发出去才算送达')
+  assert.equal(出站状态.本回合发过QQ, true)
+  assert.ok(Date.now() - 出站状态.statusSince < 1000, '真发出去才重置卡住计时')
+
   // 同一个会话重复收到 created 不重复叠加。
   创建({ agent })
   assert.equal(工具守卫们.length, 1)
