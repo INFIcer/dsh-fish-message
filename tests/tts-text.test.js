@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { tts友好化, 切分语音文本, 语音单段上限 } from '../lib/tts-text.js'
+import { ttsFriendly, splitVoiceText, voiceSegmentMaxLength } from '../lib/tts-text.js'
 import { AiService } from '../lib/ai.js'
 
 // 期望值来自 Python 参考程序 tts_friendly() 的实测输出。时间读法是唯一的有意偏离：
 // 参考程序把 11:05 读成「十一点零零五」（分钟双零且缺「分」），这里按验收要求
 // 读成「十一点零五分」；其余用例逐字一致。
-const 对照 = [
+const contrast = [
   [
     "QQ邮箱：1796117435@qq.com",
     "QQ邮箱：幺七九六幺幺七四三五 at qq dot com"
@@ -242,49 +242,49 @@ const 对照 = [
 ]
 
 test('可朗读化：全部用例与参考实现一致（时间读法按验收要求修正）', () => {
-  for (const [输入, 期望] of 对照) {
-    assert.equal(tts友好化(输入), 期望, '输入：' + JSON.stringify(输入))
+  for (const [input, expected] of contrast) {
+    assert.equal(ttsFriendly(input), expected, '输入：' + JSON.stringify(input))
   }
 })
 
 test('可朗读化：非字符串输入按空串处理', () => {
-  assert.equal(tts友好化(null), '')
-  assert.equal(tts友好化(undefined), '')
-  assert.equal(tts友好化('   \t　 '), '')
+  assert.equal(ttsFriendly(null), '')
+  assert.equal(ttsFriendly(undefined), '')
+  assert.equal(ttsFriendly('   \t　 '), '')
 })
 
 test('可朗读化：超过 26 个地址时占位符继续编号并全部还原', () => {
-  const 输入 = Array.from({ length: 30 }, (_, i) => 'u' + i + '@e' + i + '.com').join('；')
-  const 出 = tts友好化(输入)
-  assert.ok(!出.includes('\u0000'), '不应残留占位符')
-  assert.equal((出.match(/ at /g) || []).length, 30)
+  const input = Array.from({ length: 30 }, (_, i) => 'u' + i + '@e' + i + '.com').join('；')
+  const out = ttsFriendly(input)
+  assert.ok(!out.includes('\u0000'), '不应残留占位符')
+  assert.equal((out.match(/ at /g) || []).length, 30)
 })
 
 test('切分：短文本原样返回，空文本返回空数组', () => {
-  assert.deepEqual(切分语音文本('你好。'), ['你好。'])
-  assert.deepEqual(切分语音文本(''), [])
-  assert.deepEqual(切分语音文本(null), [])
+  assert.deepEqual(splitVoiceText('你好。'), ['你好。'])
+  assert.deepEqual(splitVoiceText(''), [])
+  assert.deepEqual(splitVoiceText(null), [])
 })
 
 test('切分：按句子切到上限内，顺序和内容不变', () => {
-  const 句 = '一'.repeat(98) + '。'
-  const 全文 = 句.repeat(3)
-  const 段们 = 切分语音文本(全文)
-  assert.equal(段们.length, 2)
-  assert.ok(段们.every((段) => 段.length <= 语音单段上限))
-  assert.equal(段们.join(''), 全文)
+  const sentence = '一'.repeat(98) + '。'
+  const fullText = sentence.repeat(3)
+  const segments = splitVoiceText(fullText)
+  assert.equal(segments.length, 2)
+  assert.ok(segments.every((segment) => segment.length <= voiceSegmentMaxLength))
+  assert.equal(segments.join(''), fullText)
 })
 
 test('切分：没有句号的超长文本按上限硬切', () => {
-  const 段们 = 切分语音文本('啊'.repeat(450))
-  assert.deepEqual(段们.map((段) => 段.length), [200, 200, 50])
+  const segments = splitVoiceText('啊'.repeat(450))
+  assert.deepEqual(segments.map((segment) => segment.length), [200, 200, 50])
 })
 
 test('切分：自定义上限生效', () => {
-  assert.deepEqual(切分语音文本('甲乙。丙丁。', 3), ['甲乙。', '丙丁。'])
+  assert.deepEqual(splitVoiceText('甲乙。丙丁。', 3), ['甲乙。', '丙丁。'])
 })
 
-function 造服务(额外 = {}) {
+function makeService(extra = {}) {
   return {
     capabilities: { tts: { available: true, ready: true } },
     calls: [],
@@ -292,68 +292,68 @@ function 造服务(额外 = {}) {
       this.calls.push({ text, opts })
       return { ok: true, items: [{ wavPath: 'C:/cache/' + this.calls.length + '.wav', voice: opts?.voice }] }
     },
-    ...额外,
+    ...extra,
   }
 }
 
-const 建 = (服务) => new AiService({ getService: () => 服务, getConfig: () => ({}), logger: null })
+const build = (service) => new AiService({ getService: () => service, getConfig: () => ({}), logger: null })
 
 test('ai.tts：转发前先做可朗读化', async () => {
-  const 服务 = 造服务()
-  const 结果 = await 建(服务).tts('会议 9:07，邮箱 user12@email.com')
-  assert.equal(结果.ok, true)
-  assert.equal(服务.calls.length, 1)
-  assert.equal(服务.calls[0].text, '会议 九点零七分，邮箱 user一二 at email dot com')
+  const service = makeService()
+  const result = await build(service).tts('会议 9:07，邮箱 user12@email.com')
+  assert.equal(result.ok, true)
+  assert.equal(service.calls.length, 1)
+  assert.equal(service.calls[0].text, '会议 九点零七分，邮箱 user一二 at email dot com')
 })
 
 test('ai.tts：语速夹到 0.5~2，非法值回落 1，空音色用默认', async () => {
-  const 服务 = 造服务()
-  const ai = 建(服务)
+  const service = makeService()
+  const ai = build(service)
   await ai.tts('第一句', { voice: '', speed: 9 })
   await ai.tts('第二句', { voice: 'test_voice', speed: 0.1 })
   await ai.tts('第三句', { speed: 'abc' })
-  assert.equal(服务.calls[0].opts.voice, 'dafeiyu')
-  assert.equal(服务.calls[0].opts.speed, 2)
-  assert.equal(服务.calls[1].opts.voice, 'test_voice')
-  assert.equal(服务.calls[1].opts.speed, 0.5)
-  assert.equal(服务.calls[2].opts.speed, 1)
+  assert.equal(service.calls[0].opts.voice, 'dafeiyu')
+  assert.equal(service.calls[0].opts.speed, 2)
+  assert.equal(service.calls[1].opts.voice, 'test_voice')
+  assert.equal(service.calls[1].opts.speed, 0.5)
+  assert.equal(service.calls[2].opts.speed, 1)
 })
 
 test('ai.tts：长文本按句子切段，逐段合成并顺序返回', async () => {
-  const 句 = '一'.repeat(98) + '。'
-  const 全文 = 句.repeat(3)
-  const 服务 = 造服务()
-  const 结果 = await 建(服务).tts(全文)
-  assert.equal(服务.calls.length, 2)
-  assert.ok(服务.calls.every((调) => 调.text.length <= 语音单段上限))
-  assert.equal(服务.calls.map((调) => 调.text).join(''), 全文)
-  assert.deepEqual(结果.wavPaths, ['C:/cache/1.wav', 'C:/cache/2.wav'])
-  assert.equal(结果.wavPath, 'C:/cache/1.wav')
+  const sentence = '一'.repeat(98) + '。'
+  const fullText = sentence.repeat(3)
+  const service = makeService()
+  const result = await build(service).tts(fullText)
+  assert.equal(service.calls.length, 2)
+  assert.ok(service.calls.every((invoke) => invoke.text.length <= voiceSegmentMaxLength))
+  assert.equal(service.calls.map((invoke) => invoke.text).join(''), fullText)
+  assert.deepEqual(result.wavPaths, ['C:/cache/1.wav', 'C:/cache/2.wav'])
+  assert.equal(result.wavPath, 'C:/cache/1.wav')
 })
 
 test('ai.tts：空文本或只剩符号时不发请求', async () => {
-  const 服务 = 造服务()
-  const ai = 建(服务)
-  const 空白 = await ai.tts('   ')
-  const 符号 = await ai.tts('。。。')
-  assert.equal(空白.ok, false)
-  assert.equal(空白.code, 'bad_request')
-  assert.equal(符号.ok, false)
-  assert.equal(服务.calls.length, 0)
+  const service = makeService()
+  const ai = build(service)
+  const blank = await ai.tts('   ')
+  const symbol = await ai.tts('。。。')
+  assert.equal(blank.ok, false)
+  assert.equal(blank.code, 'bad_request')
+  assert.equal(symbol.ok, false)
+  assert.equal(service.calls.length, 0)
 })
 
 test('ai.tts：任意一段失败就整体失败，不返回半份结果', async () => {
-  let 次 = 0
-  const 服务 = 造服务({
+  let time = 0
+  const service = makeService({
     async tts() {
-      次 += 1
-      if (次 === 2) return { ok: false, code: 'engine_error', hint: '第二段失败' }
-      return { ok: true, items: [{ wavPath: 'C:/cache/' + 次 + '.wav' }] }
+      time += 1
+      if (time === 2) return { ok: false, code: 'engine_error', hint: '第二段失败' }
+      return { ok: true, items: [{ wavPath: 'C:/cache/' + time + '.wav' }] }
     },
   })
-  const 句 = '一'.repeat(98) + '。'
-  const 结果 = await 建(服务).tts(句.repeat(3))
-  assert.equal(结果.ok, false)
-  assert.equal(结果.code, 'engine_error')
-  assert.equal(结果.wavPaths, undefined)
+  const sentence = '一'.repeat(98) + '。'
+  const result = await build(service).tts(sentence.repeat(3))
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'engine_error')
+  assert.equal(result.wavPaths, undefined)
 })

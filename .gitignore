@@ -4,3 +4,4 @@ node_modules/
 Thumbs.db
 coverage/
 .tmp/
+dev-notes/

@@ -59,10 +59,10 @@ test('反引号里的标记不算标记', () => {
 })
 
 test('围栏代码块里的标记不算标记', () => {
-  const 文 = '说明\n```\n[QQ]这不是要发的[/QQ]\n```\n结束'
-  const r = parseQQBlock(文, true)
+  const str = '说明\n```\n[QQ]这不是要发的[/QQ]\n```\n结束'
+  const r = parseQQBlock(str, true)
   assert.equal(r.send, false)
-  const r2 = parseQQBlock(文, false)
+  const r2 = parseQQBlock(str, false)
   assert.equal(r2.send, true)
   assert.match(r2.text, /\[QQ]这不是要发的\[\/QQ]/)
 })

@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { AiService, 友好提示, 能力状态, 情绪中文, 背景中文 } from '../lib/ai.js'
-import { normalizeConfig, 默认识图提示词, 入站识图提示词, 识图提示词上限 } from '../lib/config.js'
+import { AiService, friendlyHint, capabilityStatus, emotionText, backgroundText } from '../lib/ai.js'
+import { normalizeConfig, defaultImagePrompt, inboundImagePrompt, imagePromptMaxLength } from '../lib/config.js'
 
-function 造服务(补丁 = {}) {
+function makeService(patch = {}) {
   return {
     capabilities: {
       tts: { available: true, ready: true },
@@ -22,255 +22,255 @@ function 造服务(补丁 = {}) {
     async voices() {
       return [{ name: 'dafeiyu' }, { name: 'test_voice' }, { name: 'dafeiyu' }]
     },
-    ...补丁,
+    ...patch,
   }
 }
 
-const 建 = (getService, logger = null) => new AiService({ getService, getConfig: () => ({}), logger })
+const build = (getService, logger = null) => new AiService({ getService, getConfig: () => ({}), logger })
 
 test('本地 AI：没装服务时所有能力都判不可用，提示是人话', async () => {
-  const ai = 建(() => null)
-  const 状态 = ai.status()
-  assert.equal(状态.installed, false)
-  assert.equal(状态.online, false)
-  assert.match(状态.hint, /本地 AI 插件没装或没启动/)
+  const ai = build(() => null)
+  const status = ai.status()
+  assert.equal(status.installed, false)
+  assert.equal(status.online, false)
+  assert.match(status.hint, /本地 AI 插件没装或没启动/)
 
-  const 合成 = await ai.tts('晚安')
-  assert.equal(合成.ok, false)
-  assert.equal(合成.code, 'service_not_installed')
-  assert.match(合成.hint, /其它功能不受影响/)
+  const synthesize = await ai.tts('晚安')
+  assert.equal(synthesize.ok, false)
+  assert.equal(synthesize.code, 'service_not_installed')
+  assert.match(synthesize.hint, /其它功能不受影响/)
 
-  const 转写 = await ai.asr('C:/a.wav')
-  assert.equal(转写.ok, false)
-  assert.equal(转写.code, 'service_not_installed')
+  const transcribe = await ai.asr('C:/a.wav')
+  assert.equal(transcribe.ok, false)
+  assert.equal(transcribe.code, 'service_not_installed')
 
-  const 音色 = await ai.listVoices()
-  assert.deepEqual(音色.voices, [])
-  assert.equal(音色.ok, false)
+  const voice = await ai.listVoices()
+  assert.deepEqual(voice.voices, [])
+  assert.equal(voice.ok, false)
 })
 
 test('本地 AI：服务在但能力标成不可用时，按原因降级而不是抛错', async () => {
-  const 服务 = 造服务({
+  const service = makeService({
     capabilities: { tts: { available: false, ready: false, reason: 'model_missing' } },
   })
-  const ai = 建(() => 服务)
+  const ai = build(() => service)
   assert.equal(ai.status().tts, false)
   assert.equal(ai.status().online, true, '语音不可用不影响识别可用')
 
-  const 结果 = await ai.tts('晚安')
-  assert.equal(结果.ok, false)
-  assert.equal(结果.code, 'model_missing')
-  assert.match(结果.hint, /语音模型还没准备好/)
+  const result = await ai.tts('晚安')
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'model_missing')
+  assert.match(result.hint, /语音模型还没准备好/)
 })
 
 test('本地 AI：visionDescribe 不存在时识图算不可用', async () => {
-  const 服务 = 造服务()
-  delete 服务.visionDescribe
-  const ai = 建(() => 服务)
+  const service = makeService()
+  delete service.visionDescribe
+  const ai = build(() => service)
   assert.equal(ai.status().vision, false)
-  const 结果 = await ai.describeImage('C:/a.png')
-  assert.equal(结果.ok, false)
-  assert.equal(结果.code, 'not_supported')
-  assert.match(结果.hint, /暂不支持识图/)
+  const result = await ai.describeImage('C:/a.png')
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'not_supported')
+  assert.match(result.hint, /暂不支持识图/)
 })
 
 test('本地 AI：tts 正常时把音色和语速传给服务，并返回 wavPath', async () => {
-  let 收到 = null
-  const 服务 = 造服务({
+  let received = null
+  const service = makeService({
     async tts(text, opts) {
-      收到 = { text, opts }
+      received = { text, opts }
       return { ok: true, items: [{ wavPath: 'C:/cache/a.wav', voice: opts.voice, ms: 12 }] }
     },
   })
-  const ai = 建(() => 服务)
-  const 结果 = await ai.tts('晚安', { voice: 'test_voice', speed: 9 })
-  assert.equal(结果.ok, true)
-  assert.equal(结果.wavPath, 'C:/cache/a.wav')
-  assert.deepEqual(收到, { text: '晚安', opts: { voice: 'test_voice', speed: 2 } })
+  const ai = build(() => service)
+  const result = await ai.tts('晚安', { voice: 'test_voice', speed: 9 })
+  assert.equal(result.ok, true)
+  assert.equal(result.wavPath, 'C:/cache/a.wav')
+  assert.deepEqual(received, { text: '晚安', opts: { voice: 'test_voice', speed: 2 } })
 })
 
 test('本地 AI：asr 正常时返回文字，非法语言回退 auto', async () => {
-  let 收到 = null
-  const 服务 = 造服务({
+  let received = null
+  const service = makeService({
     async asr(path, opts) {
-      收到 = { path, opts }
+      received = { path, opts }
       return { ok: true, items: [{ text: '今晚早点睡' }] }
     },
   })
-  const ai = 建(() => 服务)
-  const 结果 = await ai.asr('C:/a.wav', { language: 'klingon' })
-  assert.equal(结果.ok, true)
-  assert.equal(结果.text, '今晚早点睡')
-  assert.equal('speaker' in 结果, false, '转写结果不再带声纹身份')
-  assert.deepEqual(收到, { path: 'C:/a.wav', opts: { language: 'auto' } })
+  const ai = build(() => service)
+  const result = await ai.asr('C:/a.wav', { language: 'klingon' })
+  assert.equal(result.ok, true)
+  assert.equal(result.text, '今晚早点睡')
+  assert.equal('speaker' in result, false, '转写结果不再带声纹身份')
+  assert.deepEqual(received, { path: 'C:/a.wav', opts: { language: 'auto' } })
 })
 
 test('本地 AI：asr 带出情绪和背景音，旧版插件缺字段时是空串', async () => {
-  const 服务 = 造服务({
+  const service = makeService({
     async asr() {
       return { ok: true, items: [{ text: '哈哈', emotion: 'HAPPY', events: ['Speech', '[Laughter]'] }] }
     },
   })
-  const 结果 = await 建(() => 服务).asr('C:/a.wav')
-  assert.equal(结果.emotion, '开心')
-  assert.equal(结果.background, '笑声')
+  const result = await build(() => service).asr('C:/a.wav')
+  assert.equal(result.emotion, '开心')
+  assert.equal(result.background, '笑声')
 
   // 旧版插件没有 emotion / events：给空串，桥层据此整段省略，不写 undefined。
-  const 旧版 = await 建(() => 造服务()).asr('C:/a.wav')
-  assert.equal(旧版.emotion, '')
-  assert.equal(旧版.background, '')
+  const legacy = await build(() => makeService()).asr('C:/a.wav')
+  assert.equal(legacy.emotion, '')
+  assert.equal(legacy.background, '')
 })
 
 test('本地 AI：情绪码映射成短中文，未知值和空值一律当没有', () => {
-  assert.equal(情绪中文('NEUTRAL'), '中性')
-  assert.equal(情绪中文('HAPPY'), '开心')
-  assert.equal(情绪中文('SAD'), '难过')
-  assert.equal(情绪中文('ANGRY'), '生气')
-  assert.equal(情绪中文('FEARFUL'), '害怕')
-  assert.equal(情绪中文('FEAR'), '害怕')
-  assert.equal(情绪中文('DISGUSTED'), '厌恶')
-  assert.equal(情绪中文('SURPRISED'), '惊讶')
+  assert.equal(emotionText('NEUTRAL'), '中性')
+  assert.equal(emotionText('HAPPY'), '开心')
+  assert.equal(emotionText('SAD'), '难过')
+  assert.equal(emotionText('ANGRY'), '生气')
+  assert.equal(emotionText('FEARFUL'), '害怕')
+  assert.equal(emotionText('FEAR'), '害怕')
+  assert.equal(emotionText('DISGUSTED'), '厌恶')
+  assert.equal(emotionText('SURPRISED'), '惊讶')
 
   // 大小写和空白不敏感；不认识的情绪、缺字段、非字符串都当没有。
-  assert.equal(情绪中文(' happy '), '开心')
-  assert.equal(情绪中文('BORED'), '')
-  assert.equal(情绪中文(''), '')
-  assert.equal(情绪中文(null), '')
-  assert.equal(情绪中文(undefined), '')
-  assert.equal(情绪中文(0), '')
+  assert.equal(emotionText(' happy '), '开心')
+  assert.equal(emotionText('BORED'), '')
+  assert.equal(emotionText(''), '')
+  assert.equal(emotionText(null), '')
+  assert.equal(emotionText(undefined), '')
+  assert.equal(emotionText(0), '')
 })
 
 test('本地 AI：events 只挑一个背景音，Speech、空数组和未知事件都忽略', () => {
-  assert.equal(背景中文(['Speech']), '')
-  assert.equal(背景中文([]), '')
-  assert.equal(背景中文(null), '')
-  assert.equal(背景中文(undefined), '')
-  assert.equal(背景中文(['[Laughter]']), '笑声')
-  assert.equal(背景中文(['Music']), '音乐')
-  assert.equal(背景中文(['Cough']), '')
+  assert.equal(backgroundText(['Speech']), '')
+  assert.equal(backgroundText([]), '')
+  assert.equal(backgroundText(null), '')
+  assert.equal(backgroundText(undefined), '')
+  assert.equal(backgroundText(['[Laughter]']), '笑声')
+  assert.equal(backgroundText(['Music']), '音乐')
+  assert.equal(backgroundText(['Cough']), '')
 
   // 多个事件按「笑声 > 掌声 > 音乐」挑最显眼的一个，不堆字段。
-  assert.equal(背景中文(['Music', '[Applause]', '[Laughter]']), '笑声')
-  assert.equal(背景中文(['BGM', 'Applause']), '掌声')
-  assert.equal(背景中文('Speech,Laughter'), '笑声', '兼容逗号分隔的字符串')
+  assert.equal(backgroundText(['Music', '[Applause]', '[Laughter]']), '笑声')
+  assert.equal(backgroundText(['BGM', 'Applause']), '掌声')
+  assert.equal(backgroundText('Speech,Laughter'), '笑声', '兼容逗号分隔的字符串')
 })
 
 test('本地 AI：识图偏好读 visionPrefs，接口缺失或返回不认识时算 unknown', async () => {
-  const 有 = 造服务({ async visionPrefs() { return { localDescribe: false } } })
-  assert.deepEqual(await 建(() => 有).visionPrefs(), { known: true, localDescribe: false })
+  const has = makeService({ async visionPrefs() { return { localDescribe: false } } })
+  assert.deepEqual(await build(() => has).visionPrefs(), { known: true, localDescribe: false })
 
-  const 开 = 造服务({ async visionPrefs() { return { localDescribe: true } } })
-  assert.deepEqual(await 建(() => 开).visionPrefs(), { known: true, localDescribe: true })
+  const open = makeService({ async visionPrefs() { return { localDescribe: true } } })
+  assert.deepEqual(await build(() => open).visionPrefs(), { known: true, localDescribe: true })
 
-  assert.deepEqual(await 建(() => 造服务()).visionPrefs(), { known: false }, '接口还没实现')
-  assert.deepEqual(await 建(() => null).visionPrefs(), { known: false }, '没装插件')
+  assert.deepEqual(await build(() => makeService()).visionPrefs(), { known: false }, '接口还没实现')
+  assert.deepEqual(await build(() => null).visionPrefs(), { known: false }, '没装插件')
 
-  const 抛错 = 造服务({ async visionPrefs() { throw new Error('还没实现') } })
-  assert.deepEqual(await 建(() => 抛错).visionPrefs(), { known: false })
+  const throwError = makeService({ async visionPrefs() { throw new Error('还没实现') } })
+  assert.deepEqual(await build(() => throwError).visionPrefs(), { known: false })
 
-  const 怪值 = 造服务({ async visionPrefs() { return { localDescribe: '大概吧' } } })
-  assert.deepEqual(await 建(() => 怪值).visionPrefs(), { known: false })
+  const weirdValue = makeService({ async visionPrefs() { return { localDescribe: '大概吧' } } })
+  assert.deepEqual(await build(() => weirdValue).visionPrefs(), { known: false })
 })
 
 test('本地 AI：三态识图开关 on/off 直接生效，继承时跟随插件、拿不到按开', async () => {
-  const 关偏好 = 造服务({ async visionPrefs() { return { localDescribe: false } } })
-  const 关 = 建(() => 关偏好)
-  assert.equal(await 关.入站识图开关('on'), true)
-  assert.equal(await 关.入站识图开关('off'), false)
-  assert.equal(await 关.入站识图开关('inherit'), false)
-  assert.equal(await 关.入站识图开关(), false, '缺省按继承处理')
+  const closePrefs = makeService({ async visionPrefs() { return { localDescribe: false } } })
+  const close = build(() => closePrefs)
+  assert.equal(await close.inboundImageEnabled('on'), true)
+  assert.equal(await close.inboundImageEnabled('off'), false)
+  assert.equal(await close.inboundImageEnabled('inherit'), false)
+  assert.equal(await close.inboundImageEnabled(), false, '缺省按继承处理')
 
-  const 开偏好 = 造服务({ async visionPrefs() { return { localDescribe: true } } })
-  assert.equal(await 建(() => 开偏好).入站识图开关('inherit'), true)
+  const openPrefs = makeService({ async visionPrefs() { return { localDescribe: true } } })
+  assert.equal(await build(() => openPrefs).inboundImageEnabled('inherit'), true)
 
   // 没装插件、或者插件还没有 visionPrefs：按「开」处理，识图失败会退回原图。
-  assert.equal(await 建(() => null).入站识图开关('inherit'), true)
-  assert.equal(await 建(() => 造服务()).入站识图开关('inherit'), true)
+  assert.equal(await build(() => null).inboundImageEnabled('inherit'), true)
+  assert.equal(await build(() => makeService()).inboundImageEnabled('inherit'), true)
 })
 
 test('本地 AI：识图按 caption 模式调用，并压掉多余空白', async () => {
-  let 收到 = null
-  const 服务 = 造服务({
+  let received = null
+  const service = makeService({
     async visionDescribe(path, opts) {
-      收到 = { path, opts }
+      received = { path, opts }
       return { ok: true, items: [{ path, text: '  一只猫\n趴在键盘上  ' }] }
     },
   })
-  const ai = 建(() => 服务)
-  const 结果 = await ai.describeImage('C:/a.png')
-  assert.equal(结果.ok, true)
-  assert.equal(结果.text, '一只猫 趴在键盘上')
-  assert.deepEqual(收到, { path: 'C:/a.png', opts: { mode: 'caption' } })
+  const ai = build(() => service)
+  const result = await ai.describeImage('C:/a.png')
+  assert.equal(result.ok, true)
+  assert.equal(result.text, '一只猫 趴在键盘上')
+  assert.deepEqual(received, { path: 'C:/a.png', opts: { mode: 'caption' } })
 })
 
 test('本地 AI：自定义识图提示词作为 prompt 覆盖参数传下去', async () => {
-  let 收到 = null
-  const 服务 = 造服务({
+  let received = null
+  const service = makeService({
     async visionDescribe(path, opts) {
-      收到 = { path, opts }
+      received = { path, opts }
       return { ok: true, items: [{ path, text: '一只猫' }] }
     },
   })
-  const ai = 建(() => 服务)
-  const 结果 = await ai.describeImage('C:/a.png', { prompt: '  描述这张表情包  ' })
-  assert.equal(结果.ok, true)
-  assert.deepEqual(收到, { path: 'C:/a.png', opts: { mode: 'caption', prompt: '描述这张表情包' } })
+  const ai = build(() => service)
+  const result = await ai.describeImage('C:/a.png', { prompt: '  描述这张表情包  ' })
+  assert.equal(result.ok, true)
+  assert.deepEqual(received, { path: 'C:/a.png', opts: { mode: 'caption', prompt: '描述这张表情包' } })
 })
 
 test('本地 AI：服务抛错时读 lastError 转成中文提示，不把原始错误抛给调用方', async () => {
-  const 服务 = 造服务({
+  const service = makeService({
     async tts() { throw new Error('CUDA out of memory') },
   })
-  服务.lastError = { code: 'vram_exhausted', httpStatus: 507, hint: '显存不足' }
-  const ai = 建(() => 服务)
-  const 结果 = await ai.tts('晚安')
-  assert.equal(结果.ok, false)
-  assert.equal(结果.code, 'vram_exhausted')
-  assert.match(结果.hint, /显卡被别的任务占满了/)
-  assert.equal(友好提示({ httpStatus: 507 }), '显卡被别的任务占满了，等本地 AI 空下来再试。')
+  service.lastError = { code: 'vram_exhausted', httpStatus: 507, hint: '显存不足' }
+  const ai = build(() => service)
+  const result = await ai.tts('晚安')
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'vram_exhausted')
+  assert.match(result.hint, /显卡被别的任务占满了/)
+  assert.equal(friendlyHint({ httpStatus: 507 }), '显卡被别的任务占满了，等本地 AI 空下来再试。')
 })
 
 test('本地 AI：音色列表去重，兼容裸字符串数组', async () => {
-  const 服务 = 造服务({ async voices() { return ['dafeiyu', 'test_voice', 'dafeiyu'] } })
-  const ai = 建(() => 服务)
-  const 结果 = await ai.listVoices()
-  assert.equal(结果.ok, true)
-  assert.deepEqual(结果.voices, ['dafeiyu', 'test_voice'])
+  const service = makeService({ async voices() { return ['dafeiyu', 'test_voice', 'dafeiyu'] } })
+  const ai = build(() => service)
+  const result = await ai.listVoices()
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.voices, ['dafeiyu', 'test_voice'])
 })
 
 test('本地 AI：插件晚于鱼讯加载时，每次调用都能重新取到服务', async () => {
-  let 服务 = null
-  const ai = 建(() => 服务)
+  let service = null
+  const ai = build(() => service)
   assert.equal(ai.status().installed, false)
-  服务 = 造服务()
+  service = makeService()
   assert.equal(ai.status().installed, true)
   assert.equal((await ai.tts('晚安')).ok, true)
 })
 
 test('能力状态：有方法但 capabilities 为 false 时判不可用', () => {
-  const 状态 = 能力状态({ tts() {}, capabilities: { tts: false } }, 'tts', 'tts')
-  assert.equal(状态.available, false)
-  assert.equal(状态.reason, 'not_supported')
+  const status = capabilityStatus({ tts() {}, capabilities: { tts: false } }, 'tts', 'tts')
+  assert.equal(status.available, false)
+  assert.equal(status.reason, 'not_supported')
 })
 
 test('配置：语音相关字段有默认值，识图开关兼容旧布尔值', () => {
-  const 默认 = normalizeConfig({})
-  assert.equal(默认.sayVoice, 'dafeiyu')
-  assert.equal(默认.saySpeed, 1)
-  assert.equal(默认.transcribeInbound, true)
-  assert.equal(默认.asrLanguage, 'auto')
-  assert.equal(默认.describeInboundImages, 'inherit', '默认跟随本地 AI 插件')
-  assert.equal(默认.inboundImagePrompt, '', '识图提示词默认留空，实际用内置默认')
+  const theDefault = normalizeConfig({})
+  assert.equal(theDefault.sayVoice, 'dafeiyu')
+  assert.equal(theDefault.saySpeed, 1)
+  assert.equal(theDefault.transcribeInbound, true)
+  assert.equal(theDefault.asrLanguage, 'auto')
+  assert.equal(theDefault.describeInboundImages, 'inherit', '默认跟随本地 AI 插件')
+  assert.equal(theDefault.inboundImagePrompt, '', '识图提示词默认留空，实际用内置默认')
 
-  const 改过 = normalizeConfig({
+  const changed = normalizeConfig({
     sayVoice: 'test_voice', saySpeed: 9, transcribeInbound: false,
     asrLanguage: 'fr', describeInboundImages: 'off',
   })
-  assert.equal(改过.sayVoice, 'test_voice')
-  assert.equal(改过.saySpeed, 2)
-  assert.equal(改过.transcribeInbound, false)
-  assert.equal(改过.asrLanguage, 'auto')
-  assert.equal(改过.describeInboundImages, 'off')
+  assert.equal(changed.sayVoice, 'test_voice')
+  assert.equal(changed.saySpeed, 2)
+  assert.equal(changed.transcribeInbound, false)
+  assert.equal(changed.asrLanguage, 'auto')
+  assert.equal(changed.describeInboundImages, 'off')
 
   // 旧版本存的是布尔值：true → on，false → off；缺失或不认识 → inherit。
   assert.equal(normalizeConfig({ describeInboundImages: true }).describeInboundImages, 'on')
@@ -283,25 +283,25 @@ test('配置：语音相关字段有默认值，识图开关兼容旧布尔值',
 })
 
 test('配置：识图提示词留空即默认，非法值回退默认', () => {
-  assert.equal(入站识图提示词(normalizeConfig({})), 默认识图提示词, '留空时实际用内置默认')
-  assert.equal(入站识图提示词(), 默认识图提示词, '没有配置时也用内置默认')
+  assert.equal(inboundImagePrompt(normalizeConfig({})), defaultImagePrompt, '留空时实际用内置默认')
+  assert.equal(inboundImagePrompt(), defaultImagePrompt, '没有配置时也用内置默认')
 
-  const 自定义 = normalizeConfig({ inboundImagePrompt: '  看看这个表情包是什么梗  ' })
-  assert.equal(自定义.inboundImagePrompt, '看看这个表情包是什么梗', '去掉首尾空白')
-  assert.equal(入站识图提示词(自定义), '看看这个表情包是什么梗')
+  const custom = normalizeConfig({ inboundImagePrompt: '  看看这个表情包是什么梗  ' })
+  assert.equal(custom.inboundImagePrompt, '看看这个表情包是什么梗', '去掉首尾空白')
+  assert.equal(inboundImagePrompt(custom), '看看这个表情包是什么梗')
 
   // 旧配置没有这个字段：补空串，用内置默认。
-  const 旧 = normalizeConfig({ describeInboundImages: 'on' })
-  assert.equal(旧.inboundImagePrompt, '')
-  assert.equal(入站识图提示词(旧), 默认识图提示词)
+  const prev = normalizeConfig({ describeInboundImages: 'on' })
+  assert.equal(prev.inboundImagePrompt, '')
+  assert.equal(inboundImagePrompt(prev), defaultImagePrompt)
 
   // 非字符串、超长都回退默认（空串）；正好到上限的保留。
   assert.equal(normalizeConfig({ inboundImagePrompt: 123 }).inboundImagePrompt, '')
   assert.equal(normalizeConfig({ inboundImagePrompt: null }).inboundImagePrompt, '')
-  assert.equal(normalizeConfig({ inboundImagePrompt: '长'.repeat(识图提示词上限 + 1) }).inboundImagePrompt, '')
+  assert.equal(normalizeConfig({ inboundImagePrompt: '长'.repeat(imagePromptMaxLength + 1) }).inboundImagePrompt, '')
   assert.equal(
-    normalizeConfig({ inboundImagePrompt: '长'.repeat(识图提示词上限) }).inboundImagePrompt.length,
-    识图提示词上限,
+    normalizeConfig({ inboundImagePrompt: '长'.repeat(imagePromptMaxLength) }).inboundImagePrompt.length,
+    imagePromptMaxLength,
     '正好上限保留',
   )
 })

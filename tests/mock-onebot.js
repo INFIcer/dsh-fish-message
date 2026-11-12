@@ -4,21 +4,21 @@
 import http from 'node:http'
 import { WebSocketServer } from 'ws'
 
-function 读体(req) {
+function readPayload(req) {
   return new Promise((resolve) => {
-    let 文 = ''
-    req.on('data', (c) => { 文 += c })
+    let str = ''
+    req.on('data', (c) => { str += c })
     req.on('end', () => {
-      try { resolve(JSON.parse(文 || '{}')) } catch { resolve({}) }
+      try { resolve(JSON.parse(str || '{}')) } catch { resolve({}) }
     })
     req.on('error', () => resolve({}))
   })
 }
 
-function 回(res, 数据, code = 200) {
-  const 文 = JSON.stringify(数据)
+function respond(res, data, code = 200) {
+  const str = JSON.stringify(data)
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(文)
+  res.end(str)
 }
 
 export class MockOneBotServer {
@@ -27,7 +27,7 @@ export class MockOneBotServer {
     this.sent = []
     this.requests = []
     this.clients = new Set()
-    this.下一个id = 9000
+    this.nextId = 9000
     this.failSend = false
     this.server = null
     this.wss = null
@@ -39,37 +39,37 @@ export class MockOneBotServer {
 
   async start() {
     this.server = http.createServer(async (req, res) => {
-      const 体 = await 读体(req)
+      const payload = await readPayload(req)
       const action = String(req.url || '').replace(/^\//, '').split('?')[0]
-      this.requests.push({ action, body: 体 })
+      this.requests.push({ action, body: payload })
       if (action === 'get_login_info') {
-        return 回(res, { status: 'ok', retcode: 0, data: { user_id: 2983830957, nickname: '测试机器人' } })
+        return respond(res, { status: 'ok', retcode: 0, data: { user_id: 2983830957, nickname: '测试机器人' } })
       }
       if (action === 'get_friend_msg_history') {
-        const qq = String(体.user_id)
-        const 全部 = this.history.get(qq) || []
-        const 数 = Math.max(1, Math.min(500, Number(体.count) || 100))
+        const qq = String(payload.user_id)
+        const allItems = this.history.get(qq) || []
+        const number = Math.max(1, Math.min(500, Number(payload.count) || 100))
         // 模拟 NapCat：带 message_id 时，返回该条往前数（含锚点）。
-        if (体.message_id !== undefined && 体.message_id !== null && 体.message_id !== '') {
-          const 锚 = 全部.findIndex((m) => String(m.message_id) === String(体.message_id))
-          if (锚 >= 0) {
-            const 起 = Math.max(0, 锚 - 数 + 1)
-            return 回(res, { status: 'ok', retcode: 0, data: { messages: 全部.slice(起, 锚 + 1) } })
+        if (payload.message_id !== undefined && payload.message_id !== null && payload.message_id !== '') {
+          const anchor = allItems.findIndex((m) => String(m.message_id) === String(payload.message_id))
+          if (anchor >= 0) {
+            const start = Math.max(0, anchor - number + 1)
+            return respond(res, { status: 'ok', retcode: 0, data: { messages: allItems.slice(start, anchor + 1) } })
           }
         }
-        return 回(res, { status: 'ok', retcode: 0, data: { messages: 全部.slice(-数) } })
+        return respond(res, { status: 'ok', retcode: 0, data: { messages: allItems.slice(-number) } })
       }
       if (action === 'send_private_msg') {
         if (this.failSend) {
-          return 回(res, { status: 'failed', retcode: 1200, wording: '模拟发送失败：机器人离线' }, 200)
+          return respond(res, { status: 'failed', retcode: 1200, wording: '模拟发送失败：机器人离线' }, 200)
         }
-        this.sent.push(体)
-        return 回(res, { status: 'ok', retcode: 0, data: { message_id: this.下一个id++ } })
+        this.sent.push(payload)
+        return respond(res, { status: 'ok', retcode: 0, data: { message_id: this.nextId++ } })
       }
       if (action === 'get_record') {
-        return 回(res, { status: 'ok', retcode: 0, data: { file: '' } })
+        return respond(res, { status: 'ok', retcode: 0, data: { file: '' } })
       }
-      return 回(res, { status: 'failed', retcode: 404, wording: `未知动作 ${action}` }, 404)
+      return respond(res, { status: 'failed', retcode: 404, wording: `未知动作 ${action}` }, 404)
     })
     this.wss = new WebSocketServer({ server: this.server })
     this.wss.on('connection', (ws) => {
@@ -109,34 +109,34 @@ export class MockOneBotServer {
 
   /** 给所有 WebSocket 客户端推一条 OneBot 事件。 */
   broadcast(event) {
-    const 文 = JSON.stringify(event)
+    const str = JSON.stringify(event)
     for (const ws of this.clients) {
-      try { ws.send(文) } catch { /* 忽略 */ }
+      try { ws.send(str) } catch { /* 忽略 */ }
     }
     return this.clients.size
   }
 }
 
-export function 消息(id, 文本, 时间, qq = '10001') {
+export function message(id, text, time, qq = '10001') {
   return {
     message_id: Number(id),
     message_seq: Number(id),
-    time: Number(时间),
+    time: Number(time),
     user_id: Number(qq),
     message_type: 'private',
-    message: [{ type: 'text', data: { text: 文本 } }],
-    raw_message: 文本,
+    message: [{ type: 'text', data: { text: text } }],
+    raw_message: text,
     sender: { user_id: Number(qq), nickname: '主人' },
   }
 }
 
-export const 睡 = (ms) => new Promise((r) => setTimeout(r, ms))
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-export async function 等(条件, 超时 = 3000, 间隔 = 30) {
-  const 开始 = Date.now()
-  while (Date.now() - 开始 < 超时) {
-    if (await 条件()) return true
-    await 睡(间隔)
+export async function wait(condition, timeout = 3000, interval = 30) {
+  const begin = Date.now()
+  while (Date.now() - begin < timeout) {
+    if (await condition()) return true
+    await sleep(interval)
   }
   return false
 }

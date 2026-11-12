@@ -73,7 +73,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 - `health.ok = true`；
 - `health.transport.connected = true` 或 `transport.mode = "http"`（WS 关闭/连不上时）；
 - `state.bindings[0].qq = "1696117435"`；
-- `state.bindings[0].活着 = true`；
+- `state.bindings[0].alive = true`（旧键名 `活着` 仍会一并下发，兼容老前端）；
 - `state.config.onlyInsideMarkers = true`；
 - 日志里没有 `桥启动失败`。
 

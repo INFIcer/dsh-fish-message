@@ -20,75 +20,75 @@ import { basename, join } from 'node:path'
 import {
   StickerError,
   StickerStore,
-  规整标签,
-  读图片信息,
+  normalizeTags,
+  readPictureInfo,
 } from '../lib/stickers.js'
-import { 造GIF, 小PNG, 造大PNG } from './image-fixtures.js'
+import { makeGif, smallPng, makeLargePng } from './image-fixtures.js'
 import { createFishMessageApi } from '../lib/service.js'
 import { buildStickerToolDefinitions } from '../lib/tools.js'
 import { Bridge } from '../lib/bridge.js'
 
-function 造库(配置 = {}, 额外 = {}) {
+function makeStore(config = {}, extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fish-sticker-'))
-  const 库 = new StickerStore({
+  const store = new StickerStore({
     dir,
-    getConfig: () => ({ stickerMaxCount: 2000, stickerMaxMB: 1024, ...配置 }),
-    ...额外,
+    getConfig: () => ({ stickerMaxCount: 2000, stickerMaxMB: 1024, ...config }),
+    ...extra,
   })
-  return { dir, 库 }
+  return { dir, store }
 }
 
-function 写临时图(buf, 名 = 'a.gif') {
+function writeTempImage(buf, name = 'a.gif') {
   const dir = mkdtempSync(join(tmpdir(), 'fish-sticker-src-'))
-  const 文件 = join(dir, 名)
-  writeFileSync(文件, buf)
-  return 文件
+  const file = join(dir, name)
+  writeFileSync(file, buf)
+  return file
 }
 
 /** 最小 JSON Schema 校验：只覆盖工具用到的关键字，够把「声明字段」和「真实返回」对齐。 */
-function 校验(值, 模式, 路径 = '$') {
-  if (模式.type) {
-    const 实际 = Array.isArray(值) ? 'array' : (值 === null ? 'null' : typeof 值)
-    const 要 = 模式.type === 'integer' ? 'number' : 模式.type
-    assert.equal(实际, 要, 路径 + ' 类型应为 ' + 模式.type + '，实际 ' + 实际)
-    if (模式.type === 'integer') assert.ok(Number.isInteger(值), 路径 + ' 应为整数')
+function validate(value, mode, path = '$') {
+  if (mode.type) {
+    const actual = Array.isArray(value) ? 'array' : (value === null ? 'null' : typeof value)
+    const require = mode.type === 'integer' ? 'number' : mode.type
+    assert.equal(actual, require, path + ' 类型应为 ' + mode.type + '，实际 ' + actual)
+    if (mode.type === 'integer') assert.ok(Number.isInteger(value), path + ' 应为整数')
   }
-  if (模式.enum) assert.ok(模式.enum.includes(值), 路径 + ' 不在 enum 里：' + JSON.stringify(值))
-  if (Array.isArray(值) && 模式.items) {
-    值.forEach((项, i) => 校验(项, 模式.items, 路径 + '[' + i + ']'))
+  if (mode.enum) assert.ok(mode.enum.includes(value), path + ' 不在 enum 里：' + JSON.stringify(value))
+  if (Array.isArray(value) && mode.items) {
+    value.forEach((item, i) => validate(item, mode.items, path + '[' + i + ']'))
   }
-  if (值 && typeof 值 === 'object' && !Array.isArray(值) && 模式.type === 'object') {
-    for (const 键 of 模式.required || []) assert.ok(键 in 值, 路径 + ' 缺少必填字段 ' + 键)
-    for (const 键 of Object.keys(值)) {
-      const 子 = 值[键]
-      const 子模式 = 模式.properties?.[键]
-      if (!子模式) {
-        assert.notEqual(模式.additionalProperties, false, 路径 + '.' + 键 + ' 未在 schema 声明（additionalProperties:false 会拒掉整次调用）')
-        if (模式.additionalProperties && typeof 模式.additionalProperties === 'object') 校验(子, 模式.additionalProperties, 路径 + '.' + 键)
+  if (value && typeof value === 'object' && !Array.isArray(value) && mode.type === 'object') {
+    for (const key of mode.required || []) assert.ok(key in value, path + ' 缺少必填字段 ' + key)
+    for (const key of Object.keys(value)) {
+      const child = value[key]
+      const submode = mode.properties?.[key]
+      if (!submode) {
+        assert.notEqual(mode.additionalProperties, false, path + '.' + key + ' 未在 schema 声明（additionalProperties:false 会拒掉整次调用）')
+        if (mode.additionalProperties && typeof mode.additionalProperties === 'object') validate(child, mode.additionalProperties, path + '.' + key)
         continue
       }
-      if (子 === undefined) continue
-      校验(子, 子模式, 路径 + '.' + 键)
+      if (child === undefined) continue
+      validate(child, submode, path + '.' + key)
     }
   }
 }
 
-function 建表情api(库, getConfig = () => ({})) {
+function makeStickerApi(store, getConfig = () => ({})) {
   return createFishMessageApi({
     bridge: { outbox: { pending: () => 0 } },
-    stickers: 库,
+    stickers: store,
     getConfig,
   })
 }
 
-function 取工具(名, api, getConfig = () => ({})) {
-  return buildStickerToolDefinitions({ api, getConfig }).find((x) => x.name === 名)
+function getTool(name, api, getConfig = () => ({})) {
+  return buildStickerToolDefinitions({ api, getConfig }).find((x) => x.name === name)
 }
 test('入库：复制进 gif/、字段完整、GIF 字节原样保留', () => {
-  const { dir, 库 } = 造库()
-  const gif = 造GIF({ width: 3, height: 4, frames: 2, delay: 15 })
-  const 源 = 写临时图(gif, '猫猫.gif')
-  const r = 库.save(源, { tags: ['猫', '可爱'], desc: '一只猫', source: '测试' })
+  const { dir, store } = makeStore()
+  const gif = makeGif({ width: 3, height: 4, frames: 2, delay: 15 })
+  const source = writeTempImage(gif, '猫猫.gif')
+  const r = store.save(source, { tags: ['猫', '可爱'], desc: '一只猫', source: '测试' })
 
   assert.equal(r.ok, true)
   assert.equal(r.created, true)
@@ -108,131 +108,131 @@ test('入库：复制进 gif/、字段完整、GIF 字节原样保留', () => {
   // 文件按字节复制，动图不会被转码（GIF 保留）。
   assert.deepEqual(readFileSync(join(dir, 'gif', basename(r.entry.file))), gif)
   assert.ok(statSync(join(dir, 'index.json')).isFile())
-  assert.equal(库.stats().count, 1)
+  assert.equal(store.stats().count, 1)
 })
 
 test('去重：同 sha256 不复制新文件，只合并标签/描述', () => {
-  const { dir, 库 } = 造库()
-  const gif = 造GIF()
-  const 第一次 = 库.save(gif, { name: 'a.gif', tags: ['猫'], desc: '旧的' })
-  const 第二次 = 库.save(gif, { name: '换名.gif', tags: ['可爱', '猫'], desc: '新的' })
+  const { dir, store } = makeStore()
+  const gif = makeGif()
+  const firstRun = store.save(gif, { name: 'a.gif', tags: ['猫'], desc: '旧的' })
+  const secondRun = store.save(gif, { name: '换名.gif', tags: ['可爱', '猫'], desc: '新的' })
 
-  assert.equal(第二次.created, false)
-  assert.equal(第二次.merged, true)
-  assert.equal(第二次.entry.id, 第一次.entry.id)
-  assert.deepEqual(第二次.entry.tags, ['猫', '可爱'])
+  assert.equal(secondRun.created, false)
+  assert.equal(secondRun.merged, true)
+  assert.equal(secondRun.entry.id, firstRun.entry.id)
+  assert.deepEqual(secondRun.entry.tags, ['猫', '可爱'])
   // 已有描述不会被覆盖。
-  assert.equal(第二次.entry.desc, '旧的')
-  assert.equal(库.stats().count, 1)
+  assert.equal(secondRun.entry.desc, '旧的')
+  assert.equal(store.stats().count, 1)
   assert.equal(readdirSync(join(dir, 'gif')).length, 1)
 })
 
 test('搜索 / 标签 / id / 文件名 / 模糊名解析', () => {
-  const { 库 } = 造库()
-  const 思考 = 库.save(小PNG, { name: 'thinking.png', tags: ['思考', 'DeepSeek娘'], desc: '歪头思考' }).entry
-  const 哈欠 = 库.save(造GIF(), { name: 'yawn.gif', tags: ['打哈欠', '起床'], desc: '打哈欠' }).entry
+  const { store } = makeStore()
+  const think = store.save(smallPng, { name: 'thinking.png', tags: ['思考', 'DeepSeek娘'], desc: '歪头思考' }).entry
+  const yawn = store.save(makeGif(), { name: 'yawn.gif', tags: ['打哈欠', '起床'], desc: '打哈欠' }).entry
 
-  assert.equal(库.list({ q: '歪头' }).total, 1)
-  assert.equal(库.list({ q: '起床' }).total, 1)
-  assert.equal(库.list({ tag: '#打哈欠' }).total, 1)
-  assert.equal(库.list({ tag: 'DeepSeek娘' }).total, 1)
-  assert.equal(库.list({}).total, 2)
-  assert.equal(库.list({ limit: 1 }).items.length, 1)
+  assert.equal(store.list({ q: '歪头' }).total, 1)
+  assert.equal(store.list({ q: '起床' }).total, 1)
+  assert.equal(store.list({ tag: '#打哈欠' }).total, 1)
+  assert.equal(store.list({ tag: 'DeepSeek娘' }).total, 1)
+  assert.equal(store.list({}).total, 2)
+  assert.equal(store.list({ limit: 1 }).items.length, 1)
 
-  assert.equal(库.get(思考.id).id, 思考.id)
-  assert.equal(库.get('thinking.png').id, 思考.id)
-  assert.equal(库.get('thinking').id, 思考.id)
-  assert.equal(库.get('#打哈欠').id, 哈欠.id)
-  assert.equal(库.get('哈欠').id, 哈欠.id)
-  assert.equal(库.get('完全不存在的表情'), null)
+  assert.equal(store.get(think.id).id, think.id)
+  assert.equal(store.get('thinking.png').id, think.id)
+  assert.equal(store.get('thinking').id, think.id)
+  assert.equal(store.get('#打哈欠').id, yawn.id)
+  assert.equal(store.get('哈欠').id, yawn.id)
+  assert.equal(store.get('完全不存在的表情'), null)
 })
 
 test('更新：标签/描述/改名，旧文件路径失效', () => {
-  const { dir, 库 } = 造库()
-  const 条目 = 库.save(小PNG, { name: 'a.png', tags: ['旧'] }).entry
-  const 旧文件 = 条目.path
+  const { dir, store } = makeStore()
+  const entry = store.save(smallPng, { name: 'a.png', tags: ['旧'] }).entry
+  const legacyFile = entry.path
 
-  const 改 = 库.update(条目.id, { tags: ['新', '标签'], desc: '新描述', name: '新名字.png' })
-  assert.deepEqual(改.tags, ['新', '标签'])
-  assert.equal(改.desc, '新描述')
-  assert.equal(basename(改.file), '新名字.png')
-  assert.notEqual(改.path, 旧文件)
-  assert.equal(statSync(改.path).isFile(), true)
-  assert.throws(() => statSync(旧文件), /ENOENT/)
+  const change = store.update(entry.id, { tags: ['新', '标签'], desc: '新描述', name: '新名字.png' })
+  assert.deepEqual(change.tags, ['新', '标签'])
+  assert.equal(change.desc, '新描述')
+  assert.equal(basename(change.file), '新名字.png')
+  assert.notEqual(change.path, legacyFile)
+  assert.equal(statSync(change.path).isFile(), true)
+  assert.throws(() => statSync(legacyFile), /ENOENT/)
 
   // 重名要报错，不覆盖（内容不同，避免被 sha 去重）。
-  库.save(造大PNG(2048), { name: 'b.png' })
-  assert.throws(() => 库.update(条目.id, { name: 'b.png' }), (error) => {
+  store.save(makeLargePng(2048), { name: 'b.png' })
+  assert.throws(() => store.update(entry.id, { name: 'b.png' }), (error) => {
     assert.equal(error.code, 'sticker_bad_request')
     return true
   })
 })
 
 test('删除：默认删文件；removeFile=false 保留文件', () => {
-  const { 库 } = 造库()
-  const 甲 = 库.save(小PNG, { name: 'a.png' }).entry
-  const 甲文件 = 甲.path
-  库.delete(甲.id)
-  assert.equal(库.get(甲.id), null)
-  assert.throws(() => statSync(甲文件), /ENOENT/)
-  assert.throws(() => 库.delete(甲.id), (error) => {
+  const { store } = makeStore()
+  const alpha = store.save(smallPng, { name: 'a.png' }).entry
+  const alphaFile = alpha.path
+  store.delete(alpha.id)
+  assert.equal(store.get(alpha.id), null)
+  assert.throws(() => statSync(alphaFile), /ENOENT/)
+  assert.throws(() => store.delete(alpha.id), (error) => {
     assert.equal(error.code, 'sticker_not_found')
     return true
   })
 
-  const 乙 = 库.save(造GIF(), { name: 'b.gif' }).entry
-  const 乙文件 = 乙.path
-  库.delete(乙.id, { removeFile: false })
-  assert.equal(库.get(乙.id), null)
-  assert.equal(statSync(乙文件).isFile(), true)
+  const beta = store.save(makeGif(), { name: 'b.gif' }).entry
+  const betaFile = beta.path
+  store.delete(beta.id, { removeFile: false })
+  assert.equal(store.get(beta.id), null)
+  assert.equal(statSync(betaFile).isFile(), true)
 })
 
 test('bump：用量与最近使用时间，列表按用量排序', () => {
-  const { 库 } = 造库()
-  const 甲 = 库.save(小PNG, { name: 'a.png' }).entry
-  const 乙 = 库.save(造GIF(), { name: 'b.gif' }).entry
+  const { store } = makeStore()
+  const alpha = store.save(smallPng, { name: 'a.png' }).entry
+  const beta = store.save(makeGif(), { name: 'b.gif' }).entry
 
-  库.bump(甲.id)
-  库.bump(甲.id)
-  const 后 = 库.bump(乙.id)
+  store.bump(alpha.id)
+  store.bump(alpha.id)
+  const after = store.bump(beta.id)
 
-  assert.equal(库.get(甲.id).used_count, 2)
-  assert.ok(库.get(甲.id).last_used_at)
-  assert.equal(后.used_count, 1)
-  const 列表 = 库.list({}).items
-  assert.equal(列表[0].id, 甲.id)
-  assert.equal(库.bump('不存在'), null)
+  assert.equal(store.get(alpha.id).used_count, 2)
+  assert.ok(store.get(alpha.id).last_used_at)
+  assert.equal(after.used_count, 1)
+  const list = store.list({}).items
+  assert.equal(list[0].id, alpha.id)
+  assert.equal(store.bump('不存在'), null)
 })
 
 test('上限：条数 / 总大小，超限明确报错且不落盘', () => {
-  const 条数库 = 造库({ stickerMaxCount: 1 })
-  条数库.库.save(小PNG, { name: 'a.png' })
-  assert.throws(() => 条数库.库.save(造GIF(), { name: 'b.gif' }), (error) => {
+  const itemNumberStore = makeStore({ stickerMaxCount: 1 })
+  itemNumberStore.store.save(smallPng, { name: 'a.png' })
+  assert.throws(() => itemNumberStore.store.save(makeGif(), { name: 'b.gif' }), (error) => {
     assert.ok(error instanceof StickerError)
     assert.equal(error.code, 'sticker_limit')
     assert.match(error.hint, /清理/)
     return true
   })
-  assert.equal(条数库.库.stats().count, 1)
-  assert.equal(readdirSync(join(条数库.dir, 'gif')).length, 0)
+  assert.equal(itemNumberStore.store.stats().count, 1)
+  assert.equal(readdirSync(join(itemNumberStore.dir, 'gif')).length, 0)
 
-  const 大小库 = 造库({ stickerMaxMB: 1 })
-  assert.throws(() => 大小库.库.save(造大PNG(1024 * 1024 + 1024), { name: 'big.png' }), (error) => {
+  const sizeStore = makeStore({ stickerMaxMB: 1 })
+  assert.throws(() => sizeStore.store.save(makeLargePng(1024 * 1024 + 1024), { name: 'big.png' }), (error) => {
     assert.equal(error.code, 'sticker_limit')
     return true
   })
-  assert.equal(大小库.库.stats().count, 0)
+  assert.equal(sizeStore.store.stats().count, 0)
 })
 
 test('导入：Python 表情库格式 → 本库字段，按 sha 去重，路径穿越拒绝', () => {
-  const 源 = mkdtempSync(join(tmpdir(), 'fish-sticker-import-'))
-  mkdirSync(join(源, 'gif'))
-  mkdirSync(join(源, 'img'))
-  const gif = 造GIF({ frames: 2, delay: 258 })
-  const png = 小PNG
-  writeFileSync(join(源, 'gif', 'sleep.gif'), gif)
-  writeFileSync(join(源, 'img', 'art.png'), png)
-  writeFileSync(join(源, 'index.json'), JSON.stringify({
+  const source = mkdtempSync(join(tmpdir(), 'fish-sticker-import-'))
+  mkdirSync(join(source, 'gif'))
+  mkdirSync(join(source, 'img'))
+  const gif = makeGif({ frames: 2, delay: 258 })
+  const png = smallPng
+  writeFileSync(join(source, 'gif', 'sleep.gif'), gif)
+  writeFileSync(join(source, 'img', 'art.png'), png)
+  writeFileSync(join(source, 'index.json'), JSON.stringify({
     version: 1,
     stickers: [
       {
@@ -264,35 +264,35 @@ test('导入：Python 表情库格式 → 本库字段，按 sha 去重，路径
     ],
   }))
 
-  const { dir, 库 } = 造库()
-  const 第一次 = 库.importFrom(源)
-  assert.equal(第一次.ok, true)
-  assert.equal(第一次.total, 3)
-  assert.equal(第一次.imported, 2)
-  assert.equal(第一次.skipped, 1)
-  assert.match(第一次.errors[0].error, /超出表情库/)
+  const { dir, store } = makeStore()
+  const firstRun = store.importFrom(source)
+  assert.equal(firstRun.ok, true)
+  assert.equal(firstRun.total, 3)
+  assert.equal(firstRun.imported, 2)
+  assert.equal(firstRun.skipped, 1)
+  assert.match(firstRun.errors[0].error, /超出表情库/)
 
-  const 睡 = 库.get('abc123def456')
-  assert.equal(睡.type, 'gif')
-  assert.equal(睡.file, 'gif/sleep.gif')
-  assert.equal(睡.width, 180)
-  assert.equal(睡.frames, 62)
-  assert.equal(睡.duration_s, 5.16)
-  assert.equal(睡.added_at, '2026-11-08T16:18:26')
-  assert.equal(睡.source, 'QQ 主人发送')
+  const sleep = store.get('abc123def456')
+  assert.equal(sleep.type, 'gif')
+  assert.equal(sleep.file, 'gif/sleep.gif')
+  assert.equal(sleep.width, 180)
+  assert.equal(sleep.frames, 62)
+  assert.equal(sleep.duration_s, 5.16)
+  assert.equal(sleep.added_at, '2026-11-08T16:18:26')
+  assert.equal(sleep.source, 'QQ 主人发送')
   assert.deepEqual(readFileSync(join(dir, 'gif', 'sleep.gif')), gif)
 
-  const 画 = 库.get('jpg000000001')
-  assert.equal(画.type, 'img')
-  assert.match(画.file, /^img\//)
-  assert.equal(画.frames, undefined)
+  const draw = store.get('jpg000000001')
+  assert.equal(draw.type, 'img')
+  assert.match(draw.file, /^img\//)
+  assert.equal(draw.frames, undefined)
 
-  const 第二次 = 库.importFrom(源)
-  assert.equal(第二次.imported, 0)
-  assert.equal(第二次.merged, 2)
-  assert.equal(库.stats().count, 2)
+  const secondRun = store.importFrom(source)
+  assert.equal(secondRun.imported, 0)
+  assert.equal(secondRun.merged, 2)
+  assert.equal(store.stats().count, 2)
 
-  assert.throws(() => 库.importFrom(join(源, '不存在')), (error) => {
+  assert.throws(() => store.importFrom(join(source, '不存在')), (error) => {
     assert.equal(error.code, 'sticker_bad_request')
     return true
   })
@@ -300,114 +300,114 @@ test('导入：Python 表情库格式 → 本库字段，按 sha 去重，路径
 
 test('清理：删未使用、去重、清空最近图片（只删 qq-image-*）', () => {
   const inbox = mkdtempSync(join(tmpdir(), 'fish-sticker-inbox-'))
-  writeFileSync(join(inbox, 'qq-image-1-1-1.gif'), 造GIF())
-  writeFileSync(join(inbox, 'qq-image-2-1-2.png'), 小PNG)
+  writeFileSync(join(inbox, 'qq-image-1-1-1.gif'), makeGif())
+  writeFileSync(join(inbox, 'qq-image-2-1-2.png'), smallPng)
   writeFileSync(join(inbox, '别删我.txt'), 'x')
-  const { dir, 库 } = 造库({}, { inboxDir: inbox })
-  const 甲 = 库.save(小PNG, { name: 'a.png' }).entry
-  const 乙 = 库.save(造GIF(), { name: 'b.gif' }).entry
-  库.bump(甲.id)
+  const { dir, store } = makeStore({}, { inboxDir: inbox })
+  const alpha = store.save(smallPng, { name: 'a.png' }).entry
+  const beta = store.save(makeGif(), { name: 'b.gif' }).entry
+  store.bump(alpha.id)
 
-  const 未用 = 库.清理未使用()
-  assert.equal(未用.removed, 1)
-  assert.equal(库.stats().count, 1)
-  assert.equal(库.get(乙.id), null)
+  const unused = store.cleanupUnused()
+  assert.equal(unused.removed, 1)
+  assert.equal(store.stats().count, 1)
+  assert.equal(store.get(beta.id), null)
 
   // 手工造一条重复 sha 的条目（正常 save 会去重），验证去重清理。
-  const 索引文件 = join(dir, 'index.json')
-  const 盘 = JSON.parse(readFileSync(索引文件, 'utf8'))
-  const 复制 = { ...盘.stickers[0], id: 'dup000000001', file: 'img/dup.png' }
-  writeFileSync(join(dir, 'img', 'dup.png'), 小PNG)
-  盘.stickers.push(复制)
-  writeFileSync(索引文件, JSON.stringify(盘))
-  const 重开 = new StickerStore({ dir, getConfig: () => ({}) })
-  assert.equal(重开.stats().count, 2)
-  const 去重 = 重开.清理重复()
-  assert.equal(去重.removed, 1)
-  assert.equal(重开.stats().count, 1)
+  const indexFile = join(dir, 'index.json')
+  const disk = JSON.parse(readFileSync(indexFile, 'utf8'))
+  const copy = { ...disk.stickers[0], id: 'dup000000001', file: 'img/dup.png' }
+  writeFileSync(join(dir, 'img', 'dup.png'), smallPng)
+  disk.stickers.push(copy)
+  writeFileSync(indexFile, JSON.stringify(disk))
+  const reopen = new StickerStore({ dir, getConfig: () => ({}) })
+  assert.equal(reopen.stats().count, 2)
+  const dedup = reopen.cleanupDuplicates()
+  assert.equal(dedup.removed, 1)
+  assert.equal(reopen.stats().count, 1)
 
-  const 最近 = 库.recentInbox(10)
-  assert.equal(最近.length, 2)
-  const 清 = 库.清理接收目录()
-  assert.equal(清.removed, 2)
+  const recent = store.recentInbox(10)
+  assert.equal(recent.length, 2)
+  const clear = store.cleanupInbox()
+  assert.equal(clear.removed, 2)
   assert.equal(readdirSync(inbox).includes('别删我.txt'), true)
 })
 
 test('清理过期缓存：只删过期的 qq-image-* / qq-voice-*，表情库与其它文件不动', () => {
   const inbox = mkdtempSync(join(tmpdir(), 'fish-inbox-ttl-'))
-  const { dir, 库 } = 造库({}, { inboxDir: inbox })
-  const 旧图 = join(inbox, 'qq-image-old.png')
-  const 旧语音 = join(inbox, 'qq-voice-old.wav')
-  const 新图 = join(inbox, 'qq-image-new.png')
-  const 别的 = join(inbox, '别删我.txt')
-  for (const 路径 of [旧图, 旧语音, 新图]) writeFileSync(路径, 小PNG)
-  writeFileSync(别的, 'x')
-  const 三十天前 = new Date(Date.now() - 30 * 24 * 3600 * 1000)
-  utimesSync(旧图, 三十天前, 三十天前)
-  utimesSync(旧语音, 三十天前, 三十天前)
+  const { dir, store } = makeStore({}, { inboxDir: inbox })
+  const prevImage = join(inbox, 'qq-image-old.png')
+  const prevVoice = join(inbox, 'qq-voice-old.wav')
+  const nextImage = join(inbox, 'qq-image-new.png')
+  const other = join(inbox, '别删我.txt')
+  for (const path of [prevImage, prevVoice, nextImage]) writeFileSync(path, smallPng)
+  writeFileSync(other, 'x')
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000)
+  utimesSync(prevImage, thirtyDaysAgo, thirtyDaysAgo)
+  utimesSync(prevVoice, thirtyDaysAgo, thirtyDaysAgo)
 
   // 表情库里的文件不能被当成缓存删掉。
-  const 条目 = 库.save(小PNG, { name: 'keep.png' }).entry
-  const 库文件 = join(dir, 条目.file)
+  const entry = store.save(smallPng, { name: 'keep.png' }).entry
+  const storeFile = join(dir, entry.file)
 
-  const 结果 = 库.清理过期缓存(14 * 24 * 3600 * 1000)
-  assert.equal(结果.removed, 2)
-  assert.ok(结果.freedBytes > 0)
+  const result = store.cleanupExpireCache(14 * 24 * 3600 * 1000)
+  assert.equal(result.removed, 2)
+  assert.ok(result.freedBytes > 0)
   assert.deepEqual(readdirSync(inbox).sort(), ['qq-image-new.png', '别删我.txt'].sort())
-  assert.equal(existsSync(库文件), true)
-  assert.equal(库.stats().count, 1)
+  assert.equal(existsSync(storeFile), true)
+  assert.equal(store.stats().count, 1)
 
   // 保留期算错（0/负数）时什么都不删，避免误清空整个缓存。
-  assert.equal(库.清理过期缓存(0).removed, 0)
-  assert.equal(库.清理过期缓存(-1).removed, 0)
+  assert.equal(store.cleanupExpireCache(0).removed, 0)
+  assert.equal(store.cleanupExpireCache(-1).removed, 0)
   assert.equal(readdirSync(inbox).length, 2)
 })
 
 test('标签与图片头解析：中文/分隔符/去重；PNG 尺寸', () => {
-  assert.deepEqual(规整标签('猫, 可爱、#猫#新'), ['猫', '可爱', '新'])
-  assert.deepEqual(规整标签(['  ', 'a', 'A']), ['a'])
-  const 信息 = 读图片信息(小PNG)
-  assert.equal(信息.type, 'img')
-  assert.equal(信息.width, 1)
-  assert.equal(信息.height, 1)
-  assert.equal(读图片信息(Buffer.from('not an image')), null)
+  assert.deepEqual(normalizeTags('猫, 可爱、#猫#新'), ['猫', '可爱', '新'])
+  assert.deepEqual(normalizeTags(['  ', 'a', 'A']), ['a'])
+  const info = readPictureInfo(smallPng)
+  assert.equal(info.type, 'img')
+  assert.equal(info.width, 1)
+  assert.equal(info.height, 1)
+  assert.equal(readPictureInfo(Buffer.from('not an image')), null)
 })
 
 test('fish.message 服务：stickers.list/save/get/send 与错误码', async () => {
-  const { 库 } = 造库()
-  const 调用 = []
-  const 桥 = {
+  const { store } = makeStore()
+  const call = []
+  const bridge = {
     outbox: { pending: () => 0 },
-    async sendOutbound(qq, 段们, 选项) {
-      调用.push({ qq, 段们, 选项 })
+    async sendOutbound(qq, segments, options) {
+      call.push({ qq, segments, options })
       return { ok: true, sent: true, queued: false, pending: 0 }
     },
   }
   const api = createFishMessageApi({
-    bridge: 桥,
-    stickers: 库,
+    bridge: bridge,
+    stickers: store,
     getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }),
   })
   assert.equal(api.capabilities().stickers, true)
 
-  const 图 = 写临时图(造GIF(), 'wa.gif')
-  const 存 = await api.stickers.save(图, { tags: ['晚安'], desc: '打哈欠' })
-  assert.equal(存.ok, true)
-  assert.equal(存.created, true)
+  const image = writeTempImage(makeGif(), 'wa.gif')
+  const saved = await api.stickers.save(image, { tags: ['晚安'], desc: '打哈欠' })
+  assert.equal(saved.ok, true)
+  assert.equal(saved.created, true)
 
-  const 列表 = await api.stickers.list({ tag: '#晚安' })
-  assert.equal(列表.total, 1)
-  assert.equal(列表.items[0].id, 存.entry.id)
+  const list = await api.stickers.list({ tag: '#晚安' })
+  assert.equal(list.total, 1)
+  assert.equal(list.items[0].id, saved.entry.id)
 
-  const 取 = await api.stickers.get('wa')
-  assert.equal(取.id, 存.entry.id)
+  const get = await api.stickers.get('wa')
+  assert.equal(get.id, saved.entry.id)
 
-  const 发 = await api.stickers.send('10001', '#晚安')
-  assert.equal(发.sent, true)
-  assert.equal(发.sticker.id, 存.entry.id, 'send 返回实际解析到的条目')
-  assert.equal(调用[0].qq, '10001')
-  assert.equal(调用[0].段们[0].type, 'image')
-  assert.equal(调用[0].段们[0].data.stickerId, 存.entry.id)
+  const send = await api.stickers.send('10001', '#晚安')
+  assert.equal(send.sent, true)
+  assert.equal(send.sticker.id, saved.entry.id, 'send 返回实际解析到的条目')
+  assert.equal(call[0].qq, '10001')
+  assert.equal(call[0].segments[0].type, 'image')
+  assert.equal(call[0].segments[0].data.stickerId, saved.entry.id)
 
   await assert.rejects(() => api.stickers.get('根本没有'), (error) => {
     assert.equal(error.code, 'fish_message_sticker_not_found')
@@ -421,171 +421,171 @@ test('fish.message 服务：stickers.list/save/get/send 与错误码', async () 
 })
 
 test('表情工具：fish_sticker_list / fish_sticker_send / fish_sticker_save 注册、执行、不含 base64', async () => {
-  const { 库 } = 造库()
-  const 调用 = []
-  const 桥 = {
+  const { store } = makeStore()
+  const call = []
+  const bridge = {
     outbox: { pending: () => 0 },
-    async sendOutbound(qq, 段们) {
-      调用.push({ qq, 段们 })
+    async sendOutbound(qq, segments) {
+      call.push({ qq, segments })
       return { ok: true, sent: false, queued: true, pending: 1 }
     },
   }
   const api = createFishMessageApi({
-    bridge: 桥,
-    stickers: 库,
+    bridge: bridge,
+    stickers: store,
     getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }),
   })
-  库.save(造GIF(), { name: '晚安.gif', tags: ['晚安'] })
+  store.save(makeGif(), { name: '晚安.gif', tags: ['晚安'] })
 
-  const 定义 = buildStickerToolDefinitions({ api, getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }) })
-  assert.deepEqual(定义.map((x) => x.name), ['fish_sticker_list', 'fish_sticker_send', 'fish_sticker_save'])
+  const definition = buildStickerToolDefinitions({ api, getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }) })
+  assert.deepEqual(definition.map((x) => x.name), ['fish_sticker_list', 'fish_sticker_send', 'fish_sticker_save'])
 
-  const 列表 = await 定义[0].execute({ tag: '#晚安' })
-  assert.equal(列表.ok, true)
-  assert.equal(列表.total, 1)
-  assert.equal(JSON.stringify(列表).includes('base64'), false)
+  const list = await definition[0].execute({ tag: '#晚安' })
+  assert.equal(list.ok, true)
+  assert.equal(list.total, 1)
+  assert.equal(JSON.stringify(list).includes('base64'), false)
 
-  const 发 = await 定义[1].execute({ name: '晚安', count: 2 })
-  assert.equal(发.ok, true)
-  assert.equal(发.qq, '10001')
-  assert.equal(发.count, 2)
-  assert.equal(发.queued, true)
-  assert.equal(调用.length, 2)
-  assert.equal(JSON.stringify(发).includes('base64'), false)
+  const send = await definition[1].execute({ name: '晚安', count: 2 })
+  assert.equal(send.ok, true)
+  assert.equal(send.qq, '10001')
+  assert.equal(send.count, 2)
+  assert.equal(send.queued, true)
+  assert.equal(call.length, 2)
+  assert.equal(JSON.stringify(send).includes('base64'), false)
 
   // 标签命中多个时按用量轮换：返回的 id/file 必须是真正发出去的那条，而不是第一次解析的。
-  库.save(造GIF({ frames: 5 }), { name: '晚安2.gif', tags: ['晚安'] })
-  const 实发 = []
-  const 桥2 = {
+  store.save(makeGif({ frames: 5 }), { name: '晚安2.gif', tags: ['晚安'] })
+  const actual = []
+  const bridge2 = {
     outbox: { pending: () => 0 },
-    async sendOutbound(qq, 段们) {
-      实发.push({ qq, 段们 })
-      库.bump(段们[0].data.stickerId)
+    async sendOutbound(qq, segments) {
+      actual.push({ qq, segments })
+      store.bump(segments[0].data.stickerId)
       return { ok: true, sent: true, queued: false, pending: 0 }
     },
   }
   const api2 = createFishMessageApi({
-    bridge: 桥2,
-    stickers: 库,
+    bridge: bridge2,
+    stickers: store,
     getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }),
   })
-  const 定义2 = buildStickerToolDefinitions({ api: api2, getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }) })
-  const 轮换 = await 定义2[1].execute({ name: '#晚安', count: 2 })
-  assert.equal(轮换.ok, true)
-  assert.equal(实发.length, 2)
-  assert.notEqual(实发[0].段们[0].data.stickerId, 实发[1].段们[0].data.stickerId, '按用量应轮到不同表情')
-  assert.deepEqual(轮换.stickers.map((x) => x.id), 实发.map((x) => x.段们[0].data.stickerId))
-  assert.deepEqual(轮换.stickers.map((x) => x.file), 实发.map((x) => 库.get(x.段们[0].data.stickerId).file))
+  const definition2 = buildStickerToolDefinitions({ api: api2, getConfig: () => ({ bindings: [{ qq: '10001', enabled: true }] }) })
+  const rotate = await definition2[1].execute({ name: '#晚安', count: 2 })
+  assert.equal(rotate.ok, true)
+  assert.equal(actual.length, 2)
+  assert.notEqual(actual[0].segments[0].data.stickerId, actual[1].segments[0].data.stickerId, '按用量应轮到不同表情')
+  assert.deepEqual(rotate.stickers.map((x) => x.id), actual.map((x) => x.segments[0].data.stickerId))
+  assert.deepEqual(rotate.stickers.map((x) => x.file), actual.map((x) => store.get(x.segments[0].data.stickerId).file))
 
-  const 找不到 = await 定义[1].execute({ name: '不存在' })
-  assert.equal(找不到.ok, false)
-  assert.equal(找不到.code, 'fish_message_sticker_not_found')
+  const notFound = await definition[1].execute({ name: '不存在' })
+  assert.equal(notFound.ok, false)
+  assert.equal(notFound.code, 'fish_message_sticker_not_found')
 
   // 换一份字节不同的 GIF，避免命中前面那条的表情（同 sha256 会走去重）。
-  const 存 = await 定义[2].execute({ path: 写临时图(造GIF({ frames: 3 }), '存入.gif'), tags: ['入库'] })
-  assert.equal(存.ok, true)
-  assert.equal(存.created, true)
-  assert.equal(存.entry.source, 'agent')
-  assert.equal(JSON.stringify(存).includes('base64'), false)
+  const saved = await definition[2].execute({ path: writeTempImage(makeGif({ frames: 3 }), '存入.gif'), tags: ['入库'] })
+  assert.equal(saved.ok, true)
+  assert.equal(saved.created, true)
+  assert.equal(saved.entry.source, 'agent')
+  assert.equal(JSON.stringify(saved).includes('base64'), false)
 
   // 注册：宿主有 ctx.tools 时拿到两个定义，卸载时摘掉。
-  const 注册表 = new Map()
+  const registerTable = new Map()
   const ctx = {
     tools: {
-      register(d) { 注册表.set(d.name, d); return () => 注册表.delete(d.name) },
+      register(d) { registerTable.set(d.name, d); return () => registerTable.delete(d.name) },
     },
   }
   const { registerStickerTools } = await import('../lib/tools.js')
-  const 停 = registerStickerTools(ctx, { api, getConfig: () => ({ bindings: [] }) })
-  assert.deepEqual([...注册表.keys()], ['fish_sticker_list', 'fish_sticker_send', 'fish_sticker_save'])
-  停()
-  assert.equal(注册表.size, 0)
+  const stop = registerStickerTools(ctx, { api, getConfig: () => ({ bindings: [] }) })
+  assert.deepEqual([...registerTable.keys()], ['fish_sticker_list', 'fish_sticker_send', 'fish_sticker_save'])
+  stop()
+  assert.equal(registerTable.size, 0)
 })
 
 test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时只记错误不刷会话', async () => {
-  const { 库 } = 造库()
-  const 条目 = 库.save(造GIF(), { name: '晚安.gif', tags: ['晚安'] }).entry
-  const 发出 = []
-  const 通知 = []
-  const 配置 = {
+  const { store } = makeStore()
+  const entry = store.save(makeGif(), { name: '晚安.gif', tags: ['晚安'] }).entry
+  const emitted = []
+  const notify = []
+  const config = {
     bindings: [{ qq: '10001', session: 'session-b', name: '主人', enabled: true }],
     onlyInsideMarkers: true,
     maxImageMB: 10,
     reorderBufferMs: 0,
     autoSaveStickers: false,
   }
-  const 错记录 = []
-  const 存储 = {
+  const errorRecord = []
+  const storage = {
     getWatermark: () => null,
     setWatermark() {},
     hasSeen: () => false,
     markSeen() {},
-    noteError(文) { 错记录.push(String(文 || '')) },
+    noteError(str) { errorRecord.push(String(str || '')) },
     noteReceived() {},
     noteDelivered() {},
     recordEvent() {},
     save() {},
     snapshot: () => ({ watermarks: {}, stats: {}, recent: [] }),
   }
-  const 出站 = { expire: () => 0, next: () => null, pending: () => 0, markSent: () => true }
-  const 传输 = {
+  const outbound = { expire: () => 0, next: () => null, pending: () => 0, markSent: () => true }
+  const transport = {
     getStatus: () => ({ mode: 'http', connected: false }),
-    async sendMessage(qq, 段们) { 发出.push({ qq, 段们 }) },
+    async sendMessage(qq, segments) { emitted.push({ qq, segments }) },
     async fetchHistory() { return [] },
   }
-  const 投递 = { async deliver(包) { 通知.push(包); return { ok: true } } }
+  const deliver = { async deliver(thePackage) { notify.push(thePackage); return { ok: true } } }
   const voice = {
     async fetchImage() {
-      const 目录 = mkdtempSync(join(tmpdir(), 'fish-sticker-inbound-'))
-      const 路径 = join(目录, 'qq-image-1-1-1.gif')
-      writeFileSync(路径, 造GIF({ frames: 3, delay: 5 }))
-      return { base64: '', mime: 'image/gif', path: 路径, ext: '.gif' }
+      const dir = mkdtempSync(join(tmpdir(), 'fish-sticker-inbound-'))
+      const path = join(dir, 'qq-image-1-1-1.gif')
+      writeFileSync(path, makeGif({ frames: 3, delay: 5 }))
+      return { base64: '', mime: 'image/gif', path: path, ext: '.gif' }
     },
   }
   const bridge = new Bridge({
-    getConfig: () => 配置,
-    transport: 传输,
-    store: 存储,
+    getConfig: () => config,
+    transport: transport,
+    store: storage,
     logger: null,
     voice,
-    delivery: 投递,
-    outbox: 出站,
-    stickers: 库,
+    delivery: deliver,
+    outbox: outbound,
+    stickers: store,
     autoTimers: false,
   })
   bridge.running = true
 
   await bridge.deliverAssistantTurn('session-b', '[QQ]看 [表情:晚安][/QQ]')
-  assert.equal(发出.length, 2, '文字和表情各发一次')
-  assert.equal(发出[0].qq, '10001')
-  assert.equal(发出[0].段们[0].type, 'text')
-  assert.equal(发出[1].段们[0].type, 'image')
-  assert.match(发出[1].段们[0].data.file, /^base64:\/\//)
-  assert.equal(库.get(条目.id).used_count, 1)
+  assert.equal(emitted.length, 2, '文字和表情各发一次')
+  assert.equal(emitted[0].qq, '10001')
+  assert.equal(emitted[0].segments[0].type, 'text')
+  assert.equal(emitted[1].segments[0].type, 'image')
+  assert.match(emitted[1].segments[0].data.file, /^base64:\/\//)
+  assert.equal(store.get(entry.id).used_count, 1)
 
   await bridge.deliverAssistantTurn('session-b', '[QQ][表情:没有这个表情][/QQ]')
-  assert.equal(发出.length, 2, '找不到时不应该发任何东西')
-  assert.equal(通知.length, 0, '找不到表情时不再往会话里塞提示')
-  assert.match(错记录.join('\n'), /找不到表情/)
+  assert.equal(emitted.length, 2, '找不到时不应该发任何东西')
+  assert.equal(notify.length, 0, '找不到表情时不再往会话里塞提示')
+  assert.match(errorRecord.join('\n'), /找不到表情/)
 
-  配置.autoSaveStickers = true
-  const 入站 = await bridge.buildInbound(配置.bindings[0], {
+  config.autoSaveStickers = true
+  const inbound = await bridge.buildInbound(config.bindings[0], {
     message_id: 'm1',
     message: [{ type: 'image', data: { url: 'http://example.com/a.gif' } }],
   })
-  assert.equal(入站.images.length, 1)
-  const 自动 = 库.get('qq-image-1-1-1')
-  assert.ok(自动, '入站图片应自动入库')
-  assert.equal(自动.source, 'qq-auto')
-  assert.equal(库.stats().count, 2)
+  assert.equal(inbound.images.length, 1)
+  const auto = store.get('qq-image-1-1-1')
+  assert.ok(auto, '入站图片应自动入库')
+  assert.equal(auto.source, 'qq-auto')
+  assert.equal(store.stats().count, 2)
 })
 test('fish_sticker_save：path 入库，中文标签/描述、默认 source=agent', async () => {
-  const { 库 } = 造库()
-  const 工具 = 取工具('fish_sticker_save', 建表情api(库), () => ({ stickerMaxFileMB: 1024 }))
-  const gif = 造GIF({ width: 5, height: 6, frames: 2, delay: 15 })
-  const 源 = 写临时图(gif, '大肥鱼.gif')
+  const { store } = makeStore()
+  const tool = getTool('fish_sticker_save', makeStickerApi(store), () => ({ stickerMaxFileMB: 1024 }))
+  const gif = makeGif({ width: 5, height: 6, frames: 2, delay: 15 })
+  const source = writeTempImage(gif, '大肥鱼.gif')
 
-  const r = await 工具.execute({ path: 源, tags: ['大肥鱼', '动图'], desc: '大肥鱼的默认形象' })
+  const r = await tool.execute({ path: source, tags: ['大肥鱼', '动图'], desc: '大肥鱼的默认形象' })
   assert.equal(r.ok, true)
   assert.equal(r.created, true)
   assert.equal(r.exists, false)
@@ -601,131 +601,131 @@ test('fish_sticker_save：path 入库，中文标签/描述、默认 source=agen
   assert.equal(r.entry.sha256.length, 64)
   assert.ok(r.entry.path.endsWith('大肥鱼.gif'))
   assert.equal(JSON.stringify(r).includes('base64'), false)
-  校验(r, 工具.output.schema)
-  assert.equal(库.stats().count, 1)
+  validate(r, tool.output.schema)
+  assert.equal(store.stats().count, 1)
 })
 
 test('fish_sticker_save：缺参 / 两个都给 / 路径不存在 / 相对路径 / 目录 / 名字带目录', async () => {
-  const { 库 } = 造库()
-  const 工具 = 取工具('fish_sticker_save', 建表情api(库))
-  const 源 = 写临时图(造GIF(), 'a.gif')
+  const { store } = makeStore()
+  const tool = getTool('fish_sticker_save', makeStickerApi(store))
+  const source = writeTempImage(makeGif(), 'a.gif')
 
-  const 缺失 = await 工具.execute({})
-  assert.equal(缺失.ok, false)
-  assert.equal(缺失.code, 'bad_request')
-  assert.match(缺失.hint, /path/)
-  assert.match(缺失.hint, /url/)
+  const absent = await tool.execute({})
+  assert.equal(absent.ok, false)
+  assert.equal(absent.code, 'bad_request')
+  assert.match(absent.hint, /path/)
+  assert.match(absent.hint, /url/)
 
-  const 重复 = await 工具.execute({ path: 源, url: 'http://example.com/a.gif' })
-  assert.equal(重复.ok, false)
-  assert.equal(重复.code, 'bad_request')
+  const duplicate = await tool.execute({ path: source, url: 'http://example.com/a.gif' })
+  assert.equal(duplicate.ok, false)
+  assert.equal(duplicate.code, 'bad_request')
 
-  const 不存在 = await 工具.execute({ path: join(tmpdir(), '根本没有这个文件.gif') })
-  assert.equal(不存在.code, 'bad_path')
-  assert.match(不存在.hint, /找不到/)
+  const notFound = await tool.execute({ path: join(tmpdir(), '根本没有这个文件.gif') })
+  assert.equal(notFound.code, 'bad_path')
+  assert.match(notFound.hint, /找不到/)
 
-  const 相对 = await 工具.execute({ path: 'assets/a.gif' })
-  assert.equal(相对.code, 'bad_path')
+  const relative = await tool.execute({ path: 'assets/a.gif' })
+  assert.equal(relative.code, 'bad_path')
 
-  const 目录 = await 工具.execute({ path: tmpdir() })
-  assert.equal(目录.code, 'bad_path')
-  assert.match(目录.hint, /文件|目录/)
+  const dir = await tool.execute({ path: tmpdir() })
+  assert.equal(dir.code, 'bad_path')
+  assert.match(dir.hint, /文件|目录/)
 
-  const 带目录 = await 工具.execute({ path: 源, name: 'sub/a.gif' })
-  assert.equal(带目录.ok, false)
-  assert.equal(带目录.code, 'bad_request')
+  const withDir = await tool.execute({ path: source, name: 'sub/a.gif' })
+  assert.equal(withDir.ok, false)
+  assert.equal(withDir.code, 'bad_request')
 
-  assert.equal(库.stats().count, 0)
+  assert.equal(store.stats().count, 0)
 })
 
 test('fish_sticker_save：非图片 → not_image，超单张上限 → too_large', async () => {
-  const { 库 } = 造库()
-  const 工具 = 取工具('fish_sticker_save', 建表情api(库))
-  const 非图 = 写临时图(Buffer.from('这不是图片'), '假图.txt')
-  const 不是图 = await 工具.execute({ path: 非图 })
-  assert.equal(不是图.ok, false)
-  assert.equal(不是图.code, 'not_image')
-  assert.match(不是图.hint, /仅支持/)
+  const { store } = makeStore()
+  const tool = getTool('fish_sticker_save', makeStickerApi(store))
+  const notImage = writeTempImage(Buffer.from('这不是图片'), '假图.txt')
+  const notImageResult = await tool.execute({ path: notImage })
+  assert.equal(notImageResult.ok, false)
+  assert.equal(notImageResult.code, 'not_image')
+  assert.match(notImageResult.hint, /仅支持/)
 
   // 单张上限取 stickerMaxFileMB（不借用库总容量）：配成约 1KB 后，4KB 的图必须在读取前就被挡掉。
-  const { 库: 小库 } = 造库()
-  const 小工具 = 取工具('fish_sticker_save', 建表情api(小库), () => ({ stickerMaxFileMB: 0.001 }))
-  const 大图 = 写临时图(造GIF({ 额外字节: 4096 }), 'big.gif')
-  const 太大 = await 小工具.execute({ path: 大图 })
-  assert.equal(太大.ok, false)
-  assert.equal(太大.code, 'too_large')
-  assert.match(太大.hint, /单张上限/)
-  assert.equal(小库.stats().count, 0)
+  const { store: smallStore } = makeStore()
+  const smallTool = getTool('fish_sticker_save', makeStickerApi(smallStore), () => ({ stickerMaxFileMB: 0.001 }))
+  const largeImage = writeTempImage(makeGif({ extraBytes: 4096 }), 'big.gif')
+  const tooLarge = await smallTool.execute({ path: largeImage })
+  assert.equal(tooLarge.ok, false)
+  assert.equal(tooLarge.code, 'too_large')
+  assert.match(tooLarge.hint, /单张上限/)
+  assert.equal(smallStore.stats().count, 0)
 })
 
 test('fish_sticker_save：同 sha256 去重 → created=false，只合并标签、不覆盖描述与名字', async () => {
-  const { 库 } = 造库()
-  const 工具 = 取工具('fish_sticker_save', 建表情api(库))
-  const 源 = 写临时图(造GIF(), '旧名字.gif')
+  const { store } = makeStore()
+  const tool = getTool('fish_sticker_save', makeStickerApi(store))
+  const source = writeTempImage(makeGif(), '旧名字.gif')
 
-  const 第一次 = await 工具.execute({ path: 源, tags: ['猫'], desc: '旧的' })
-  assert.equal(第一次.created, true)
+  const firstRun = await tool.execute({ path: source, tags: ['猫'], desc: '旧的' })
+  assert.equal(firstRun.created, true)
 
-  const 第二次 = await 工具.execute({ path: 源, name: '新名字.gif', tags: ['可爱', '猫'], desc: '新的' })
-  assert.equal(第二次.ok, true)
-  assert.equal(第二次.created, false)
-  assert.equal(第二次.exists, true)
-  assert.equal(第二次.merged, true)
-  assert.equal(第二次.entry.id, 第一次.entry.id)
-  assert.deepEqual(第二次.entry.tags, ['猫', '可爱'])
-  assert.equal(第二次.entry.desc, '旧的')
-  assert.equal(第二次.entry.file, 第一次.entry.file)
-  校验(第二次, 工具.output.schema)
-  assert.equal(库.stats().count, 1)
+  const secondRun = await tool.execute({ path: source, name: '新名字.gif', tags: ['可爱', '猫'], desc: '新的' })
+  assert.equal(secondRun.ok, true)
+  assert.equal(secondRun.created, false)
+  assert.equal(secondRun.exists, true)
+  assert.equal(secondRun.merged, true)
+  assert.equal(secondRun.entry.id, firstRun.entry.id)
+  assert.deepEqual(secondRun.entry.tags, ['猫', '可爱'])
+  assert.equal(secondRun.entry.desc, '旧的')
+  assert.equal(secondRun.entry.file, firstRun.entry.file)
+  validate(secondRun, tool.output.schema)
+  assert.equal(store.stats().count, 1)
 })
 
 test('fish_sticker_save：url 下载入库（本机 HTTP 夹具）', async () => {
-  const gif = 造GIF({ frames: 3, delay: 5 })
-  const 服务 = createServer((请求, 响应) => {
+  const gif = makeGif({ frames: 3, delay: 5 })
+  const service = createServer((request, response) => {
     // fetch 会把中文路径百分号编码，这里解码后再比。
-    if (decodeURIComponent(请求.url) === '/emoji/开心.gif') {
-      响应.writeHead(200, { 'content-type': 'image/gif', 'content-length': gif.length })
-      响应.end(gif)
+    if (decodeURIComponent(request.url) === '/emoji/开心.gif') {
+      response.writeHead(200, { 'content-type': 'image/gif', 'content-length': gif.length })
+      response.end(gif)
     } else {
-      响应.writeHead(404, { 'content-type': 'text/plain' })
-      响应.end('not found')
+      response.writeHead(404, { 'content-type': 'text/plain' })
+      response.end('not found')
     }
   })
-  await new Promise((resolve) => 服务.listen(0, '127.0.0.1', resolve))
-  const 端口 = 服务.address().port
+  await new Promise((resolve) => service.listen(0, '127.0.0.1', resolve))
+  const port = service.address().port
   try {
-    const { 库 } = 造库()
-    const 工具 = 取工具('fish_sticker_save', 建表情api(库))
-    const r = await 工具.execute({ url: 'http://127.0.0.1:' + 端口 + '/emoji/开心.gif', tags: ['开心'] })
+    const { store } = makeStore()
+    const tool = getTool('fish_sticker_save', makeStickerApi(store))
+    const r = await tool.execute({ url: 'http://127.0.0.1:' + port + '/emoji/开心.gif', tags: ['开心'] })
     assert.equal(r.ok, true)
     assert.equal(r.created, true)
     assert.equal(r.entry.file, 'gif/开心.gif')
     assert.equal(r.entry.frames, 3)
-    校验(r, 工具.output.schema)
+    validate(r, tool.output.schema)
 
-    const 下不到 = await 工具.execute({ url: 'http://127.0.0.1:' + 端口 + '/没有.gif' })
-    assert.equal(下不到.ok, false)
-    assert.equal(下不到.code, 'download_failed')
+    const cannotDownload = await tool.execute({ url: 'http://127.0.0.1:' + port + '/没有.gif' })
+    assert.equal(cannotDownload.ok, false)
+    assert.equal(cannotDownload.code, 'download_failed')
   } finally {
-    await new Promise((resolve) => 服务.close(resolve))
+    await new Promise((resolve) => service.close(resolve))
   }
 })
 
 test('fish_sticker_list 输出能过 output.schema：真实条目 + 真实服务形状夹具', async () => {
-  const { 库 } = 造库()
-  const api = 建表情api(库)
-  库.save(造GIF({ frames: 2 }), { name: '动图.gif', tags: ['大肥鱼', '动图'], desc: '动图' })
-  库.save(小PNG, { name: '静态.png', tags: ['大肥鱼'] })
+  const { store } = makeStore()
+  const api = makeStickerApi(store)
+  store.save(makeGif({ frames: 2 }), { name: '动图.gif', tags: ['大肥鱼', '动图'], desc: '动图' })
+  store.save(smallPng, { name: '静态.png', tags: ['大肥鱼'] })
 
-  const 工具 = 取工具('fish_sticker_list', api)
-  const 结果 = await 工具.execute({ limit: 10 })
-  assert.equal(结果.ok, true)
-  assert.equal(结果.items.length, 2)
-  校验(结果, 工具.output.schema)
+  const tool = getTool('fish_sticker_list', api)
+  const result = await tool.execute({ limit: 10 })
+  assert.equal(result.ok, true)
+  assert.equal(result.items.length, 2)
+  validate(result, tool.output.schema)
 
   // 夹具的字段直接照本机 /dsh-fish-message/stickers?limit=1 的真实返回抄（含 sha256/source/path），
   // 顶层按工具实际返回裁剪（工具只回 count/total/items/tags/stats）。
-  const 夹具 = {
+  const fixture = {
     ok: true,
     count: 1,
     total: 8,
@@ -760,9 +760,9 @@ test('fish_sticker_list 输出能过 output.schema：真实条目 + 真实服务
       indexPath: 'C:\\Users\\Administrator\\.dsh\\fish-message-stickers\\index.json',
     },
   }
-  校验(夹具, 工具.output.schema)
+  validate(fixture, tool.output.schema)
 
   // 反证：返回里多一个没声明的字段，校验必须失败——原来的 bug 就是这么被拒的。
-  const 多字段 = { ...夹具, items: [{ ...夹具.items[0], 未知字段: 1 }] }
-  assert.throws(() => 校验(多字段, 工具.output.schema))
+  const multiField = { ...fixture, items: [{ ...fixture.items[0], unknownField: 1 }] }
+  assert.throws(() => validate(multiField, tool.output.schema))
 })

@@ -212,7 +212,7 @@ extractOutbound(text, onlyInsideMarkers)
 
 语音发送按「本地路径 → `file:///` → `base64://`」重试，最多 3 次。
 
-**任何 token 最终发送失败都不再丢弃**：`Bridge.发一条` 把内部消息段写进持久化出站队列，
+**任何 token 最终发送失败都不再丢弃**：`Bridge.sendOneItem` 把内部消息段写进持久化出站队列，
 同一轮后续 token 也按顺序入队（避免后发先至），并记日志/事件。
 只有「发送失败 **且** 队列写盘也失败」才会在会话里投错误提示（同一会话 60 秒最多一次）。
 
@@ -252,7 +252,7 @@ extractOutbound(text, onlyInsideMarkers)
 - `fingerprint = sha256(qq + 规范化 segments)`；同一条消息重试不会变成多条。
 - 语音只入队**已有文件路径**（`record`），不再存 `record_text`；旧版本遗留的
   `record_text` 条目补发时直接判死并提示改用 `[语音]文字[/语音]` 重新发送。
-- 补发与正常发送共用 `this.发送链`（Promise 串行锁）；补发期间或已有积压时，新消息直接入队，保持顺序。
+- 补发与正常发送共用 `this.sendChain`（Promise 串行锁）；补发期间或已有积压时，新消息直接入队，保持顺序。
 - 补发失败一条就停，下一轮再试；不会因为积压把正常发送永久卡死（新消息仍会持久化受理，等前面的发完/丢弃后继续）。
 - 队列计数写进 `fish-message-state.json` 的 `stats.outbox*`，`/state` 的 `outbox` 只读汇总。
 
@@ -272,7 +272,7 @@ StickerStore（index.json + 文件）
         ├─ 设置页：/stickers* 路由（列表/搜索/编辑/删除/取图/最近/导入/清理）
         └─ 出站：[表情:名字] → resolve（id/文件名/#标签/模糊）
                  → image 段（data.stickerId）
-                 → Bridge.派发（base64 发 NapCat，GIF 不动画转码）
+                 → Bridge.dispatch（base64 发 NapCat，GIF 不动画转码）
                  → 成功后 bump(used_count++, last_used_at)
                  → 失败入 Outbox；补发成功时同样 bump
 ```
@@ -409,8 +409,8 @@ v1 不实现群聊。将来要加群：
 
 入站识图还要读插件自己的开关：`visionPrefs() → { localDescribe }`（契约 v0.4）。
 同样用 `typeof` 防御；插件没装、没有这个方法、抛错或返回值不认识时一律当作
-「没有偏好」（`{known:false}`），由 `入站识图开关()` 按「开」兜底。
-`emotion` 经 `情绪中文()` 映射成短中文（未知名与缺失都是空串），`events` 经 `背景中文()`
+「没有偏好」（`{known:false}`），由 `inboundImageEnabled()` 按「开」兜底。
+`emotion` 经 `emotionText()` 映射成短中文（未知名与缺失都是空串），`events` 经 `backgroundText()`
 按「笑声 > 掌声 > 音乐」挑一个，同样以空串表示没有。
 入站识图还会带上 `inboundImagePrompt`（空串用内置默认）作为显式 prompt 覆盖；
 这个提示词是鱼讯自己的设置，不会改动本地 AI 插件的会话识图/工具识图提示词。
