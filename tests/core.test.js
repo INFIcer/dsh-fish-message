@@ -10,7 +10,7 @@ import { StateStore } from '../lib/storage.js'
 import { ForwardQueue } from '../lib/forward-queue.js'
 import { ConfigStore, 已移除的语音字段, normalizeConfig, deriveWsUrl, migrateLegacyConfig, publicConfig, 默认识图提示词, 默认长任务提醒文案, 默认消息通道提醒文案 } from '../lib/config.js'
 import {
-  GuardMonitor, 构造工具守卫, 守卫规则, 拒用工具, 长任务提醒文本, 消息通道提醒文本,
+  GuardMonitor, 构造工具守卫, 守卫规则, 拒用工具, 长任务提醒文本, 消息通道提醒文本, 回合判定宽限毫秒,
 } from '../lib/guard.js'
 import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
@@ -913,6 +913,27 @@ function 建监控(配置 = { guardStuckSeconds: 600 }) {
   return { 钟, 监控, 配置 }
 }
 
+/** 过完回合判定的宽限，再跳一次心跳：把延后的「发没发 QQ」判定推到出结果。 */
+function 过宽限(钟, 监控) {
+  钟.现在 += 回合判定宽限毫秒 + 1
+  return 监控.tick()
+}
+
+/**
+ * 走一个完整回合：turn/start → 若干工具步（每个模型步一条 assistant/message）→ turn/end，
+ * 再走完宽限，把心跳给出的判定结果一起返回。
+ * 发QQ 为真时在回合中间模拟一次 QQ 出站。
+ */
+function 走一回合(钟, 监控, turn, { 工具步 = 1, 发QQ = false } = {}) {
+  监控.处理事件(会话, { type: 'turn/start', data: { turn } })
+  for (let i = 0; i < 工具步; i += 1) {
+    监控.处理事件(会话, { type: 'assistant/message', data: { turn, step: i + 1 } })
+  }
+  if (发QQ) 监控.记QQ出站(QQ)
+  const 动作们 = 监控.处理事件(会话, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+  return [...动作们, ...过宽限(钟, 监控)]
+}
+
 test('防失联监控：超时只塞一次，之后不再打扰', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'running')
@@ -1036,7 +1057,7 @@ test('防失联监控：会话空闲时不打扰', () => {
   const { 钟, 监控 } = 建监控()
   监控.跟踪状态(会话, 'idle')
   钟.现在 += 120 * 60000
-  assert.deepEqual(监控.tick(), [], '空闲是在等主人，不算卡住')
+  assert.deepEqual(监控.tick(), [], '空闲是在等用户说话，不算卡住')
   assert.equal(监控.快照().alerts.length, 0)
 })
 
@@ -1081,47 +1102,196 @@ test('防失联工具守卫：挡住会等人的工具（提问/干等），不�
   }
   assert.match(守卫({ name: 'ask_user_question' }), /ask_user_question/)
   assert.match(守卫({ name: 'wait_agent' }), /wait_agent/)
-  assert.match(守卫({ name: 'wait_agent' }), /send_message/)
   assert.match(守卫({ name: 'wait_agent' }), /唤醒/)
   assert.equal(守卫({ name: 'plugin_manager' }), undefined, '插件装卸不再拦')
   assert.equal(守卫({ name: 'web_search' }), undefined)
   assert.equal(守卫(null), undefined)
   assert.equal(守卫({}), undefined)
+  // 提示词只留代码管不到的约定：回复走 [QQ] 块、拍板发 QQ、长任务派子代理。
   assert.match(守卫规则, /子代理/)
-  assert.match(守卫规则, /ask_user_question/)
-  assert.match(守卫规则, /wait_agent/)
-  assert.match(守卫规则, /send_message/)
   assert.match(守卫规则, /\[QQ\]/)
-  assert.doesNotMatch(守卫规则, /卸载\/重装/)
-  // 重启不再由鱼讯负责：提示词只指向独立插件，不描述鱼讯自己的重启工具。
-  assert.match(守卫规则, /独立的重启插件/)
-  assert.match(守卫规则, /dsh_restart/)
+  assert.match(守卫规则, /用户/)
+  assert.doesNotMatch(守卫规则, /主人/, '用通用称呼，不带个人设定')
+  assert.ok(守卫规则.split('\n').length <= 5, '短提示：最多 5 句')
+  // 下面这些由机制保证，提示词里不再重复（同一条规矩只留一处出处）：
+  // 拒用工具 → 工具守卫；审批 → 策略 never；[QQ] 出站 → 桥只投递块内内容。
+  assert.doesNotMatch(守卫规则, /ask_user_question|wait_agent/)
+  assert.doesNotMatch(守卫规则, /send_message/)
+  assert.doesNotMatch(守卫规则, /卸载\/重装|dsh_restart/, '重启工具由独立插件提供，不一定存在')
 })
 
-test('防失联：连续几轮没发 QQ 就提醒，发过 QQ 清零，15 分钟内不重复', () => {
+test('防失联：按回合计数，一个回合里 5 个 assistant/message 只算 1 轮', () => {
   const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
-  const 一轮 = () => 监控.处理事件(会话, { type: 'assistant/message', data: { text: '只在会话里回' } })
 
-  assert.deepEqual(一轮(), [])
-  assert.deepEqual(一轮(), [])
-  const 提醒们 = 一轮()
+  // 一个回合里 5 个模型步（工具调用）都发 assistant/message，但最后没发 QQ：只计 1 轮。
+  assert.deepEqual(走一回合(钟, 监控, 1, { 工具步: 5 }), [])
+  // 第 2 个回合：仍不到阈值。按模型步算的话这里已经该提醒一次了。
+  assert.deepEqual(走一回合(钟, 监控, 2, { 工具步: 5 }), [])
+
+  // 第 3 个回合：满 3 轮才提醒，轮数是回合数，不是模型步数。
+  const 提醒们 = 走一回合(钟, 监控, 3, { 工具步: 5 })
   assert.equal(提醒们.length, 1)
   assert.equal(提醒们[0].kind, 'remind')
   assert.equal(提醒们[0].reason, 'no-qq')
-  assert.equal(提醒们[0].turns, 3)
+  assert.equal(提醒们[0].turns, 3, '三个回合，而不是十五个模型步')
   assert.equal(提醒们[0].text, 默认消息通道提醒文案, '默认消息通道提醒文案原文')
+})
 
-  // 还是没发 QQ：15 分钟内不再重复提醒。
-  assert.deepEqual(一轮(), [])
-  assert.deepEqual(一轮(), [])
-  assert.deepEqual(一轮(), [])
+test('防失联：回合里发过 QQ 就清零，不提醒', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
+  assert.deepEqual(走一回合(钟, 监控, 1), [])
+  assert.deepEqual(走一回合(钟, 监控, 2), [])
 
-  // 发过 QQ：计数清零；过了去重窗口再攒满一轮才会再提醒。
+  // 第 3 个回合发过 QQ：不算「没发 QQ」的回合，计数清零。
+  assert.deepEqual(走一回合(钟, 监控, 3, { 工具步: 5, 发QQ: true }), [])
+
+  // 之后从头攒：还要 3 个没发 QQ 的回合才提醒。
+  assert.deepEqual(走一回合(钟, 监控, 4), [])
+  assert.deepEqual(走一回合(钟, 监控, 5), [])
+  const 提醒们 = 走一回合(钟, 监控, 6)
+  assert.equal(提醒们.length, 1)
+  assert.equal(提醒们[0].reason, 'no-qq')
+  assert.equal(提醒们[0].turns, 3, '发过 QQ 的那一轮不计入')
+})
+
+test('防失联：新回合开始（agent/status 进入 running）也复位本回合 QQ 标记', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 2 })
+  监控.跟踪状态(会话, 'running')
+  // 上一回合末发过 QQ：标记为真。
   监控.记QQ出站(QQ)
+  监控.跟踪状态(会话, 'idle')
+  // 新回合开始：即使没有 turn/start 事件，标记也要复位，这一回合没发 QQ 就算 1 轮。
+  监控.跟踪状态(会话, 'running')
+  assert.deepEqual(走一回合(钟, 监控, 1), [])
+  const 提醒们 = 走一回合(钟, 监控, 2)
+  assert.equal(提醒们.length, 1)
+  assert.equal(提醒们[0].turns, 2)
+})
+
+test('防失联：没发 QQ 的提醒 15 分钟内不重复', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
+  for (let turn = 1; turn <= 3; turn += 1) {
+    const 结果 = 走一回合(钟, 监控, turn)
+    if (turn === 3) {
+      assert.equal(结果.length, 1)
+      assert.equal(结果[0].reason, 'no-qq')
+    }
+  }
+
+  // 提醒注入后会作为一条 user 消息开启新回合；这段时间里再攒满也不重复提醒。
+  for (let turn = 4; turn <= 6; turn += 1) {
+    assert.deepEqual(走一回合(钟, 监控, turn), [])
+  }
+
+  // 过了 15 分钟才允许再提醒。
   钟.现在 += 16 * 60000
-  assert.deepEqual(一轮(), [])
-  assert.deepEqual(一轮(), [])
-  assert.equal(一轮().length, 1)
+  const 再提醒 = 走一回合(钟, 监控, 7)
+  assert.equal(再提醒.length, 1)
+  assert.equal(再提醒[0].reason, 'no-qq')
+  assert.ok(再提醒[0].turns >= 3)
+})
+
+test('防失联：turn/end 之后才发 QQ（桥的投递晚一步）不算这一回合没发', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 2 })
+  监控.处理事件(会话, { type: 'turn/start', data: { turn: 1 } })
+  监控.处理事件(会话, { type: 'assistant/message', data: { turn: 1, step: 1 } })
+  assert.deepEqual(
+    监控.处理事件(会话, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
+    [],
+    'turn/end 那一刻不判定，只记下待判定',
+  )
+  // 桥正是在 turn/end 之后才把 [QQ] 投出去的：1 秒后出站事件才到。
+  钟.现在 += 1000
+  监控.记QQ出站(QQ)
+  assert.deepEqual(过宽限(钟, 监控), [], '出站已经记账，宽限过后不该提醒')
+  const st = 监控.取状态(会话)
+  assert.equal(st.qq回合, 0, '这一回合算发过 QQ，不计数')
+  assert.equal(st.待判定回合, false, '出站到了就消掉待判定，不必再等宽限')
+  assert.equal(st.本回合发过QQ, true, '出站记在「本回合」上，由下一个 turn/start 复位')
+})
+
+test('防失联：turn/end 后一直没出站，宽限过了才计一轮', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
+  监控.处理事件(会话, { type: 'turn/start', data: { turn: 1 } })
+  监控.处理事件(会话, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+
+  // 宽限还没到：不判定、不计数。
+  assert.deepEqual(监控.tick(), [])
+  assert.equal(监控.取状态(会话).qq回合, 0)
+
+  assert.deepEqual(过宽限(钟, 监控), [], '1 轮还没到 3 轮的阈值')
+  assert.equal(监控.取状态(会话).qq回合, 1, '宽限过后按「没发 QQ」计 1 轮')
+
+  // 同一个回合不会被重复计：再跳心跳也不涨。
+  钟.现在 += 回合判定宽限毫秒
+  assert.deepEqual(监控.tick(), [])
+  assert.equal(监控.取状态(会话).qq回合, 1)
+})
+
+test('防失联：连续 3 个正常发 QQ 的回合，永不误提醒', () => {
+  // 阈值调到 1：只要误判一次就会立刻提醒，这样「没误报」才有说服力。
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 1 })
+  for (let turn = 1; turn <= 3; turn += 1) {
+    监控.处理事件(会话, { type: 'turn/start', data: { turn } })
+    监控.处理事件(会话, { type: 'assistant/message', data: { turn, step: 1 } })
+    assert.deepEqual(监控.处理事件(会话, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } }), [])
+    // 桥在 turn/end 之后才投递 [QQ]：1 秒后出站。
+    钟.现在 += 1000
+    监控.记QQ出站(QQ)
+    assert.deepEqual(过宽限(钟, 监控), [], `第 ${turn} 个正常回合不该提醒`)
+    assert.equal(监控.取状态(会话).qq回合, 0, `第 ${turn} 个正常回合不该计数`)
+  }
+  // 再跑两个也一样：误计数不会攒起来。
+  for (let turn = 4; turn <= 5; turn += 1) {
+    监控.处理事件(会话, { type: 'turn/start', data: { turn } })
+    监控.处理事件(会话, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+    钟.现在 += 1000
+    监控.记QQ出站(QQ)
+    assert.deepEqual(过宽限(钟, 监控), [])
+  }
+})
+
+test('防失联：宽限内来新回合，旧回合按当时状态判掉，不串味', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
+  const st = () => 监控.取状态(会话)
+
+  // 第 1 回合没发 QQ，turn/end 后 1 秒用户就说话了（宽限还没走完）。
+  监控.处理事件(会话, { type: 'turn/start', data: { turn: 1 } })
+  监控.处理事件(会话, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  钟.现在 += 1000
+  assert.deepEqual(监控.处理事件(会话, { type: 'turn/start', data: { turn: 2 } }), [])
+  assert.equal(st().qq回合, 1, '旧回合按「没发 QQ」当场判掉')
+  assert.equal(st().待判定回合, false, '旧回合的待判定已经消掉')
+
+  // 新回合发了 QQ：出站说明通道是通的，计数清零；旧回合的待判定不会拖到这时候才判。
+  钟.现在 += 500
+  监控.记QQ出站(QQ)
+  监控.处理事件(会话, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+  assert.deepEqual(过宽限(钟, 监控), [])
+  assert.equal(st().qq回合, 0, '发过 QQ 的回合清零')
+  assert.equal(st().本回合发过QQ, false, '新回合的出站不会挂在旧回合上')
+  assert.equal(st().待判定回合, false)
+
+  // 反过来：旧回合发过 QQ，宽限内来新回合 → 按「发过」判掉，不会误计一轮。
+  监控.处理事件(会话, { type: 'turn/start', data: { turn: 3 } })
+  监控.记QQ出站(QQ)
+  监控.处理事件(会话, { type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } })
+  钟.现在 += 1000
+  监控.处理事件(会话, { type: 'turn/start', data: { turn: 4 } })
+  assert.equal(st().qq回合, 0, '发过 QQ 的旧回合不计数')
+  assert.deepEqual(过宽限(钟, 监控), [])
+})
+
+test('防失联：提醒注入开出的新回合不会连着再提醒', () => {
+  const { 钟, 监控 } = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 1 })
+  const 第一次 = 走一回合(钟, 监控, 1)
+  assert.equal(第一次.length, 1)
+  assert.equal(第一次[0].reason, 'no-qq', '第一个回合该提醒一次')
+
+  // 提醒会作为一条 user 消息开新回合：没发 QQ 照旧计一轮，但 15 分钟内不再注入。
+  for (let turn = 2; turn <= 4; turn += 1) {
+    assert.deepEqual(走一回合(钟, 监控, turn), [], `第 ${turn} 个回合不再注入`)
+  }
 })
 
 test('防失联：没发 QQ 提醒轮数可配置，钳制 1~50 且能保存读回', () => {
@@ -1143,8 +1313,9 @@ test('防失联：两条提醒默认用内置文案，自定义文案原样生�
   默认.钟.现在 += 11 * 60000
   assert.equal(默认.监控.tick()[0].text, 默认长任务提醒文案)
   const 默认通道 = 建监控({ guardStuckSeconds: 600, guardQqRemindTurns: 3 })
-  for (let i = 0; i < 2; i += 1) 默认通道.监控.处理事件(会话, { type: 'assistant/message' })
-  assert.equal(默认通道.监控.处理事件(会话, { type: 'assistant/message' })[0].text, 默认消息通道提醒文案)
+  走一回合(默认通道.钟, 默认通道.监控, 1)
+  走一回合(默认通道.钟, 默认通道.监控, 2)
+  assert.equal(走一回合(默认通道.钟, 默认通道.监控, 3)[0].text, 默认消息通道提醒文案)
 
   // 自定义：首尾空格去掉后用自定义文案。
   const 自定义 = 建监控({
@@ -1156,8 +1327,9 @@ test('防失联：两条提醒默认用内置文案，自定义文案原样生�
   自定义.监控.跟踪状态(会话, 'running')
   自定义.钟.现在 += 11 * 60000
   assert.equal(自定义.监控.tick()[0].text, '自定义长任务提醒')
-  for (let i = 0; i < 2; i += 1) 自定义.监控.处理事件(会话, { type: 'assistant/message' })
-  assert.equal(自定义.监控.处理事件(会话, { type: 'assistant/message' })[0].text, '自定义消息通道提醒')
+  走一回合(自定义.钟, 自定义.监控, 1)
+  走一回合(自定义.钟, 自定义.监控, 2)
+  assert.equal(走一回合(自定义.钟, 自定义.监控, 3)[0].text, '自定义消息通道提醒')
 
   // 工具函数本身：空串/空格回落默认。
   assert.equal(长任务提醒文本({}), 默认长任务提醒文案)

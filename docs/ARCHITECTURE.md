@@ -66,7 +66,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 | `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
 | `lib/sticker-routes.js` | `/stickers*` 路由：参数校验、multipart、取图防穿越 | 不实现存储算法 |
-| `lib/tools.js` | `fish_sticker_list` / `fish_sticker_send` 工具定义与注册 | 不直接读写索引 |
+| `lib/tools.js` | `fish_sticker_list` / `fish_sticker_send` / `fish_sticker_save` 工具定义与注册 | 不直接读写索引 |
 | `lib/service.js` | `fish.message` 门面（发送/历史/语音/表情） | 不重新实现发送 |
 
 ---

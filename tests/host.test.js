@@ -86,8 +86,8 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(状态.defaults.inboundImagePrompt, 默认识图提示词)
   assert.equal(状态.config.inboundImagePrompt, '')
   // 两条提醒的默认文案由宿主下发，设置页占位文字直接用它。
-  assert.match(状态.defaults.guardStuckPrompt, /绑定外部通讯收发/)
-  assert.match(状态.defaults.guardQqPrompt, /多轮对话无消息出站/)
+  assert.match(状态.defaults.guardStuckPrompt, /通过 QQ 与用户对话/)
+  assert.match(状态.defaults.guardQqPrompt, /没有 QQ 出站/)
   // 暂停转发：状态里有待转发队列，默认没在暂停。
   assert.equal(typeof 状态.forwardFile, 'string')
   assert.equal(状态.bridge.forward.paused, false)
@@ -223,7 +223,7 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   assert.match(提示段们[0].text, /子代理/)
   assert.match(工具守卫们[0]({ name: 'ask_user_question' }), /不能用/)
   assert.match(工具守卫们[0]({ name: 'wait_agent' }), /wait_agent/)
-  assert.match(工具守卫们[0]({ name: 'wait_agent' }), /send_message/)
+  assert.match(工具守卫们[0]({ name: 'wait_agent' }), /唤醒/)
   assert.equal(工具守卫们[0]({ name: 'plugin_manager' }), undefined, '插件装卸不再拦')
   assert.equal(工具守卫们[0]({ name: 'read_file' }), undefined)
 
@@ -237,7 +237,7 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   监控状态.lastProgressAt = 监控状态.statusSince
   await 睡(160)
   assert.ok(注入们.length >= 1, '卡住时要把提醒注入会话')
-  assert.match(注入们[0].content[0].text, /绑定外部通讯收发/)
+  assert.match(注入们[0].content[0].text, /通过 QQ 与用户对话/)
   assert.equal(注入们[0].role, 'user')
 
   // 宿主正忙时注入会被拒：提醒先排队，一有空就立刻重试，而不是等下个心跳。
