@@ -196,7 +196,7 @@ window.__ModuleLoader__.load({
       文本, 说明 ? 问号(说明) : null)
 
     // 提示文案的错误分级：失败、无法、不可用这类按错误色显示，其余按成功提示。
-    const 是错误 = (文本) => /失败|无法|错误|不可用|不能/.test(String(文本 || ''))
+    const 是错误 = (文本) => /失败|无法|错误|不可用|不能|没打开/.test(String(文本 || ''))
 
     function 输入(值, onChange, 占位 = '', 禁用 = false) {
       return h('input', {
@@ -274,17 +274,13 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const 导入 = async () => {
-        if (!window.confirm('从默认表情库导入？内容相同的图片只合并标签，不会重复保存。')) return
-        设忙(true); 设说('正在导入…')
-        const r = await post('/stickers/import', {})
+      // 只开插件自己的库目录，路径由后端按配置决定，前端不传。
+      const 打开库文件夹 = async () => {
+        设忙(true); 设说('正在打开表情库文件夹…')
+        const r = await post('/stickers/open-folder', {})
         设忙(false)
-        if (!r || !r.ok) 设说('导入失败：' + 错(r))
-        else {
-          const 错们 = Array.isArray(r.errors) && r.errors.length ? `；${r.errors[0].error}` : ''
-          设说(`导入完成：新增 ${r.imported || 0} 个，合并 ${r.merged || 0} 个，跳过 ${r.skipped || 0} 个${错们}`)
-          await 拉()
-        }
+        if (!r || !r.ok) 设说('没打开文件夹：' + 错(r))
+        else 设说('已在资源管理器中打开表情库文件夹。')
       }
 
       const 清理 = async (mode) => {
@@ -369,7 +365,7 @@ window.__ModuleLoader__.load({
       const 统计 = 列表.stats || {}
       const 卡片们 = Array.isArray(列表.items) ? 列表.items : []
 
-      // 吸顶操作条：返回、标题和整排导入/清理按钮都在这里，滚动时始终可见。
+      // 吸顶操作条：返回、标题和整排操作按钮都在这里，滚动时始终可见。
       const 操作条 = h('div', { style: S.bar },
         h('div', { style: S.barRow },
           h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 } },
@@ -383,8 +379,8 @@ window.__ModuleLoader__.load({
             onChange: (e) => { 上传(e.target.files); e.target.value = '' },
           }),
           h('button', {
-            type: 'button', style: S.btn, onClick: 导入, disabled: 忙,
-          }, '从默认表情库导入'),
+            type: 'button', style: S.btn, onClick: 打开库文件夹, disabled: 忙,
+          }, '打开表情库文件夹'),
           h('button', {
             type: 'button', style: S.btn, onClick: () => 清理('unused'), disabled: 忙,
           }, '删除未使用'),
@@ -418,7 +414,7 @@ window.__ModuleLoader__.load({
       const 网格 = h('div', { style: { ...S.card } },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, `表情（${列表.total ?? 卡片们.length} 个）`),
         卡片们.length === 0
-          ? h('div', { style: S.dim }, '暂无表情。可上传图片，或从默认表情库导入。')
+          ? h('div', { style: S.dim }, '暂无表情。可以上传图片，或把图片拖进本页。')
           : h('div', { style: S.grid }, 卡片们.map((条目) => {
             const v = 取值(条目)
             const qq = 对象[条目.id] || (绑定们[0] && 绑定们[0].qq) || ''

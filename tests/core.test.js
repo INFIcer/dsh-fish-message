@@ -1112,12 +1112,12 @@ test('防失联工具守卫：挡住会等人的工具（提问/干等），不�
   assert.match(守卫规则, /\[QQ\]/)
   assert.match(守卫规则, /用户/)
   assert.doesNotMatch(守卫规则, /主人/, '用通用称呼，不带个人设定')
-  assert.ok(守卫规则.split('\n').length <= 5, '短提示：最多 5 句')
+  assert.ok(守卫规则.split('\n').length <= 4, '短提示：最多 4 句')
   // 下面这些由机制保证，提示词里不再重复（同一条规矩只留一处出处）：
   // 拒用工具 → 工具守卫；审批 → 策略 never；[QQ] 出站 → 桥只投递块内内容。
   assert.doesNotMatch(守卫规则, /ask_user_question|wait_agent/)
   assert.doesNotMatch(守卫规则, /send_message/)
-  assert.doesNotMatch(守卫规则, /卸载\/重装|dsh_restart/, '重启工具由独立插件提供，不一定存在')
+  assert.doesNotMatch(守卫规则, /重启|dsh_restart|杀进程|进程/, '重启/杀进程是独立插件的职责，鱼讯的提示词不越界')
 })
 
 test('防失联：按回合计数，一个回合里 5 个 assistant/message 只算 1 轮', () => {

@@ -6,7 +6,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { StickerStore } from '../lib/stickers.js'
@@ -74,6 +74,7 @@ function 造路由(库, 额外 = {}) {
     getConfig: 额外.getConfig ?? (() => ({ bindings: [{ qq: '10001', enabled: true }] })),
     路由前缀: 前缀,
     导入默认目录: join(tmpdir(), '不存在的默认导入目录'),
+    ...(额外.路由选项 || {}),
   })
   return { handlers, 调用 }
 }
@@ -347,6 +348,66 @@ test('/stickers/recent 与 recent/file：最近入站图、文件名防穿越', 
 
   const 缺 = await 调(handlers, `${前缀}/stickers/recent/file`, 造请求({ url: `${前缀}/stickers/recent/file?name=none.gif` }))
   assert.equal(缺.statusCode, 404)
+})
+
+test('/stickers/open-folder：只开库目录、忽略请求路径、目录没了先建', async () => {
+  const { dir, 库 } = 造环境()
+  const 调用 = []
+  const 路由 = 造路由(库, {
+    路由选项: {
+      platform: 'win32',
+      spawn: (命令, 参数, 选项) => {
+        调用.push({ 命令, 参数, 选项 })
+        return { on() {}, unref() {} }
+      },
+    },
+  })
+
+  const 好 = await 调(路由.handlers, `${前缀}/stickers/open-folder`, 造请求({
+    method: 'POST', url: `${前缀}/stickers/open-folder`, headers: JSON头,
+    body: { path: 'C:\\Windows' },
+  }))
+  assert.equal(好.statusCode, 200)
+  const 真实 = realpathSync(库.dir)
+  assert.equal(JSON.parse(好.body).path, 真实)
+  assert.equal(调用.length, 1)
+  assert.equal(调用[0].命令, 'explorer.exe')
+  assert.deepEqual(调用[0].参数, [真实], '只开库目录，不认请求里的 path')
+  assert.deepEqual(调用[0].选项, { detached: true, stdio: 'ignore' })
+
+  rmSync(dir, { recursive: true, force: true })
+  const 建 = await 调(路由.handlers, `${前缀}/stickers/open-folder`, 造请求({
+    method: 'POST', url: `${前缀}/stickers/open-folder`, headers: JSON头, body: {},
+  }))
+  assert.equal(建.statusCode, 200)
+  assert.equal(existsSync(dir), true, '目录被删后先建回来')
+
+  const 错法 = await 调(路由.handlers, `${前缀}/stickers/open-folder`, 造请求({
+    url: `${前缀}/stickers/open-folder`,
+  }))
+  assert.equal(错法.statusCode, 405)
+})
+
+test('/stickers/open-folder：非 Windows 与资源管理器启动失败都明确报错', async () => {
+  const { 库 } = 造环境()
+  const 非 = 造路由(库, { 路由选项: { platform: 'linux' } })
+  const 不支持 = await 调(非.handlers, `${前缀}/stickers/open-folder`, 造请求({
+    method: 'POST', url: `${前缀}/stickers/open-folder`, headers: JSON头, body: {},
+  }))
+  assert.equal(不支持.statusCode, 501)
+  assert.match(JSON.parse(不支持.body).error, /Windows/)
+
+  const 坏 = 造路由(库, {
+    路由选项: { platform: 'win32', spawn: () => { throw new Error('没有权限') } },
+  })
+  const 失败 = await 调(坏.handlers, `${前缀}/stickers/open-folder`, 造请求({
+    method: 'POST', url: `${前缀}/stickers/open-folder`, headers: JSON头, body: {},
+  }))
+  assert.equal(失败.statusCode, 500)
+  const 体 = JSON.parse(失败.body)
+  assert.equal(体.code, 'open_failed')
+  assert.match(体.error, /资源管理器没能启动/)
+  assert.match(体.error, /手动打开/)
 })
 
 test('/stickers/import 与 /cleanup：导入去重、清理模式校验', async () => {
