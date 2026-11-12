@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { AiService, friendlyHint, capabilityStatus, emotionText, backgroundText } from '../lib/ai.js'
 import { normalizeConfig, defaultImagePrompt, inboundImagePrompt, imagePromptMaxLength } from '../lib/config.js'
+import { voiceSegmentMaxLength } from '../lib/split-voice-text.js'
 
 function makeService(patch = {}) {
   return {
@@ -304,4 +305,64 @@ test('配置：识图提示词留空即默认，非法值回退默认', () => {
     imagePromptMaxLength,
     '正好上限保留',
   )
+})
+
+// 朗读化归 fish.service：鱼讯只按句切段，不改写正文。
+const ttsService = () => {
+  const calls = []
+  const service = makeService({
+    async tts(text, opts) {
+      calls.push({ text, opts })
+      return { ok: true, items: [{ wavPath: 'C:/cache/' + calls.length + '.wav', voice: opts?.voice }] }
+    },
+  })
+  return { calls, service }
+}
+
+test('本地 AI：tts 不改写原文，朗读化交给 fish.service', async () => {
+  const { calls, service } = ttsService()
+  const text = '版本 2.5.0，日期 2026-11-12，邮箱 user12@example.com。'
+  const result = await build(() => service).tts(text)
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls.map((call) => call.text), [text])
+})
+
+test('本地 AI：tts 长文本仍按 200 字上限按句切段', async () => {
+  const { calls, service } = ttsService()
+  const sentence = '一'.repeat(98) + '。'
+  const fullText = sentence.repeat(3)
+  const result = await build(() => service).tts(fullText)
+  assert.equal(calls.length, 2)
+  assert.ok(calls.every((call) => call.text.length <= voiceSegmentMaxLength))
+  assert.equal(calls.map((call) => call.text).join(''), fullText)
+  assert.deepEqual(result.wavPaths, ['C:/cache/1.wav', 'C:/cache/2.wav'])
+  assert.equal(result.wavPath, 'C:/cache/1.wav')
+})
+
+test('本地 AI：tts 空文本不发请求，标点原样交给服务', async () => {
+  const { calls, service } = ttsService()
+  const ai = build(() => service)
+  const blank = await ai.tts('   ')
+  assert.equal(blank.ok, false)
+  assert.equal(blank.code, 'bad_request')
+  assert.equal(calls.length, 0)
+  const punctuation = await ai.tts('。。。')
+  assert.equal(punctuation.ok, true)
+  assert.deepEqual(calls.map((call) => call.text), ['。。。'])
+})
+
+test('本地 AI：tts 任意一段失败就整体失败，不返回半份结果', async () => {
+  let time = 0
+  const service = makeService({
+    async tts() {
+      time += 1
+      if (time === 2) return { ok: false, code: 'engine_error', hint: '第二段失败' }
+      return { ok: true, items: [{ wavPath: 'C:/cache/' + time + '.wav' }] }
+    },
+  })
+  const sentence = '一'.repeat(98) + '。'
+  const result = await build(() => service).tts(sentence.repeat(3))
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'engine_error')
+  assert.equal(result.wavPaths, undefined)
 })
