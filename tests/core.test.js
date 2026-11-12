@@ -77,13 +77,12 @@ class 假语音 {
 /** 假本地 AI 服务：只实现鱼讯会调的那几个方法，形状按 fish.service 的公开契约。 */
 class 假服务 {
   constructor({
-    ttsOk = true, asrText = '', describeText = '', speaker = null,
+    ttsOk = true, asrText = '', describeText = '',
     emotion = '', events = null, caps = {}, visionPrefs,
   } = {}) {
     this.ttsOk = ttsOk
     this.asrText = asrText
     this.describeText = describeText
-    this.speaker = speaker
     this.emotion = emotion
     this.events = events
     this.visionPrefs结果 = visionPrefs
@@ -105,7 +104,6 @@ class 假服务 {
     this.calls.asr.push({ path, opts })
     // 旧版插件没有 emotion / events：不传就不会出现在返回里，用来验证降级。
     const 项 = { text: this.asrText, language: opts?.language }
-    if (this.speaker) 项.speaker = this.speaker
     if (this.emotion) 项.emotion = this.emotion
     if (Array.isArray(this.events)) 项.events = this.events
     return { ok: true, items: [项] }
@@ -442,7 +440,7 @@ test('入站语音：只落盘并递「语音：路径」，不联网、不转�
     assert.equal(transport.下载次数, 0)
     assert.match(内容.text, /（语音：.+\.wav，2 秒）/)
     assert.ok(!内容.text.includes('转写'), '不能再出现转写文字')
-    assert.ok(!内容.text.includes('声纹'), '不能再带声纹')
+    assert.ok(!内容.text.includes('说话人'), '不能出现依赖服务端身份的说话人')
   } finally {
     globalThis.fetch = 原fetch
   }
@@ -515,35 +513,33 @@ test('出站语音：服务在但 tts 能力关时降级提示，不抛错', asy
   assert.match(结果.hint, /模型还没准备好/)
 })
 
-test('入站语音：本地 AI 正常时把声纹和转写写进同一行路径消息', async () => {
+test('入站语音：本地 AI 正常时把转写写进同一行路径消息', async () => {
   const dir = 临时目录()
-  const 服务 = new 假服务({ asrText: '今晚早点睡', speaker: { name: '主人', score: 0.93, known: true } })
+  const 服务 = new 假服务({ asrText: '今晚早点睡' })
   const bridge = 建语音桥(dir, 服务)
   const 内容 = await bridge.buildInbound(
     { qq: QQ, name: '主人' },
     { message_id: 'm-voice-2', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
   )
-  assert.match(内容.text, /^（语音：.+\.wav，2 秒；说话人：主人；转写：今晚早点睡）$/)
+  assert.match(内容.text, /^（语音：.+\.wav，2 秒；转写：今晚早点睡）$/)
   assert.deepEqual(服务.calls.asr, [{ path: 内容.text.match(/（语音：(.+?)，/)[1], opts: { language: 'auto' } }])
 })
 
-test('入站语音：没有声纹时只附转写', async () => {
+test('入站语音：转写为空时只留路径和时长', async () => {
   const dir = 临时目录()
-  const 服务 = new 假服务({ asrText: '晚安' })
+  const 服务 = new 假服务({ asrText: '' })
   const bridge = 建语音桥(dir, 服务)
   const 内容 = await bridge.buildInbound(
     { qq: QQ, name: '主人' },
     { message_id: 'm-voice-3', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
   )
-  assert.match(内容.text, /，2 秒；转写：晚安）$/)
-  assert.doesNotMatch(内容.text, /说话人/)
+  assert.match(内容.text, /^（语音：.+\.wav，2 秒）$/)
 })
 
 test('入站语音：情感和背景音写在同一行，转写仍在最后', async () => {
   const dir = 临时目录()
   const 服务 = new 假服务({
     asrText: '你终于回来了',
-    speaker: { name: '主人', score: 0.93, known: true },
     emotion: 'HAPPY',
     events: ['Speech', '[Laughter]'],
   })
@@ -552,10 +548,10 @@ test('入站语音：情感和背景音写在同一行，转写仍在最后', as
     { qq: QQ, name: '主人' },
     { message_id: 'm-voice-4', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
   )
-  assert.match(内容.text, /^（语音：.+\.wav，2 秒；说话人：主人；情感：开心；背景：笑声；转写：你终于回来了）$/)
+  assert.match(内容.text, /^（语音：.+\.wav，2 秒；情感：开心；背景：笑声；转写：你终于回来了）$/)
 })
 
-test('入站语音：无声纹、事件只有 Speech 时只写情感和转写', async () => {
+test('入站语音：事件只有 Speech 时只写情感和转写', async () => {
   const dir = 临时目录()
   const 服务 = new 假服务({ asrText: '晚安', emotion: 'NEUTRAL', events: ['Speech'] })
   const bridge = 建语音桥(dir, 服务)
@@ -564,7 +560,7 @@ test('入站语音：无声纹、事件只有 Speech 时只写情感和转写', 
     { message_id: 'm-voice-5', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
   )
   assert.match(内容.text, /^（语音：.+\.wav，2 秒；情感：中性；转写：晚安）$/)
-  assert.doesNotMatch(内容.text, /说话人|背景|undefined|null/)
+  assert.doesNotMatch(内容.text, /背景|undefined|null/)
 })
 
 test('入站语音：未知情绪、events 为空时退回只有转写的样子', async () => {
@@ -579,10 +575,9 @@ test('入站语音：未知情绪、events 为空时退回只有转写的样子'
   assert.doesNotMatch(内容.text, /情感|背景|undefined|null/)
 })
 
-test('入站语音：多个事件只挑一个背景音；speaker.known=false 仍按名字写说话人', async () => {
+test('入站语音：多个事件只挑一个背景音', async () => {
   const dir = 临时目录()
   const 服务 = new 假服务({
-    speaker: { name: '主人', score: 0.4, known: false },
     emotion: 'FEARFUL',
     events: ['Music', '[Applause]', '[Laughter]'],
   })
@@ -591,18 +586,18 @@ test('入站语音：多个事件只挑一个背景音；speaker.known=false 仍
     { qq: QQ, name: '主人' },
     { message_id: 'm-voice-7', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
   )
-  assert.match(内容.text, /，2 秒；说话人：主人；情感：害怕；背景：笑声）$/)
+  assert.match(内容.text, /，2 秒；情感：害怕；背景：笑声）$/)
 })
 
 test('入站语音：旧版服务没 emotion/events 时消息保持原样，不出现 undefined/null', async () => {
   const dir = 临时目录()
-  const 服务 = new 假服务({ asrText: '晚安', speaker: { name: '主人', score: 0.9, known: true } })
+  const 服务 = new 假服务({ asrText: '晚安' })
   const bridge = 建语音桥(dir, 服务)
   const 内容 = await bridge.buildInbound(
     { qq: QQ, name: '主人' },
     { message_id: 'm-voice-8', message: [{ type: 'record', data: { file: 'voice.silk' } }] },
   )
-  assert.match(内容.text, /^（语音：.+\.wav，2 秒；说话人：主人；转写：晚安）$/)
+  assert.match(内容.text, /^（语音：.+\.wav，2 秒；转写：晚安）$/)
   assert.doesNotMatch(内容.text, /情感|背景|undefined|null/)
 })
 

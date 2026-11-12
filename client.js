@@ -832,7 +832,7 @@ window.__ModuleLoader__.load({
         }), null, '数值越大语速越快；范围 0.5 到 2，默认 1。'),
         (AI在线 && !转写可用) ? h('div', { style: { ...S.hint, marginBottom: 8 } }, '本地 AI 的语音识别暂不可用。') : null,
         行('收到语音后自动分析', 开关(配置.transcribeInbound, (v) => 改('transcribeInbound', v), !转写可用),
-          '会识别文字、说话人和情感；不勾选只把语音文件路径递进会话。', null),
+          '会识别文字和情感；不勾选只把语音文件路径递进会话。', null),
         行('语音分析语言', h('select', {
           style: S.input, value: 配置.asrLanguage || 'auto', disabled: !转写可用 || 配置.transcribeInbound === false,
           onChange: (e) => 改('asrLanguage', e.target.value),

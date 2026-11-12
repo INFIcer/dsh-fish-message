@@ -90,7 +90,7 @@ test('apiVersion 与 capabilities 与契约一致', () => {
     sendFile: true,
     fetchHistory: true,
     stickers: true,
-    transcribe: { text: false, speaker: false },
+    transcribe: { text: false },
   })
   // 每次都是新对象，调用方改不坏内部状态。
   const 一 = api.capabilities()

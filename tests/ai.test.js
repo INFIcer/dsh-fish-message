@@ -89,24 +89,20 @@ test('本地 AI：tts 正常时把音色和语速传给服务，并返回 wavPat
   assert.deepEqual(收到, { text: '晚安', opts: { voice: 'test_voice', speed: 2 } })
 })
 
-test('本地 AI：asr 正常时返回文字和声纹，非法语言回退 auto', async () => {
+test('本地 AI：asr 正常时返回文字，非法语言回退 auto', async () => {
   let 收到 = null
   const 服务 = 造服务({
     async asr(path, opts) {
       收到 = { path, opts }
-      return { ok: true, items: [{ text: '今晚早点睡', speaker: { name: '主人', score: 0.91, known: true } }] }
+      return { ok: true, items: [{ text: '今晚早点睡' }] }
     },
   })
   const ai = 建(() => 服务)
   const 结果 = await ai.asr('C:/a.wav', { language: 'klingon' })
   assert.equal(结果.ok, true)
   assert.equal(结果.text, '今晚早点睡')
-  assert.deepEqual(结果.speaker, { name: '主人', score: 0.91, known: true })
+  assert.equal('speaker' in 结果, false, '转写结果不再带声纹身份')
   assert.deepEqual(收到, { path: 'C:/a.wav', opts: { language: 'auto' } })
-
-  // 服务没给 speaker（或没识别出来）时是 null，不影响转写。
-  const 空结果 = await 建(() => 造服务()).asr('C:/a.wav')
-  assert.equal(空结果.speaker, null)
 })
 
 test('本地 AI：asr 带出情绪和背景音，旧版插件缺字段时是空串', async () => {

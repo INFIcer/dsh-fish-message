@@ -20,7 +20,7 @@ class 假投递 {
 }
 
 class 假语音 {
-  async transcribeRecord() { return { text: '', speakerName: '' } }
+  async transcribeRecord() { return { text: '' } }
   async fetchImage() { throw new Error('测试里不放图片') }
   async synthesize() { throw new Error('测试里不合成') }
 }
