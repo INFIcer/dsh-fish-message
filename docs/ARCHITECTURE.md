@@ -62,6 +62,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
 | `lib/voice.js` | 入站语音 get_record / 落盘 / 读时长；图片落盘 | 不做 ASR / TTS / 转码 |
 | `lib/ai.js` | 可选本地 AI 门面：能力探测、参数校验、错误转人话 | 不实现 AI，不直连服务端口 |
+| `lib/tts-text.js` | TTS 正文改写：地址拼读、日期时间数字、符号、分句切段（纯函数） | 不调服务、不读配置 |
 | `lib/outbox.js` | 持久化出站队列：去重、FIFO、退避、TTL、计数 | 不做网络发送 |
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 | `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
@@ -192,8 +193,10 @@ extractOutbound(text, onlyInsideMarkers)
   └─ parseDirectives：text / tts / image / voiceFile / file / sticker 有序 token
 ```
 
-`[语音]文字[/语音]` 解析成 `tts` token。发送时先调 `fish.service.tts` 合成；
-成功拿 `wavPath` 走 `record` 段。服务不可用或能力缺失时只回一句提示，不抛错刷屏。
+`[语音]文字[/语音]` 解析成 `tts` token。发送时先由 `lib/tts-text.js` 把文字改写成
+适合朗读的写法，再按 200 字一句切成多段，逐段调 `fish.service.tts` 合成；每段的
+`wavPath` 走一个 `record` 段，按顺序发出。服务不可用或能力缺失时只回一句提示，
+不抛错刷屏；任意一段合成失败则整条语音都不发，不会只发出半段。
 
 详细语法见 [`FORMAT.md`](FORMAT.md)。
 
@@ -203,7 +206,7 @@ extractOutbound(text, onlyInsideMarkers)
 |---|---|
 | `text` | `send_private_msg`，`text` 段 |
 | `image` | 本地图读 base64；网络图交 URL |
-| `tts` | 调 `fish.service.tts`，成功转 `record` 段；失败只提示，同轮其它 token 照发 |
+| `tts` | 改写成朗读文本 → 按句切段 → 逐段调 `fish.service.tts`，每段转一个 `record` 段；失败只提示，同轮其它 token 照发 |
 | `voiceFile` | 直接 `record` 段（已有音频文件） |
 | `file` | `file` 段（NapCat 支持时） |
 | `sticker` | 发送时查 `StickerStore` → 本地图片 → `image` 段；带 `stickerId` 供成功计数 |

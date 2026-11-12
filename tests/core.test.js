@@ -484,6 +484,27 @@ test('出站 [语音]文本[/语音]：本地 AI 正常时按配置音色/语速
   assert.deepEqual(服务.calls.tts, [{ text: '晚安，主人', opts: { voice: 'dafeiyu', speed: 1 } }])
 })
 
+test('出站 [语音]文本[/语音]：长文本合成多段后按顺序发多条语音', async () => {
+  const dir = 临时目录()
+  const 音频们 = ['tts-1.wav', 'tts-2.wav'].map((名) => join(dir, 名))
+  for (const 路径 of 音频们) writeFileSync(路径, 造wav(0.2))
+  const 服务 = new 假服务()
+  let 次 = 0
+  服务.tts = async (text, opts) => {
+    服务.calls.tts.push({ text, opts })
+    return { ok: true, items: [{ wavPath: 音频们[次++], voice: opts?.voice }] }
+  }
+  const 句 = '一'.repeat(98) + '。'
+  const { bridge, transport } = 建桥({ dir, ai: 建AI(服务) })
+  const 结果 = await bridge.deliverAssistantTurn(会话, '[QQ][语音]' + 句.repeat(3) + '[/语音][/QQ]')
+  assert.equal(结果.ok, true)
+  assert.equal(服务.calls.tts.length, 2)
+  assert.equal(transport.sent.length, 2, '两段语音应各发一条，且保持顺序')
+  assert.equal(transport.sent[0].segments[0].data.file, 音频们[0].replace(/\\/g, '/'))
+  assert.equal(transport.sent[1].segments[0].data.file, 音频们[1].replace(/\\/g, '/'))
+  assert.equal(服务.calls.tts.map((调) => 调.text).join(''), 句.repeat(3))
+})
+
 test('出站语音：服务在但 tts 能力关时降级提示，不抛错', async () => {
   const 服务 = new 假服务({ ttsOk: false, caps: { tts: { available: false, reason: 'model_missing' } } })
   const { bridge, transport } = 建桥({ ai: 建AI(服务) })
