@@ -17,7 +17,7 @@ Transport 适配器（v1：napcat-onebot）
 Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
    ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（可选附情感/背景音/转写）
-   ├─ 图片：image → inbox → DSH 附件（可选自动入表情库，可选先本地识图）
+   ├─ 图片：image → inbox → 图库（按 sha256 命中描述就不附原图）→ 本地识图 / DSH 附件
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
    ├─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
    │    └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
@@ -30,9 +30,10 @@ Delivery（lib/delivery.js）
 DSH 会话（模型照常开一轮）
 ```
 
-对上提供 `fish.message` Cordis 服务（`lib/service.js`），设置页/诊断走
-`/dsh-fish-message/*` 本地路由；表情库另有 `lib/stickers.js`（纯磁盘逻辑）和
-`lib/sticker-routes.js`（HTTP 门面）两层。
+对上提供 `fish.message` Cordis 服务（`lib/service.js`；含 `images` 图库门面，
+供别的插件按需取用），设置页/诊断走 `/dsh-fish-message/*` 本地路由；
+表情库另有 `lib/stickers.js`（纯磁盘逻辑）和 `lib/sticker-routes.js`（HTTP 门面）两层；
+收图图库是 `lib/image-library.js`（纯磁盘逻辑）+ `lib/vision-cache.js`（识图策略）。
 
 **职责边界：鱼讯只做 QQ 传输。** 语音和图片的基础链路（落盘、发送、补发）始终可用；
 语音识别 / 合成 / 本地识图是**可选能力**，由本地 AI 插件提供的 `fish.service` 支持。
@@ -67,8 +68,11 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 | `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
 | `lib/sticker-routes.js` | `/stickers*` 路由：参数校验、multipart、取图防穿越 | 不实现存储算法 |
+| `lib/image-library.js` | 收图图库：按 sha256 存原图与描述、命中计数、上限淘汰 | 不碰 HTTP / DSH，也不认识「识图」 |
+| `lib/vision-cache.js` | 入站图片的识别缓存策略：查库 / 本地识图 / 交给模型看 | 不存盘、不拼消息正文 |
 | `lib/tools.js` | `fish_sticker_list` / `fish_sticker_send` / `fish_sticker_save` 工具定义与注册 | 不直接读写索引 |
-| `lib/service.js` | `fish.message` 门面（发送/历史/语音/表情） | 不重新实现发送 |
+| `lib/image-tools.js` | `fish_image_get` / `fish_image_note` 工具定义与注册 | 不直接读写索引（走 `fish.message`） |
+| `lib/service.js` | `fish.message` 门面（发送/历史/语音/表情/图库） | 不重新实现发送 |
 
 ---
 
@@ -155,7 +159,13 @@ record 段
 ```text
 image / mface 段
   → url 下载 / base64:// / 本地路径
-  → 存 <家目录>\fish-message-inbox\qq-image-*
+  → 存 <家目录>\fish-message-inbox\qq-image-*（文件名按内容 sha16 寻址）
+  → 图库（imageLibraryEnabled 默认开）：按 sha256 查缓存
+       ├─ 命中且有描述 → 正文只用描述，不附原图
+       ├─ 命中但描述为空 → 按本地识图设置重新识图，补写描述并提醒
+       ├─ 未命中 + 本地识图开 → 识图成功后「原图 + 描述」入库
+       ├─ 未命中 + 本地识图关 → 原图交给模型，正文提醒用 fish_image_note 写回
+       └─ 识图失败 → 退回原图，不写库（下次重试）
   → 文字里附本地路径
   → delivery 用 ctx.attachments.admitPromptContent 递给会话
 ```
@@ -169,6 +179,49 @@ image / mface 段
 base64 附件，省会话 token。提示词只用于鱼讯自己的入站识图，作为显式覆盖参数传下去，
 与本地 AI 插件的会话识图、工具识图提示词相互独立。
 插件没装、没有 `visionPrefs` 或识图失败时保持「图片附件 + 路径」，不丢图。
+
+### 3.8 收图图库（缓存语义）
+
+```text
+VoiceService.fetchImage → (buffer, path, mime, ext)
+        │
+        ▼
+VisionCache.resolve（策略层）
+        │  sha256 = sha256(buffer)
+        │
+        ├─ lookup 命中 + 有描述 → noteHit → { source:'cache', desc }
+        ├─ lookup 命中 + 空描述 → 本地识图开着？setDesc + noteMiss : noteMiss，附原图
+        ├─ 未命中 + 本地识图开 → remember(原图+描述) + noteMiss
+        ├─ 未命中 + 本地识图关 → remember(原图+空描述) + noteMiss，附原图
+        └─ 本地识图失败 → noteMiss 也不记，附原图（不写库）
+        │
+        ▼
+ImageLibrary（存储层）
+   index.json                     原子写（fs-util.writeJsonAtomic）
+   img/<sha 前两位>/<sha>.<ext>   原图（imageLibraryKeepFiles 默认开）
+        │
+        ▼
+Bridge.buildInbound：desc 非空就只写文字，空就塞图片附件 + 提醒
+```
+
+索引条目字段：`sha256 / file / ext / mime / bytes / width / height / desc / descSource /
+descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
+`hits` 是「拿旧描述直接用」的次数，`misses` 是「没有可用描述、只能重新认」的次数
+（首次看到也算一次），两者相加就是「第几次见到」。
+
+约束：
+
+- **缓存语义**：超过 `imageLibraryMaxItems` / `imageLibraryMaxMB` 时按 `lastSeenAt`
+  从旧到新静默淘汰，不报错、不提示。表情库是收藏语义（有标签、到上限报错、绝不静默删），
+  两者刻意不合并、不共用底层。
+- **不依赖本地 AI**：图库只管「按指纹存取图 + 存取描述」，识图是可选能力。
+  没装本地 AI 时，已有描述的图照常命中；只是没描述的图认不出来。
+- **命中不给原图**：省 token，也避免同一张图反复占上下文。要细节时由模型主动调
+  `fish_image_get`（有附件服务就返回图片块，否则给本机路径）。
+- **缺描述要提醒**：入库时没有描述会写进正文提醒补；模型疏忽没填的，下次同一张图再来
+  仍然没有描述，于是再次识图 / 再次提醒，不会把「空描述」当成命中。
+- **两份图库代码，不做抽象层**：鱼讯这份服务「QQ 收图 / 表情包」场景；记忆插件以后
+  另有一份服务「用户形象 / 用户照片 / 梗图」场景。允许代码重复，不为此抽公共底层。
 
 ---
 
@@ -368,7 +421,9 @@ v1 不实现群聊。将来要加群：
 | 语音落盘失败 | 消息降级为 `[语音（保存失败）]`，不丢整条；分析跳过 |
 | `[语音]文字[/语音]` | 服务缺失/能力缺时只提示一句，不发语音；同轮其它内容照发 |
 | 入站语音分析失败 | 只递「语音：路径」，不影响消息投递 |
-| 入站图片识图失败 | 退回图片附件 + 路径，不丢图 |
+| 入站图片识图失败 | 退回图片附件 + 路径，不丢图；图库不写，下次这张图重新识图 |
+| 图库读写失败 | 记 warn，本次按「不复用缓存」处理（照常识图/递原图），不影响收消息 |
+| 图库索引损坏 | 整份留档 `index.json.bad-*` 后从空索引继续；单条坏条目丢弃并 warn |
 | 文字/图片/文件发送失败 | 入持久化出站队列；恢复后按 FIFO 补发 |
 | `record` 发送失败 | 三种 file 形态重试 3 次；仍失败存路径入队 |
 | 出站队列写盘失败 | 日志报错；本次消息可能丢（磁盘满等硬故障） |
@@ -425,6 +480,7 @@ v1 不实现群聊。将来要加群：
 | 服务抛错、`lastError` 有码 | 按 `code`、`httpStatus` 映射（507 → 显存不足，503 → 模型未就绪） |
 | 入站语音分析失败 | 只递语音路径，消息照常进会话 |
 | 入站识图失败 | 退回「图片附件 + 路径」，不丢图 |
+| 本地 AI 没装但在用收图图库 | 已有描述的图照常命中缓存；没描述的新图退回原图并提醒补描述 |
 | 插件的 `visionPrefs` 调不到 | 当作没偏好，入站识图按「开」；识图失败仍退附件 |
 
 所有能力调用都包在 `try/catch` 里，失败返回 `{ ok:false, code, hint }`。发送语音失败
@@ -441,6 +497,11 @@ v1 不实现群聊。将来要加群：
 | `asrLanguage` | `auto` | 分析语言：auto/zh/en/ja/ko/yue |
 | `describeInboundImages` | `inherit` | 入站识图：inherit 跟随本地 AI 插件，on/off 强制；旧布尔值 true→on、false→off |
 | `inboundImagePrompt` | 空串 | 入站图片/表情包识图提示词；空串用内置默认，最长 4000 字，非字符串/超长回退默认 |
+| `imageLibraryEnabled` | `true` | 收图图库总开关；关掉完全退回「每次按识图设置重新识别，不查库不写库」 |
+| `imageLibraryMaxItems` | `1000` | 图库条数上限，1~100000；超了淘汰最久没见到的 |
+| `imageLibraryMaxMB` | `512` | 图库原图总大小上限（MB），1~102400 |
+| `imageLibraryKeepFiles` | `true` | 是否在图库里存原图；关掉只留描述与尺寸 |
 
 `sayVoice` 是鱼讯自己的发送音色，与本地 AI 插件「朗读音色」是两套独立设置，互不覆盖。
 `inboundImagePrompt` 只影响鱼讯的入站识图，与本地 AI 插件的会话识图/工具识图提示词互不覆盖。
+图库落在 `<DSH 家目录>/fish-message-images/`（目录固定，四个设置项都不改目录）。
