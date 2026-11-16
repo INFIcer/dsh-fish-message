@@ -1,6 +1,6 @@
 {
   "name": "dsh-fish-message",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DSH 的 QQ 私聊桥：NapCat / OneBot 11 双向文字、图片、语音，带离线补投与转义标记。",
   "license": "MIT",
   "type": "module",
