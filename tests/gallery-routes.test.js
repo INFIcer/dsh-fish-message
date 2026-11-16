@@ -1,14 +1,12 @@
-// 图库管理路由：收图图库（列表 / 出图 / 改描述 / 打开原图）与记忆图库、声纹库
-// （服务缺失时降级、服务可用时转发并校验参数）。
+// 图库主面板的收图图库路由：列表 / 搜索 / 出图 / 改描述 / 打开原图。
 //
 // 不启宿主：直接拿 makeGalleryRouteHandlers() 的「路径 → handler」，用假 req/res 调；
-// 收图图库用真实存储层 + 临时目录，记忆服务用最小假服务。
+// 收图图库用真实存储层 + 临时目录。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { createHash } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ImageLibrary } from '../lib/image-library.js'
@@ -16,7 +14,6 @@ import { makeGalleryRouteHandlers } from '../lib/gallery-routes.js'
 import { makeGif, smallPng } from './image-fixtures.js'
 
 const prefix = '/dsh-fish-message'
-const shaOf = (buffer) => createHash('sha256').update(buffer).digest('hex')
 
 function makeRequest({ method = 'GET', url = '/', body = undefined } = {}) {
   const req = new EventEmitter()
@@ -163,144 +160,9 @@ test('收图图库：改描述只动索引，打开原图走资源管理器', as
   assert.equal(unsupported.statusCode, 501)
 })
 
-test('记忆图库：转发列表、出图与改描述；声纹库转发 people 与阈值', async () => {
-  const { dir } = makeLibrary()
-  const imagePath = join(dir, 'memory.png')
-  writeFileSync(imagePath, smallPng)
-  const calls = []
-  const entry = {
-    sha256: shaOf(smallPng),
-    name: '用户照片',
-    tags: ['主人'],
-    desc: '一张照片',
-    width: 1,
-    height: 1,
-    bytes: smallPng.length,
-    path: imagePath,
-  }
-  const service = {
-    images: {
-      async list(input) {
-        calls.push({ method: 'list', input })
-        return { total: 1, entries: [entry] }
-      },
-      async get(input) {
-        calls.push({ method: 'get', input })
-        return { entry }
-      },
-      async note(input) {
-        calls.push({ method: 'note', input })
-        return { updated: true, entry: { ...entry, desc: input.desc || entry.desc, tags: [...entry.tags, ...(input.tags || [])] } }
-      },
-    },
-    voices: {
-      async list() {
-        calls.push({ method: 'voices.list' })
-        return { threshold: 0.65, people: [{ name: '主人', tags: ['常用'], samples: 3, updated_at: '2026-11-16T12:00:00' }] }
-      },
-    },
-  }
-  const handlers = makeRoutes({ getMemory: () => service })
-
-  const listed = await invoke(handlers, `${prefix}/memory/images`, makeRequest({
-    url: `${prefix}/memory/images?q=${encodeURIComponent('照片')}&limit=10`,
-  }))
-  const listedBody = json(listed)
-  assert.equal(listedBody.ok, true)
-  assert.equal(listedBody.service, true)
-  assert.equal(listedBody.total, 1)
-  assert.equal(listedBody.entries[0].name, '用户照片')
-  assert.deepEqual(calls[0], { method: 'list', input: { q: '照片', tag: '', limit: 10 } })
-
-  const file = await invoke(handlers, `${prefix}/memory/images/file`, makeRequest({
-    url: `${prefix}/memory/images/file?sha256=${entry.sha256}`,
-  }))
-  assert.equal(file.statusCode, 200)
-  assert.equal(file.headers['content-type'], 'image/png')
-  assert.ok(file.body.equals(smallPng))
-  assert.deepEqual(calls[1], { method: 'get', input: { sha256: entry.sha256 } })
-
-  const noted = await invoke(handlers, `${prefix}/memory/images/note`, makeRequest({
-    method: 'POST',
-    url: `${prefix}/memory/images/note`,
-    body: { sha256: entry.sha256, desc: '新描述' },
-  }))
-  assert.equal(json(noted).ok, true)
-  assert.deepEqual(calls[2], { method: 'note', input: { sha256: entry.sha256, desc: '新描述' } })
-
-  const tags = await invoke(handlers, `${prefix}/memory/images/note`, makeRequest({
-    method: 'POST',
-    url: `${prefix}/memory/images/note`,
-    body: { sha256: entry.sha256, tags: ['新标签'] },
-  }))
-  assert.equal(json(tags).ok, true)
-  assert.deepEqual(calls[3].input, { sha256: entry.sha256, tags: ['新标签'] })
-
-  const voices = await invoke(handlers, `${prefix}/memory/voices`, makeRequest({
-    url: `${prefix}/memory/voices`,
-  }))
-  const voicesBody = json(voices)
-  assert.equal(voicesBody.ok, true)
-  assert.equal(voicesBody.service, true)
-  assert.equal(voicesBody.threshold, 0.65)
-  assert.equal(voicesBody.people[0].name, '主人')
-  assert.equal(voicesBody.people[0].samples, 3)
-})
-
-test('记忆服务缺失：两个记忆接口降级但不报错，收图图库照常', async () => {
-  const { library } = makeLibrary()
-  const handlers = makeRoutes({ images: library, getMemory: () => undefined })
-
-  const images = await invoke(handlers, `${prefix}/memory/images`, makeRequest({
-    url: `${prefix}/memory/images`,
-  }))
-  const imagesBody = json(images)
-  assert.equal(images.statusCode, 200)
-  assert.equal(imagesBody.ok, true)
-  assert.equal(imagesBody.service, false)
-  assert.equal(imagesBody.hint, '记忆插件未启用')
-  assert.deepEqual(imagesBody.entries, [])
-
-  const voices = await invoke(handlers, `${prefix}/memory/voices`, makeRequest({
-    url: `${prefix}/memory/voices`,
-  }))
-  const voicesBody = json(voices)
-  assert.equal(voices.statusCode, 200)
-  assert.equal(voicesBody.service, false)
-  assert.equal(voicesBody.hint, '记忆插件未启用')
-  assert.deepEqual(voicesBody.people, [])
-
-  const file = await invoke(handlers, `${prefix}/memory/images/file`, makeRequest({
-    url: `${prefix}/memory/images/file?sha256=${'a'.repeat(64)}`,
-  }))
-  assert.equal(file.statusCode, 404)
-
-  const note = await invoke(handlers, `${prefix}/memory/images/note`, makeRequest({
-    method: 'POST',
-    url: `${prefix}/memory/images/note`,
-    body: { sha256: 'a'.repeat(64), desc: 'x' },
-  }))
-  assert.equal(note.statusCode, 503)
-
-  // 收图图库不依赖记忆服务，照样能列。
-  const own = await invoke(handlers, `${prefix}/images`, makeRequest({ url: `${prefix}/images` }))
-  assert.equal(json(own).ok, true)
-  assert.equal(json(own).total, 0)
-})
-
-test('记忆服务抛错：返回 502 + 可读错误，不把裸异常抛给页面', async () => {
-  const handlers = makeRoutes({
-    getMemory: () => ({
-      images: { list: async () => { throw new Error('索引坏了') } },
-      voices: { list: async () => { throw new Error('声纹文件坏了') } },
-    }),
-  })
-  const images = await invoke(handlers, `${prefix}/memory/images`, makeRequest({ url: `${prefix}/memory/images` }))
-  assert.equal(images.statusCode, 502)
-  assert.equal(json(images).ok, false)
-  assert.equal(json(images).service, true)
-  assert.match(json(images).error, /索引坏了/)
-
-  const voices = await invoke(handlers, `${prefix}/memory/voices`, makeRequest({ url: `${prefix}/memory/voices` }))
-  assert.equal(voices.statusCode, 502)
+test('图库没准备好：列表返回 503，不抛裸异常', async () => {
+  const handlers = makeRoutes({ images: null })
+  const listed = await invoke(handlers, `${prefix}/images`, makeRequest({ url: `${prefix}/images` }))
+  assert.equal(listed.statusCode, 503)
+  assert.equal(json(listed).ok, false)
 })

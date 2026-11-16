@@ -1,7 +1,8 @@
 // dsh-fish-message · 设置页（DSH Web 客户端插件）
 //
 // 纯原生 JS + React（DSH 平台自带），没有 npm、没有 CDN、没有构建步骤。
-// 挂载方式照 dsh-qq-bridge 的 client.js：window.__ModuleLoader__.load → slots.register('settings.section')。
+// 挂载方式照 dsh-qq-bridge 的 client.js：window.__ModuleLoader__.load → slots.register。
+// 设置页注册 settings.section；图库管理注册 main 主面板 + sidebar.panellist 侧边栏入口。
 // 这里只读写宿主路由，不直接碰 QQ / 会话。
 
 window.__ModuleLoader__.load({
@@ -10,7 +11,8 @@ window.__ModuleLoader__.load({
     const module = { exports: {} }
     const exports = module.exports
     const React = require('react')
-    const inject = ['slots']
+    // layout 用来从设置页切到图库主面板（selectPanel）。
+    const inject = ['slots', 'layout']
     const h = React.createElement
     const B = '/dsh-fish-message'
 
@@ -26,9 +28,8 @@ window.__ModuleLoader__.load({
       .then((r) => r.json())
       .catch((error) => ({ ok: false, error: String(error?.message || error) }))
     const imageUrl = (entry) => `${B}/stickers/file?path=${encodeURIComponent(entry?.file || '')}`
-    // 收图图库与记忆图库都按指纹出图：前端不传路径，后端自己按索引找文件。
+    // 收图图库按指纹出图：前端不传路径，后端自己按索引找文件。
     const cachedImageUrl = (entry) => `${B}/images/file?sha256=${encodeURIComponent(entry?.sha256 || '')}`
-    const memoryImageUrl = (entry) => `${B}/memory/images/file?sha256=${encodeURIComponent(entry?.sha256 || '')}`
     // 图库条目的描述来源：识图结果来自本地模型、API 路径、手动填写，或从表情库借来。
     const descSourceText = (source) => ({
       local: '本地识图',
@@ -189,14 +190,6 @@ window.__ModuleLoader__.load({
         cursor: 'pointer',
       },
       toolbar: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
-      tableRow: {
-        display: 'grid',
-        gridTemplateColumns: '160px 80px 1fr 170px',
-        gap: 8,
-        alignItems: 'center',
-        padding: '6px 0',
-        borderBottom: '1px solid var(--dsw-alias-border-l2)',
-      },
       log: {
         fontFamily: 'ui-monospace, Consolas, monospace',
         fontSize: 11.5,
@@ -267,8 +260,8 @@ window.__ModuleLoader__.load({
 
     // ---------------- 图库管理页 ----------------
     // 四个库合成一个整页：顶部吸顶条放「返回设置」与页签，各页签自己带工具栏与状态提示。
-    // 表情库、收图图库是鱼讯本地存储（/stickers*、/images*）；记忆图库、声纹库来自
-    // 记忆插件的 memory.library 服务（/memory/*），服务缺失时只降级对应页签。
+    // 表情库、收图图库都由鱼讯自己提供（/stickers*、/images*）；记忆图库与声纹库的页面
+    // 归记忆插件，本插件不注册它们的入口。
     // 预览直接用 <img> 指向库中原图，GIF 会自己动；loading="lazy" 做惰性加载。
     function stickerTab({ bindings }) {
       const [list, setList] = React.useState({ items: [], total: 0, stats: {}, tags: [] })
@@ -473,13 +466,12 @@ window.__ModuleLoader__.load({
 
     // ---------------- 收图图库页签 ----------------
     // 缓存语义：列出「见过什么图、上次认成什么」，可以改描述、存为表情、打开原图。
-    // 配置项与设置页共用同一份 config，改完要点「保存设置」才落盘。
-    function imageTab({ config, change, save, imageDir = '' }) {
+    // 图库配置项留在设置页的「收图图库」块里；主面板只做浏览与单条操作。
+    function imageTab({ imageDir = '' }) {
       const [list, setList] = React.useState({ entries: [], total: 0, stats: {} })
       const [q, setQ] = React.useState('')
       const [edits, setEdit] = React.useState({})
       const [busy, setBusy] = React.useState(false)
-      const [saving, setSaving] = React.useState(false)
       const [say, setSay] = React.useState('')
 
       const error = (r) => String((r && (r.error || r.message)) || '没有收到服务响应。')
@@ -553,48 +545,25 @@ window.__ModuleLoader__.load({
         await fetch()
       }
 
-      const saveConfig = async () => {
-        setSaving(true); setSay('正在保存设置…')
-        const r = await save()
-        setSaving(false)
-        setSay(r && r.ok ? '设置已保存。' : '保存失败：' + error(r))
-        await fetch()
-      }
-
-      const configCard = h('div', { style: S.card },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '收图图库设置'),
+      const toolbarCard = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '收图图库'),
         h('div', { style: S.dim }, '把收到的图片按内容指纹存下来，并记住上次识别出的描述；同一张图再来就直接用描述，不再识图。'),
-        row('收图先查图库', flag(config.imageLibraryEnabled !== false, (v) => change('imageLibraryEnabled', v)),
-          null,
-          '关掉后每次按「收到图片后先在本地识图」的设置重新识别，不查库也不写库。'),
-        row('图库条数上限', h('input', {
-          style: S.small, type: 'number', min: 1, max: 100000, value: config.imageLibraryMaxItems ?? 1000,
-          onChange: (e) => change('imageLibraryMaxItems', Number(e.target.value)),
-        }), null, '超过上限时淘汰最久没见到的图；图库是缓存，淘汰不提示。'),
-        row('原图占用上限（MB）', h('input', {
-          style: S.small, type: 'number', min: 1, max: 102400, value: config.imageLibraryMaxMB ?? 512,
-          onChange: (e) => change('imageLibraryMaxMB', Number(e.target.value)),
-        }), null, '只算图库自己存的那些原图。'),
-        row('在图库里存原图', flag(config.imageLibraryKeepFiles !== false, (v) => change('imageLibraryKeepFiles', v)),
-          null,
-          '关掉只留描述与尺寸；入站缓存被清理后就没法回看图库里的原图。'),
-        h('div', { style: { ...S.dim, marginTop: 8 } },
-          `共 ${stats.count || 0} 张（上限 ${config.imageLibraryMaxItems ?? 1000}）｜有描述 ${stats.withDesc || 0} 张｜命中 ${stats.hits || 0} 次｜占用 ${stats.sizeMB || 0}MB（上限 ${config.imageLibraryMaxMB ?? 512}MB）`),
-        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
-          h('button', { type: 'button', style: S.btn, onClick: saveConfig, disabled: saving }, saving ? '正在保存…' : '保存设置'),
-          h('button', { type: 'button', style: S.btn, onClick: clearLibrary, disabled: busy }, '清空图库'),
-          imageDir ? h('button', { type: 'button', style: S.btn, onClick: openImageFolder, disabled: busy }, '打开图库文件夹') : null),
-        say ? h('div', { style: { ...(isError(say) ? S.danger : S.ok), marginTop: 6 } }, say) : null)
-
-      const gridCard = h('div', { style: S.card },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, `缓存图片（${list.total ?? entries.length} 张）`),
-        h('div', { style: S.toolbar },
+        h('div', { style: { ...S.dim, marginTop: 6 } },
+          `共 ${stats.count || 0} 张｜有描述 ${stats.withDesc || 0} 张｜命中 ${stats.hits || 0} 次｜占用 ${stats.sizeMB || 0}MB`),
+        h('div', { style: S.toolbar, marginTop: 8 },
           h('input', {
             style: { ...S.input, width: 220 },
             value: q, placeholder: '搜索描述、指纹或文件名',
             onChange: (e) => setQ(e.target.value),
           }),
-          h('button', { type: 'button', style: S.btn, onClick: fetch, disabled: busy }, '刷新')),
+          h('button', { type: 'button', style: S.btn, onClick: fetch, disabled: busy }, '刷新'),
+          h('button', { type: 'button', style: S.btn, onClick: clearLibrary, disabled: busy }, '清空图库'),
+          imageDir ? h('button', { type: 'button', style: S.btn, onClick: openImageFolder, disabled: busy }, '打开图库文件夹') : null),
+        h('div', { style: { ...S.hint, marginTop: 6 } }, '收图先查图库、条数上限、空间上限与存不存原图，都在设置页「收图图库」里改。'),
+        say ? h('div', { style: { ...(isError(say) ? S.danger : S.ok), marginTop: 6 } }, say) : null)
+
+      const gridCard = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, `缓存图片（${list.total ?? entries.length} 张）`),
         entries.length === 0
           ? h('div', { style: { ...S.dim, marginTop: 8 } }, '暂无图片。收到的图片会按内容指纹先进这里。')
           : h('div', { style: S.grid }, entries.map((entry) => {
@@ -626,201 +595,100 @@ window.__ModuleLoader__.load({
                 }, '打开原图')))
           })))
 
-      return h('div', null, configCard, gridCard)
+      return h('div', null, toolbarCard, gridCard)
     }
 
-    /** 记忆服务缺失时，记忆图库与声纹库两个页签共用的降级提示。 */
-    function memoryOffCard(title) {
-      return h('div', { style: S.card },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, title),
-        h('div', { style: S.dim }, '记忆插件未启用'),
-        h('div', { style: S.hint }, '装好记忆插件并重启 DSH 后，这里会显示记忆库的内容；其它页签不受影响。'))
-    }
-
-    // ---------------- 记忆图库页签 ----------------
-    // 数据一律经 ctx.get('memory.library') 服务读取，本插件不直接碰记忆库的目录；
-    // 这里只做「看 + 改描述 + 追加标签」，删除与登记留给记忆插件自己的工具。
-    function memoryTab({ memoryEnabled }) {
-      const [list, setList] = React.useState({ entries: [], total: 0 })
-      const [q, setQ] = React.useState('')
-      const [off, setOff] = React.useState(memoryEnabled === false)
-      const [edits, setEdit] = React.useState({})
-      const [busy, setBusy] = React.useState(false)
-      const [say, setSay] = React.useState('')
-
-      const error = (r) => String((r && (r.error || r.message)) || '没有收到服务响应。')
-
-      const fetch = async () => {
-        if (memoryEnabled === false) { setOff(true); return }
-        const p = new URLSearchParams()
-        p.set('limit', '200')
-        if (q.trim()) p.set('q', q.trim())
-        const r = await get('/memory/images?' + p.toString())
-        if (r && r.service === false) { setOff(true); return }
-        if (r && r.ok) {
-          setOff(false)
-          setList({ entries: Array.isArray(r.entries) ? r.entries : [], total: Number(r.total) || 0 })
-        } else if (r && r.error) setSay('无法读取记忆图库：' + error(r))
-      }
-      // 服务可能比页面晚就绪（/state 每 5 秒刷一次），所以依赖 memoryEnabled 再试一次。
-      React.useEffect(() => {
-        if (memoryEnabled !== false) fetch()
-      }, [memoryEnabled])
-      React.useEffect(() => {
-        const t = setTimeout(fetch, 300)
-        return () => clearTimeout(t)
-      }, [q])
-
-      const entries = Array.isArray(list.entries) ? list.entries : []
-      const valueOf = (entry) => edits[entry.sha256] || { desc: entry.desc || '', tags: '' }
-      const patch = (entry, next) => setEdit((prev) => ({
-        ...prev, [entry.sha256]: { ...(prev[entry.sha256] || valueOf(entry)), ...next },
-      }))
-      const applyNote = async (entry, payload, okText) => {
-        setBusy(true)
-        const r = await post('/memory/images/note', { sha256: entry.sha256, ...payload })
-        setBusy(false)
-        if (!r || !r.ok) setSay('保存失败：' + error(r))
-        else {
-          setSay(okText)
-          setEdit((prev) => { const next = { ...prev }; delete next[entry.sha256]; return next })
-          await fetch()
-        }
-      }
-      const saveDesc = (entry) => applyNote(entry, { desc: valueOf(entry).desc }, '描述已保存。')
-      const appendTags = (entry) => {
-        const tags = String(valueOf(entry).tags || '').split(/[,，、\s]+/).map((x) => x.trim()).filter(Boolean)
-        if (!tags.length) { setSay('请先填写要追加的标签。'); return undefined }
-        return applyNote(entry, { tags }, '标签已追加。')
-      }
-
-      if (off) return memoryOffCard('记忆图库')
-
-      return h('div', null,
-        h('div', { style: S.card },
-          h('div', { style: { ...S.h, margin: '0 0 8px' } }, `记忆图库（${list.total ?? entries.length} 张）`),
-          h('div', { style: S.toolbar },
-            h('input', {
-              style: { ...S.input, width: 220 },
-              value: q, placeholder: '搜索名字、描述、标签',
-              onChange: (e) => setQ(e.target.value),
-            }),
-            h('button', { type: 'button', style: S.btn, onClick: fetch, disabled: busy }, '刷新')),
-          h('div', { style: { ...S.hint, marginTop: 4 } }, '这里只读浏览与改描述、加标签；登记和删除请用记忆插件的工具。'),
-          say ? h('div', { style: { ...(isError(say) ? S.danger : S.ok), marginTop: 6 } }, say) : null),
-        entries.length === 0
-          ? h('div', { style: S.card }, h('div', { style: S.dim }, '记忆图库里还没有图片。'))
-          : h('div', { style: S.grid }, entries.map((entry) => {
-            const v = valueOf(entry)
-            return h('div', { key: entry.sha256, style: S.stickerCard },
-              entry.path
-                ? h('img', {
-                  src: memoryImageUrl(entry), loading: 'lazy', alt: entry.desc || entry.name || entry.sha256, style: S.thumb,
-                })
-                : h('div', {
-                  style: {
-                    ...S.thumb, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, opacity: 0.6,
-                  },
-                }, '没有原图'),
-              h('div', { style: { fontSize: 12, fontWeight: 600, wordBreak: 'break-all' } },
-                entry.name || entry.sha256.slice(0, 12)),
-              h('div', { style: { fontSize: 11, opacity: 0.6 } },
-                `${entry.width || 0}×${entry.height || 0}｜${Math.round((entry.bytes || 0) / 102.4) / 10}KB`),
-              h('div', null, (entry.tags || []).map((t) => h('span', { key: t, style: S.chip }, `#${t}`))),
-              h('input', {
-                style: S.input, value: v.desc, placeholder: '描述',
-                onChange: (e) => patch(entry, { desc: e.target.value }),
-              }),
-              h('input', {
-                style: S.input, value: v.tags, placeholder: '追加标签，以逗号分隔',
-                onChange: (e) => patch(entry, { tags: e.target.value }),
-              }),
-              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                h('button', { type: 'button', style: S.btn, onClick: () => saveDesc(entry), disabled: busy }, '保存描述'),
-                h('button', { type: 'button', style: S.btn, onClick: () => appendTags(entry), disabled: busy }, '追加标签')))
-          })))
-    }
-
-    // ---------------- 声纹库页签 ----------------
-    // 只读列表：名字、样本数、标签、更新时间；登记与删除同样留给记忆插件。
-    function voiceTab({ memoryEnabled }) {
-      const [data, setData] = React.useState({ people: [], threshold: 0 })
-      const [off, setOff] = React.useState(memoryEnabled === false)
-      const [busy, setBusy] = React.useState(false)
-      const [say, setSay] = React.useState('')
-
-      const error = (r) => String((r && (r.error || r.message)) || '没有收到服务响应。')
-
-      const fetch = async () => {
-        if (memoryEnabled === false) { setOff(true); return }
-        const r = await get('/memory/voices')
-        if (r && r.service === false) { setOff(true); return }
-        if (r && r.ok) {
-          setOff(false)
-          setData({ people: Array.isArray(r.people) ? r.people : [], threshold: Number(r.threshold) || 0 })
-        } else if (r && r.error) setSay('无法读取声纹库：' + error(r))
-      }
-      React.useEffect(() => {
-        if (memoryEnabled !== false) fetch()
-      }, [memoryEnabled])
-
-      if (off) return memoryOffCard('声纹库')
-      const people = Array.isArray(data.people) ? data.people : []
-
-      return h('div', { style: S.card },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, `声纹库（${people.length} 人）`),
-        h('div', { style: S.dim }, `判定阈值 ${data.threshold || 0}：相似度达到阈值才算同一个人。`),
-        h('div', { style: S.toolbar },
-          h('button', { type: 'button', style: S.btn, onClick: fetch, disabled: busy }, '刷新')),
-        h('div', { style: { ...S.hint, marginTop: 4 } }, '这里只读查看；登记样本与删除需要记忆插件的工具。'),
-        say ? h('div', { style: { ...(isError(say) ? S.danger : S.ok), marginTop: 6 } }, say) : null,
-        h('div', { style: { ...S.tableRow, marginTop: 10 } },
-          h('div', { style: S.th }, '名字'),
-          h('div', { style: S.th }, '样本数'),
-          h('div', { style: S.th }, '标签'),
-          h('div', { style: S.th }, '更新时间')),
-        people.length === 0
-          ? h('div', { style: { ...S.dim, marginTop: 8 } }, '声纹库里还没有人。')
-          : people.map((person) => h('div', { key: person.name, style: S.tableRow },
-            h('div', null, person.name || '（未命名）'),
-            h('div', null, String(person.samples || 0)),
-            h('div', null, (person.tags || []).map((t) => h('span', { key: t, style: S.chip }, `#${t}`))),
-            h('div', { style: { fontSize: 11.5, opacity: 0.62 } }, timeText(person.updated_at)))))
-    }
-
+    // 图库主面板的页签：只服务鱼讯自己的两个库。
     const galleryTabs = [
       { id: 'stickers', label: '表情库' },
       { id: 'images', label: '收图图库' },
-      { id: 'memory', label: '记忆图库' },
-      { id: 'voices', label: '声纹库' },
     ]
 
     /**
-     * 图库管理整页：四个库共用一个入口，页签切换只换内容区，吸顶条常驻。
-     * tab 由 Section 控制，方便设置页的两个入口直接落到对应页签。
+     * 跨面板的小 store：设置页按钮先把目标页签写进来，再切主面板。
+     * GalleryPage 在面板常驻时订阅它，所以「已经在本面板」也能切页签，
+     * 不依赖 React 父子传参（设置页与主面板是两棵组件树）。
      */
-    function galleryPage({
-      tab = 'stickers', onTab, backToSettings, bindings,
-      config, change, save, imageDir = '', memoryEnabled = false,
-    }) {
+    const galleryStore = (() => {
+      let tab = 'stickers'
+      const listeners = new Set()
+      return {
+        get: () => tab,
+        set(next) {
+          tab = next === 'images' ? 'images' : 'stickers'
+          for (const fn of [...listeners]) {
+            try { fn(tab) } catch { /* 单个订阅出错不影响其它订阅 */ }
+          }
+        },
+        subscribe(fn) {
+          listeners.add(fn)
+          return () => listeners.delete(fn)
+        },
+      }
+    })()
+    let layoutService = null
+
+    /** 切到图库主面板；layout 不可用（极简宿主/测试）时至少把页签记对。 */
+    function openGallery(tab) {
+      galleryStore.set(tab)
+      try {
+        layoutService?.selectPanel?.('fish-gallery')
+      } catch { /* 主面板切不过去时页面仍能通过侧边栏进入 */ }
+    }
+
+    /** 侧边栏「图库」入口图标：相框 + 山与太阳，跟随主题色。 */
+    function galleryIcon({ size = 18 } = {}) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.2,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': 'true',
+      },
+      h('rect', { x: 1.75, y: 2.75, width: 12.5, height: 10.5, rx: 2 }),
+      h('circle', { cx: 5.4, cy: 6.3, r: 1.15 }),
+      h('path', { d: 'M2.6 11.3l3.2-3 2.2 2 2.5-2.5 3 3.2' }))
+    }
+
+    /**
+     * 图库管理主面板：自带标题、页签与内容区，由侧边栏「图库」或设置页入口打开。
+     * 绑定与图库目录从 /state 现取；页签状态放模块级 store，跨面板可见。
+     */
+    function galleryPage() {
+      const [tab, setTab] = React.useState(galleryStore.get())
+      const [state, setState] = React.useState(null)
+      React.useEffect(() => galleryStore.subscribe(setTab), [])
+      React.useEffect(() => {
+        let valid = true
+        get('/state').then((s) => { if (valid && s) setState(s) })
+        return () => { valid = false }
+      }, [])
+
       const current = galleryTabs.some((item) => item.id === tab) ? tab : 'stickers'
+      const config = (state && state.config) || {}
+      const bindings = Array.isArray(config.bindings) ? config.bindings : []
+      const imageDir = String((state && state.imageDir) || '')
       const bar = h('div', { style: S.bar },
         h('div', { style: S.barRow },
-          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 } },
-            h('button', { type: 'button', style: S.btn, onClick: backToSettings }, '返回设置'),
-            h('div', { style: { ...S.h1, margin: 0 } }, '图库管理')),
-          h('div', { style: S.dim }, '表情库与收图图库在本机；记忆图库与声纹库来自记忆插件。')),
+          h('div', { style: { ...S.h1, margin: 0 } }, '图库管理'),
+          h('div', { style: S.dim }, '表情库与收图图库都存在本机，各自独立。')),
         h('div', { style: S.tabBar }, galleryTabs.map((item) => h('button', {
           key: item.id,
           type: 'button',
           style: item.id === current ? S.tabOn : S.tab,
-          onClick: () => onTab(item.id),
+          onClick: () => galleryStore.set(item.id),
         }, item.label))))
-      const body = current === 'stickers' ? h(stickerTab, { bindings })
-        : current === 'images' ? h(imageTab, { config, change, save, imageDir })
-          : current === 'memory' ? h(memoryTab, { memoryEnabled })
-            : h(voiceTab, { memoryEnabled })
-      return h('div', { className: 'fish-msg-settings', style: { ...S.wrap, minHeight: '62vh' } }, bar, body)
+      const body = current === 'stickers' ? h(stickerTab, { bindings }) : h(imageTab, { imageDir })
+      return h('div', {
+        className: 'fish-msg-settings',
+        style: {
+          ...S.wrap, minHeight: '100%', border: 'none', borderRadius: 0, background: 'transparent',
+        },
+      }, bar, body)
     }
 
     /** 设置页里的表情包入口：只放统计与入口按钮，页面内容在「图库管理 → 表情库」。 */
@@ -922,10 +790,6 @@ window.__ModuleLoader__.load({
       // 当前正在执行的动作，用来让吸顶条上的按钮显示「正在保存…」这类状态。
       const [action, setAction] = React.useState('')
       const [say, setSay] = React.useState('')
-      // 图库管理（四个库的网格）占用面积大，放在独立视图里，设置页只留入口。
-      const [view, setView] = React.useState('main')
-      // 图库管理当前页签；设置页的两个入口分别定位到「表情库」「收图图库」。
-      const [galleryTab, setGalleryTab] = React.useState('stickers')
       // 发送音色下拉：只在本地 AI 的语音能力可用时拉一次；失败就退回文本输入。
       const [voices, setVoices] = React.useState(null)
       const [voiceHint, setVoiceHint] = React.useState('')
@@ -973,11 +837,6 @@ window.__ModuleLoader__.load({
         change('bindings', [...bindings(), { qq: '', session: firstSession, name: '主人', enabled: true }])
       }
       const deleteBinding = (i) => change('bindings', bindings().filter((_, j) => j !== i))
-      const openGallery = (tab) => {
-        setGalleryTab(tab || 'stickers')
-        setView('gallery')
-        setSay('')
-      }
 
       const store = async () => {
         setBusy(true); setAction('保存'); setSay('正在保存…')
@@ -990,8 +849,6 @@ window.__ModuleLoader__.load({
         } else {
           setSay('保存失败：' + String((r && (r.error || r.message)) || '没有收到服务响应，请稍后重试。'))
         }
-        // 图库管理页签里的「保存设置」也要能拿到结果，图库页据此提示成败。
-        return r
       }
       const testPlainText = async () => {
         setBusy(true); setAction('测试'); setSay('正在发送测试消息…')
@@ -1022,20 +879,6 @@ window.__ModuleLoader__.load({
       }
 
       if (!state) return h('div', { className: 'fish-msg-settings', style: S.wrap }, h('div', { style: S.h1 }, '鱼讯 QQ'), h('div', { style: S.dim }, '正在读取当前状态…'))
-
-      if (view === 'gallery') {
-        return h(galleryPage, {
-          tab: galleryTab,
-          onTab: setGalleryTab,
-          backToSettings: () => setView('main'),
-          bindings: bindings(),
-          config: config,
-          change: change,
-          save: store,
-          imageDir: String(state.imageDir || ''),
-          memoryEnabled: Boolean(state.memory && state.memory.service),
-        })
-      }
 
       const bridge = state.bridge || {}
       const pass = bridge.transport || {}
@@ -1419,14 +1262,27 @@ window.__ModuleLoader__.load({
       injectWidgetStyle()
       const slots = ctx.get('slots')
       if (slots === undefined) return
+      // 主面板切换靠 layout；极简宿主没有这个服务时，侧边栏仍能进入面板。
+      try { layoutService = ctx.get('layout') || ctx.layout || null } catch { layoutService = null }
       slots.inject('settings.section', () => slots.register(
         { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' },
         Section,
+      ))
+      // 图库管理是独立主面板（不是设置内嵌页）：侧边栏「图库」和设置页入口都指向它。
+      slots.inject('main', () => slots.register(
+        { name: 'main', key: 'fish-gallery' },
+        galleryPage,
+      ))
+      slots.inject('sidebar.panellist', () => slots.register(
+        { name: 'sidebar.panellist', id: 'fish-gallery', order: 20, label: () => '图库' },
+        galleryIcon,
       ))
     }
 
     exports.apply = apply
     exports.inject = inject
+    // 测试用：跨面板页签 store 与入口函数；生产代码只经页签按钮与设置页按钮使用。
+    exports.__test = { galleryStore, openGallery }
     return module.exports
   },
 })

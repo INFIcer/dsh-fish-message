@@ -1,9 +1,9 @@
-// 客户端设置页的冒烟测试。
+// 客户端冒烟测试：设置页 Section + 图库管理主面板 GalleryPage。
 //
-// client.js 是 DSH 的浏览器端插件，平时只能在设置面板里跑。这里用假的
-// window.__ModuleLoader__ / React / slots 把它加载起来、真的跑一遍 Section
-// 渲染，专门抓「页面一打开就抛异常」的问题（例如 TDZ：const 声明写在使用之后，
-// node --check 只查语法，查不出来）。
+// client.js 是 DSH 的浏览器端插件，平时只能在 Web 客户端里跑。这里用假的
+// window.__ModuleLoader__ / React / slots / layout 把它加载起来、真的跑一遍渲染，
+// 专门抓「页面一打开就抛异常」的问题（例如 TDZ：const 声明写在使用之后，
+// node --check 只查语法，查不出来），以及面板注册与跨面板切页签的参数。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -17,6 +17,7 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 function makeReact() {
   let preset = []
   let order = 0
+  const named = new Map()
   const unset = Symbol('未设')
   const emptyFunc = () => {}
 
@@ -42,10 +43,16 @@ function makeReact() {
     /** 给第 n 个 useState 预设值；不传就按组件自己的初值渲染。 */
     setPreset(values) { preset = values || []; order = 0 },
     /**
-     * 展开子组件前把游标归零：假 React 的 useState 按调用顺序取预设，
-     * 每个组件从自己的第一个 hook 开始，才不会串到父组件的预设上。
+     * 展开某个函数组件前调用：按组件名取它自己的预设，没有就按初值渲染。
+     * 假 React 的 useState 按调用顺序取预设，不按组件隔离会串到父组件的预设上。
      */
-    resetOrder() { order = 0 },
+    resetOrder(type) {
+      const name = typeof type === 'function' ? type.name : ''
+      preset = name && named.has(name) ? named.get(name) : []
+      order = 0
+    },
+    /** 给某个函数组件单独预设 useState 初值（展开子组件时用）。 */
+    presetFor(name, values) { named.set(name, values || []) },
   }
 }
 
@@ -72,16 +79,12 @@ function collectText(node, result = []) {
   return result
 }
 
-/**
- * 展开函数组件：假 React 的 createElement 只生成元素对象、不执行子组件，
- * 要看到图库管理页签里的内容，得手动递归调用函数组件。每次调用前把 hook 游标归零，
- * 让每个组件从自己的第一个 useState 开始取预设。
- */
+/** 展开函数组件：假 React 的 createElement 只生成元素对象、不执行子组件。 */
 function expandTree(node, fake) {
   if (node == null || typeof node !== 'object') return node
   if (Array.isArray(node)) return node.map((child) => expandTree(child, fake))
   if (typeof node.type === 'function') {
-    fake.resetOrder()
+    fake.resetOrder(node.type)
     return expandTree(node.type(node.props), fake)
   }
   return { ...node, children: (node.children || []).map((child) => expandTree(child, fake)) }
@@ -104,39 +107,11 @@ function findButton(root, text) {
   return findAll(root, (node) => node.type === 'button' && collectText(node.children).join('') === text)
 }
 
-/** Section 的 hook 顺序：state / dirty / busy / action / say / view / galleryTab / voices / voiceHint。 */
-function sectionPreset({ state = fullState(), view = 'main', galleryTab = 'stickers' } = {}) {
-  return [state, undefined, undefined, undefined, undefined, view, galleryTab, undefined, undefined]
-}
-
-/** 注册 Section 并返回可反复渲染的测试环境。 */
-async function setupSection() {
-  const fake = await loadClient()
-  const registrations = []
-  const slots = {
-    inject(name, registrar) { assert.equal(name, 'settings.section'); registrar() },
-    register(mod, component) { registrations.push({ mod, component }); return () => {} },
-  }
-  fake.module.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-  assert.equal(registrations.length, 1, '应该注册一个设置区块')
-  const component = registrations[0].component
-  return {
-    ...fake,
-    component,
-    render(preset) {
-      fake.setPreset(preset)
-      return component()
-    },
-    /** 展开子组件前清空预设，让各页签按自己的初始 state 渲染。 */
-    clearPreset() { fake.setPreset([]) },
-  }
-}
-
 /** 一条足够渲染整页的 /state 快照。 */
 function fullState() {
   return {
     ok: true,
-    version: '0.1.0',
+    version: '0.2.1',
     config: {
       napcatBaseUrl: 'http://127.0.0.1:3000',
       napcatToken: '***已设置***',
@@ -206,6 +181,8 @@ function fullState() {
     memory: { service: false, localAI: true },
     stickerDir: 'C:/tmp/stickers',
     stickerDirExists: true,
+    imageDir: 'C:/tmp/fish-message-images',
+    images: { count: 0, keepFiles: true, maxItems: 1000, maxMB: 512 },
     logs: [],
   }
 }
@@ -236,40 +213,73 @@ async function loadClient() {
   return { ...fake, module }
 }
 
-test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染，不抛异常', async () => {
-  const { React, setPreset, module } = await loadClient()
-  const registrations = []
+/** 注册全部 slot，返回可反复渲染设置页 / 图库主面板的测试环境。 */
+async function setupPlugin() {
+  const fake = await loadClient()
+  const bySlot = new Map()
+  const selected = []
+  const layout = { selectPanel(id) { selected.push(id) } }
   const slots = {
-    inject(name, registrar) { assert.equal(name, 'settings.section'); registrar() },
-    register(mod, component) { registrations.push({ mod, component }); return () => {} },
+    inject(name, registrar) {
+      assert.ok(typeof registrar === 'function', `${name} 需要注册函数`)
+      registrar()
+    },
+    register(mod, component) {
+      assert.ok(mod && typeof mod.name === 'string', 'slot 注册要有 name')
+      const list = bySlot.get(mod.name) || []
+      list.push({ mod, component })
+      bySlot.set(mod.name, list)
+      return () => {}
+    },
   }
+  fake.module.apply({
+    get: (name) => (name === 'slots' ? slots : name === 'layout' ? layout : undefined),
+    layout,
+  })
+  const componentOf = (slot) => (bySlot.get(slot) || [])[0]?.component
+  return {
+    ...fake,
+    bySlot,
+    selected,
+    section: componentOf('settings.section'),
+    main: componentOf('main'),
+    icon: componentOf('sidebar.panellist'),
+    renderSection(values) {
+      fake.setPreset(values)
+      return componentOf('settings.section')()
+    },
+    renderMain(values) {
+      fake.setPreset(values)
+      return componentOf('main')()
+    },
+  }
+}
 
-  assert.equal(typeof module.apply, 'function')
-  module.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
-  assert.equal(registrations.length, 1, '应该注册一个设置区块')
-  const component = registrations[0].component
-
+test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染，不抛异常', async () => {
+  const env = await setupPlugin()
   const render = (state) => {
-    setPreset([state])
-    return component()
+    env.setPreset([state])
+    return env.section()
   }
 
   // a) 还没拉到 /state 的加载态。
   assert.doesNotThrow(() => render(null))
 
-  // b) 完整状态：整页渲染一遍，并确认新加的两行文案确实在输出里。
+  // b) 完整状态：整页渲染一遍，并确认关键文案确实在输出里。
   let complete
   assert.doesNotThrow(() => { complete = render(fullState()) })
   const plainText = collectText(complete).join('\n')
   assert.match(plainText, /长任务提醒提示词/)
   assert.match(plainText, /消息通道提醒提示词/)
   assert.match(plainText, /防失联/)
-  // 记忆扩展卡片：三个开关与两条状态行都要渲染出来。
+  // 记忆扩展卡片仍在设置页（入站比对是鱼讯自己的能力，不属于图库页面）。
   assert.match(plainText, /记忆扩展/)
   assert.match(plainText, /比对图像/)
   assert.match(plainText, /比对声纹/)
   assert.match(plainText, /记忆服务：未检测到（需要安装并启用记忆插件）/)
   assert.match(plainText, /本地 AI：可用/)
+  // 收图图库配置项仍在设置页（表情包块的配置在下面的相邻性测试里展开检查）。
+  assert.match(plainText, /收图先查图库/)
 
   // 老版本 /state 没有 memory 字段：状态行退回 ai.online，不炸。
   const noMemory = fullState()
@@ -288,62 +298,65 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.doesNotThrow(() => render(emptyCopy))
 })
 
+test('注册：设置页、图库主面板、侧边栏入口与 layout 依赖', async () => {
+  const env = await setupPlugin()
+  assert.deepEqual(env.module.inject, ['slots', 'layout'])
 
-test('图库管理页：四个页签都能渲染，记忆服务缺失时降级', async () => {
-  const env = await setupSection()
-  const cases = [
-    ['stickers', /暂无表情/],
-    ['images', /收图图库设置/],
-    ['memory', /记忆插件未启用/],
-    ['voices', /记忆插件未启用/],
-  ]
-  for (const [tab, expected] of cases) {
-    const page = env.render(sectionPreset({ view: 'gallery', galleryTab: tab }))
-    env.clearPreset()
-    const tree = expandTree(page, env)
-    const text = collectText(tree).join('\n')
-    for (const label of ['表情库', '收图图库', '记忆图库', '声纹库']) {
-      assert.match(text, new RegExp(label), `页签「${label}」应该一直可见`)
-    }
-    assert.match(text, expected, `页签 ${tab} 的内容应该渲染出来`)
-    // 四个页签共用吸顶条上的返回按钮。
-    assert.ok(findButton(tree, '返回设置').length >= 1)
-  }
+  const settings = env.bySlot.get('settings.section') || []
+  assert.equal(settings.length, 1)
+  assert.equal(settings[0].mod.id, 'fish-message')
+  assert.equal(typeof settings[0].component, 'function')
 
-  // 旧的「最近收到的图片」块与「清空最近图片」按钮已经删掉，能力迁到收图图库页签。
-  const stickerPage = env.render(sectionPreset({ view: 'gallery', galleryTab: 'stickers' }))
-  env.clearPreset()
-  const stickers = expandTree(stickerPage, env)
-  const stickerText = collectText(stickers).join('\n')
-  assert.doesNotMatch(stickerText, /最近收到的图片/)
-  assert.doesNotMatch(stickerText, /清空最近图片/)
+  const main = env.bySlot.get('main') || []
+  assert.equal(main.length, 1)
+  assert.deepEqual(main[0].mod, { name: 'main', key: 'fish-gallery' })
+  assert.equal(typeof main[0].component, 'function')
+
+  const panels = env.bySlot.get('sidebar.panellist') || []
+  assert.equal(panels.length, 1)
+  assert.equal(panels[0].mod.id, 'fish-gallery')
+  assert.equal(panels[0].mod.order, 20)
+  assert.equal(panels[0].mod.label(), '图库')
+  const icon = panels[0].component({ size: 16, active: true })
+  assert.equal(icon.type, 'svg', '侧边栏入口要渲染一个图标')
+
+  // package.json 的客户端注入声明必须与代码一致，否则 layout 取不到。
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dsh.client.inject, ['slots', 'layout'])
 })
 
-test('图库管理页：记忆服务可用时记忆图库与声纹库走正常内容', async () => {
-  const env = await setupSection()
-  const state = fullState()
-  state.memory = { service: true, localAI: true }
+test('图库主面板：只有表情库与收图图库两个页签，不残留记忆页签', async () => {
+  const env = await setupPlugin()
+  const page = env.renderMain(['stickers', fullState()])
+  const tree = expandTree(page, env)
+  const text = collectText(tree).join('\n')
 
-  const memoryPage = env.render(sectionPreset({ state, view: 'gallery', galleryTab: 'memory' }))
-  env.clearPreset()
-  const memory = expandTree(memoryPage, env)
-  const memoryText = collectText(memory).join('\n')
-  assert.match(memoryText, /记忆图库里还没有图片/)
-  assert.doesNotMatch(memoryText, /记忆插件未启用/)
+  assert.match(text, /图库管理/)
+  assert.match(text, /表情库/)
+  assert.match(text, /收图图库/)
+  assert.doesNotMatch(text, /记忆图库/)
+  assert.doesNotMatch(text, /声纹库/)
+  assert.doesNotMatch(text, /记忆插件未启用/)
+  assert.doesNotMatch(text, /返回设置/, '主面板是整页，不需要返回设置')
+  // 主面板的标题、页签与内容区都渲染出来。
+  assert.ok(findButton(tree, '表情库').length >= 1)
+  assert.ok(findButton(tree, '收图图库').length >= 1)
+  assert.match(text, /暂无表情/)
 
-  const voicesPage = env.render(sectionPreset({ state, view: 'gallery', galleryTab: 'voices' }))
-  env.clearPreset()
-  const voices = expandTree(voicesPage, env)
-  const voicesText = collectText(voices).join('\n')
-  assert.match(voicesText, /声纹库里还没有人/)
-  assert.doesNotMatch(voicesText, /记忆插件未启用/)
+  const imagePage = env.renderMain(['images', fullState()])
+  const imageTree = expandTree(imagePage, env)
+  const imageText = collectText(imageTree).join('\n')
+  assert.match(imageText, /缓存图片/)
+  assert.match(imageText, /清空图库/)
+  assert.match(imageText, /打开图库文件夹/)
+  // 配置项留在设置页，主面板不再重复一份。
+  assert.doesNotMatch(imageText, /收图图库设置/)
 })
 
-test('设置页：表情包与收图图库两块相邻，各带「打开图库管理」入口', async () => {
-  const env = await setupSection()
-  const mainPage = env.render(sectionPreset())
-  env.clearPreset()
-  const page = expandTree(mainPage, env)
+test('设置页：两块相邻，入口先记页签再切主面板', async () => {
+  const env = await setupPlugin()
+  const sectionPage = env.renderSection([fullState()])
+  const page = expandTree(sectionPage, env)
   const blocks = Array.isArray(page.children) ? page.children : []
   const textOf = (node) => collectText(node).join('\n')
   const stickerAt = blocks.findIndex((node) => /保存位置/.test(textOf(node)))
@@ -351,12 +364,45 @@ test('设置页：表情包与收图图库两块相邻，各带「打开图库�
   assert.ok(stickerAt >= 0, '设置页应该有表情包块')
   assert.ok(imageAt >= 0, '设置页应该有收图图库块')
   assert.equal(imageAt, stickerAt + 1, '表情包与收图图库两块必须相邻')
-  assert.ok(findButton(blocks[stickerAt], '打开图库管理').length >= 1, '表情包块要有图库管理入口')
-  assert.ok(findButton(blocks[imageAt], '打开图库管理').length >= 1, '收图图库块要有图库管理入口')
+
+  const stickerButton = findButton(blocks[stickerAt], '打开图库管理')
+  const imageButton = findButton(blocks[imageAt], '打开图库管理')
+  assert.equal(stickerButton.length, 1)
+  assert.equal(imageButton.length, 1)
+
+  stickerButton[0].props.onClick()
+  assert.deepEqual(env.selected, ['fish-gallery'], '点击入口要切到图库主面板')
+  assert.equal(env.module.__test.galleryStore.get(), 'stickers')
+
+  imageButton[0].props.onClick()
+  assert.deepEqual(env.selected, ['fish-gallery', 'fish-gallery'])
+  assert.equal(env.module.__test.galleryStore.get(), 'images')
+})
+
+test('图库主面板：已经在该面板时也能切页签', async () => {
+  const env = await setupPlugin()
+  const store = env.module.__test.galleryStore
+  const seen = []
+  const off = store.subscribe((tab) => seen.push(tab))
+
+  // 设置页入口走的是同一条模块级 store：面板已挂载时靠订阅切页签。
+  env.module.__test.openGallery('images')
+  assert.deepEqual(seen, ['images'])
+  assert.equal(store.get(), 'images')
+  assert.deepEqual(env.selected, ['fish-gallery'])
+
+  // 下一次挂载（或重新打开主面板）也读得到同一个页签。
+  const page = env.renderMain([])
+  const tree = expandTree(page, env)
+  assert.match(collectText(tree).join('\n'), /缓存图片/)
+
+  off()
+  store.set('stickers')
+  assert.deepEqual(seen, ['images'], '取消订阅后不再收到通知')
 })
 
 test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', async () => {
-  const env = await setupSection()
+  const env = await setupPlugin()
   const entry = {
     sha256: 'a'.repeat(64),
     file: 'img/aa/x.png',
@@ -369,9 +415,9 @@ test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', asyn
     hits: 2,
     firstSeenAt: '2026-11-16T12:00:00',
   }
-  const page = env.render(sectionPreset({ view: 'gallery', galleryTab: 'images' }))
   // 收图页签的第一个 useState 是列表；给一条缓存条目，按钮才会渲染出来。
-  env.setPreset([{ entries: [entry], total: 1, stats: { count: 1 } }])
+  env.presetFor('imageTab', [{ entries: [entry], total: 1, stats: { count: 1 } }])
+  const page = env.renderMain(['images', fullState()])
   const expanded = expandTree(page, env)
   const buttons = findButton(expanded, '存为表情')
   assert.equal(buttons.length, 1)

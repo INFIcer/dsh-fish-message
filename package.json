@@ -33,7 +33,8 @@
     "client": {
       "platform": "web",
       "inject": [
-        "slots"
+        "slots",
+        "layout"
       ],
       "external": [
         "react"

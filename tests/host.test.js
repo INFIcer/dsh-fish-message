@@ -144,25 +144,19 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(cleared.ok, true)
   assert.equal(cleared.removed, 0)
 
-  // 图库管理：收图图库列表 / 出图 / 改描述、记忆图库与声纹库路由都挂上了。
+  // 图库主面板：收图图库列表 / 出图 / 改描述 / 打开原图的路由挂上了。
   assert.equal(typeof routes.get('/dsh-fish-message/images'), 'function')
   assert.equal(typeof routes.get('/dsh-fish-message/images/file'), 'function')
   assert.equal(typeof routes.get('/dsh-fish-message/images/note'), 'function')
   assert.equal(typeof routes.get('/dsh-fish-message/images/open'), 'function')
-  assert.equal(typeof routes.get('/dsh-fish-message/memory/images'), 'function')
-  assert.equal(typeof routes.get('/dsh-fish-message/memory/images/file'), 'function')
-  assert.equal(typeof routes.get('/dsh-fish-message/memory/images/note'), 'function')
-  assert.equal(typeof routes.get('/dsh-fish-message/memory/voices'), 'function')
+  // 记忆图库、声纹库的页面与路由在记忆插件里，鱼讯不再提供。
+  assert.equal(routes.has('/dsh-fish-message/memory/images'), false)
+  assert.equal(routes.has('/dsh-fish-message/memory/voices'), false)
   const galleryImages = fakeResponse()
   await routes.get('/dsh-fish-message/images')({ method: 'GET', url: '/dsh-fish-message/images' }, galleryImages)
   const galleryBody = JSON.parse(galleryImages.body)
   assert.equal(galleryBody.ok, true)
   assert.equal(galleryBody.total, 0)
-  // 测试里的假记忆服务没有 images.list：路由报「版本太旧」，页面据此降级而不是崩。
-  const memoryImages = fakeResponse()
-  await routes.get('/dsh-fish-message/memory/images')({ method: 'GET', url: '/dsh-fish-message/memory/images' }, memoryImages)
-  assert.equal(memoryImages.statusCode, 503)
-  assert.equal(JSON.parse(memoryImages.body).service, true)
   const stickerResponse = fakeResponse()
   await routes.get('/dsh-fish-message/stickers')({ method: 'GET', url: '/dsh-fish-message/stickers' }, stickerResponse)
   const sticker = JSON.parse(stickerResponse.body)
