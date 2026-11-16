@@ -1,9 +1,9 @@
-// 客户端冒烟测试：设置页 Section + 图库管理主面板 GalleryPage。
+// 客户端冒烟测试：设置页 Section + 设置内图库弹窗。
 //
 // client.js 是 DSH 的浏览器端插件，平时只能在 Web 客户端里跑。这里用假的
-// window.__ModuleLoader__ / React / slots / layout 把它加载起来、真的跑一遍渲染，
+// window.__ModuleLoader__ / React / slots 把它加载起来、真的跑一遍渲染，
 // 专门抓「页面一打开就抛异常」的问题（例如 TDZ：const 声明写在使用之后，
-// node --check 只查语法，查不出来），以及面板注册与跨面板切页签的参数。
+// node --check 只查语法，查不出来），以及注册面、设置内弹窗与统一交互。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,52 +13,178 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 
-/** 只够 client.js 用的假 React：createElement 返回普通对象，hooks 不执行副作用。 */
-function makeReact() {
-  let preset = []
-  let order = 0
-  const named = new Map()
-  const unset = Symbol('未设')
-  const emptyFunc = () => {}
+function depsChanged(previous, next) {
+  if (previous === undefined || next === undefined) return true
+  if (previous.length !== next.length) return true
+  return previous.some((value, index) => !Object.is(value, next[index]))
+}
+
+/**
+ * 迷你 React 运行时：支持 useState / useRef / useEffect（含依赖比较与清理），
+ * 每次状态变化后重跑整棵树，够测「点一下按钮界面真的变了」。
+ * effects=false 时只占位不执行，避免设置页的轮询/请求干扰断言。
+ */
+function makeRuntime() {
+  const records = new Map()
+  const presets = new Map()
+  let rootType = null
+  let rootProps = {}
+  let tree = null
+  let current = null
+  let index = 0
+  let pending = false
+  let effectQueue = []
+  let effectsEnabled = true
+
+  function expand(node, path, visited) {
+    if (Array.isArray(node)) return node.map((child, i) => expand(child, path + '/' + i, visited))
+    if (node === null || typeof node !== 'object') return node
+    if (typeof node.type === 'function') {
+      const name = node.type.name || 'Anonymous'
+      // 模拟 React 的 key：key 变了就是卸载重挂，状态不继承。
+      const key = path + '@' + name + (node.props && node.props.key !== undefined ? '#' + String(node.props.key) : '')
+      let record = records.get(key)
+      if (!record) {
+        record = { name, hooks: [] }
+        records.set(key, record)
+      }
+      visited.add(key)
+      const previousRecord = current
+      const previousIndex = index
+      current = record
+      index = 0
+      const output = node.type(node.props)
+      current = previousRecord
+      index = previousIndex
+      return expand(output, key, visited)
+    }
+    return { ...node, children: (node.children || []).map((child, i) => expand(child, path + '/' + i, visited)) }
+  }
+
+  function render() {
+    effectQueue = []
+    const visited = new Set()
+    const result = expand({ type: rootType, props: rootProps, children: [] }, '', visited)
+    tree = result
+    for (const [key, record] of [...records.entries()]) {
+      if (visited.has(key)) continue
+      for (const hook of record.hooks) {
+        if (hook && hook.kind === 'effect' && typeof hook.cleanup === 'function') {
+          try { hook.cleanup() } catch { /* 清理失败不影响测试 */ }
+        }
+      }
+      records.delete(key)
+    }
+    return result
+  }
+
+  function flush() {
+    let guard = 0
+    while (guard < 20) {
+      guard += 1
+      if (effectQueue.length) {
+        const queue = effectQueue
+        effectQueue = []
+        for (const item of queue) {
+          if (typeof item.old === 'function') {
+            try { item.old() } catch { /* 清理失败不影响测试 */ }
+          }
+          const cleanup = item.fn()
+          item.hook.cleanup = typeof cleanup === 'function' ? cleanup : undefined
+        }
+      }
+      if (!pending) break
+      pending = false
+      tree = render()
+    }
+    return tree
+  }
 
   const React = {
     Fragment: Symbol('Fragment'),
     createElement(type, props, ...children) {
-      return { type, props: props || {}, children }
+      const merged = { ...(props || {}) }
+      if (children.length) merged.children = children.length === 1 ? children[0] : children
+      return { type, props: merged, children }
     },
     useState(initialValue) {
-      const i = order
-      order += 1
-      if (i < preset.length && preset[i] !== unset) return [preset[i], emptyFunc]
-      return [typeof initialValue === 'function' ? initialValue() : initialValue, emptyFunc]
+      const record = current
+      const i = index
+      index += 1
+      if (!record.hooks[i]) {
+        const preset = presets.get(record.name)
+        const value = preset && i < preset.length && preset[i] !== undefined
+          ? preset[i]
+          : (typeof initialValue === 'function' ? initialValue() : initialValue)
+        record.hooks[i] = { kind: 'state', value }
+      }
+      const hook = record.hooks[i]
+      return [hook.value, (next) => {
+        const value = typeof next === 'function' ? next(hook.value) : next
+        if (!Object.is(value, hook.value)) {
+          hook.value = value
+          pending = true
+        }
+      }]
     },
-    useEffect() {},
+    useRef(initialValue) {
+      const record = current
+      const i = index
+      index += 1
+      if (!record.hooks[i]) record.hooks[i] = { kind: 'ref', value: { current: initialValue } }
+      return record.hooks[i].value
+    },
+    useEffect(fn, deps) {
+      const record = current
+      const i = index
+      index += 1
+      let hook = record.hooks[i]
+      if (!hook) {
+        hook = { kind: 'effect', deps: undefined, cleanup: undefined, first: true }
+        record.hooks[i] = hook
+      }
+      const changed = hook.first || depsChanged(hook.deps, deps)
+      hook.first = false
+      if (!changed) return
+      hook.deps = deps
+      const old = hook.cleanup
+      hook.cleanup = undefined
+      if (effectsEnabled) effectQueue.push({ hook, fn, old })
+    },
     useMemo(compute) { return compute() },
     useCallback(callback) { return callback },
-    useRef(initialValue) { return { current: initialValue } },
+  }
+
+  function mount(type, props = {}) {
+    // 每次 mount 都是一次全新挂载：清掉上一次的组件状态与副作用，相当于刷新页面。
+    for (const record of records.values()) {
+      for (const hook of record.hooks) {
+        if (hook && hook.kind === 'effect' && typeof hook.cleanup === 'function') {
+          try { hook.cleanup() } catch { /* 清理失败不影响测试 */ }
+        }
+      }
+    }
+    records.clear()
+    pending = false
+    effectQueue = []
+    rootType = type
+    rootProps = props
+    tree = render()
+    return flush()
   }
 
   return {
     React,
-    /** 给第 n 个 useState 预设值；不传就按组件自己的初值渲染。 */
-    setPreset(values) { preset = values || []; order = 0 },
-    /**
-     * 展开某个函数组件前调用：按组件名取它自己的预设，没有就按初值渲染。
-     * 假 React 的 useState 按调用顺序取预设，不按组件隔离会串到父组件的预设上。
-     */
-    resetOrder(type) {
-      const name = typeof type === 'function' ? type.name : ''
-      preset = name && named.has(name) ? named.get(name) : []
-      order = 0
-    },
-    /** 给某个函数组件单独预设 useState 初值（展开子组件时用）。 */
-    presetFor(name, values) { named.set(name, values || []) },
+    mount,
+    flush,
+    presetFor(name, values) { presets.set(name, values || []) },
+    setEffects(enabled) { effectsEnabled = !!enabled },
   }
 }
 
-/** 遍历假 React 的渲染结果，收集所有字符串内容（含 props 里的文字）。 */
+/** 遍历渲染结果，收集所有字符串内容（含 props 里的文字）。 */
 function collectText(node, result = []) {
-  if (node == null || typeof node === 'boolean') return result
+  if (node === null || node === undefined || typeof node === 'boolean') return result
   if (typeof node === 'string' || typeof node === 'number') {
     result.push(String(node))
     return result
@@ -79,20 +205,9 @@ function collectText(node, result = []) {
   return result
 }
 
-/** 展开函数组件：假 React 的 createElement 只生成元素对象、不执行子组件。 */
-function expandTree(node, fake) {
-  if (node == null || typeof node !== 'object') return node
-  if (Array.isArray(node)) return node.map((child) => expandTree(child, fake))
-  if (typeof node.type === 'function') {
-    fake.resetOrder(node.type)
-    return expandTree(node.type(node.props), fake)
-  }
-  return { ...node, children: (node.children || []).map((child) => expandTree(child, fake)) }
-}
-
 /** 深度优先找出所有满足条件的元素。 */
 function findAll(node, predicate, output = []) {
-  if (node == null || typeof node !== 'object') return output
+  if (node === null || typeof node !== 'object') return output
   if (Array.isArray(node)) {
     for (const child of node) findAll(child, predicate, output)
     return output
@@ -107,11 +222,20 @@ function findButton(root, text) {
   return findAll(root, (node) => node.type === 'button' && collectText(node.children).join('') === text)
 }
 
+/** 按 aria-label 找元素（关闭按钮、确认框等）。 */
+function findByLabel(root, label) {
+  return findAll(root, (node) => node.props && node.props['aria-label'] === label)
+}
+
+function textOf(node) {
+  return collectText(node).join('\n')
+}
+
 /** 一条足够渲染整页的 /state 快照。 */
 function fullState() {
   return {
     ok: true,
-    version: '0.2.1',
+    version: '0.2.2',
     config: {
       napcatBaseUrl: 'http://127.0.0.1:3000',
       napcatToken: '***已设置***',
@@ -140,6 +264,7 @@ function fullState() {
       autoSaveStickers: false,
       stickerMaxCount: 2000,
       stickerMaxMB: 1024,
+      stickerMaxFileMB: 64,
       sayVoice: 'dafeiyu',
       saySpeed: 1,
       transcribeInbound: true,
@@ -149,6 +274,10 @@ function fullState() {
       memoryExtension: false,
       memoryCompareImages: true,
       memoryCompareVoices: true,
+      imageLibraryEnabled: true,
+      imageLibraryMaxItems: 1000,
+      imageLibraryMaxMB: 512,
+      imageLibraryKeepFiles: true,
       logLevel: 'info',
     },
     defaults: {
@@ -182,8 +311,40 @@ function fullState() {
     stickerDir: 'C:/tmp/stickers',
     stickerDirExists: true,
     imageDir: 'C:/tmp/fish-message-images',
-    images: { count: 0, keepFiles: true, maxItems: 1000, maxMB: 512 },
+    images: { count: 0, withDesc: 0, hits: 0, sizeMB: 0 },
     logs: [],
+  }
+}
+
+/** 一条收图图库条目：既有原图也有描述。 */
+function imageEntry() {
+  return {
+    sha256: 'a'.repeat(64),
+    file: 'img/aa/x.png',
+    path: 'C:/tmp/fish-message-images/img/aa/x.png',
+    desc: '一只猫',
+    descSource: 'local',
+    bytes: 1024,
+    width: 10,
+    height: 20,
+    hits: 2,
+    firstSeenAt: '2026-11-16T12:00:00',
+  }
+}
+
+/** 一条表情库条目。 */
+function stickerEntry() {
+  return {
+    id: 'abcdef012345',
+    file: 'gif/cat.gif',
+    path: 'C:/tmp/stickers/gif/cat.gif',
+    desc: '打哈欠的猫',
+    tags: ['睡觉', '猫'],
+    width: 100,
+    height: 100,
+    size_kb: 12,
+    used_count: 3,
+    added_at: '2026-11-15T10:00:00',
   }
 }
 
@@ -197,7 +358,7 @@ async function loadClient() {
   }
   try {
     // 加查询串避开 ESM 模块缓存，保证每次测试都重新执行一遍 client.js。
-    const address = pathToFileURL(join(repoRoot, 'client.js')).href + `?client-render=${Date.now()}`
+    const address = pathToFileURL(join(repoRoot, 'client.js')).href + '?client-render=' + Date.now()
     await import(address)
   } finally {
     delete globalThis.window
@@ -205,23 +366,21 @@ async function loadClient() {
   assert.ok(captured, 'client.js 应该调用 window.__ModuleLoader__.load')
   assert.equal(captured.id, 'dsh-fish-message')
 
-  const fake = makeReact()
+  const runtime = makeRuntime()
   const module = captured.factory((name) => {
     assert.equal(name, 'react')
-    return fake.React
+    return runtime.React
   })
-  return { ...fake, module }
+  return { ...runtime, module }
 }
 
-/** 注册全部 slot，返回可反复渲染设置页 / 图库主面板的测试环境。 */
+/** 注册 slot，返回可渲染设置页与弹窗组件的测试环境。 */
 async function setupPlugin() {
-  const fake = await loadClient()
+  const env = await loadClient()
   const bySlot = new Map()
-  const selected = []
-  const layout = { selectPanel(id) { selected.push(id) } }
   const slots = {
     inject(name, registrar) {
-      assert.ok(typeof registrar === 'function', `${name} 需要注册函数`)
+      assert.ok(typeof registrar === 'function', name + ' 需要注册函数')
       registrar()
     },
     register(mod, component) {
@@ -232,133 +391,87 @@ async function setupPlugin() {
       return () => {}
     },
   }
-  fake.module.apply({
-    get: (name) => (name === 'slots' ? slots : name === 'layout' ? layout : undefined),
-    layout,
-  })
-  const componentOf = (slot) => (bySlot.get(slot) || [])[0]?.component
+  env.module.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  const section = (bySlot.get('settings.section') || [])[0]?.component
   return {
-    ...fake,
+    ...env,
     bySlot,
-    selected,
-    section: componentOf('settings.section'),
-    main: componentOf('main'),
-    icon: componentOf('sidebar.panellist'),
+    section,
     renderSection(values) {
-      fake.setPreset(values)
-      return componentOf('settings.section')()
+      env.presetFor('Section', values)
+      env.setEffects(false)
+      return env.mount(section, {})
     },
-    renderMain(values) {
-      fake.setPreset(values)
-      return componentOf('main')()
+    renderComponent(component, props, presets = {}) {
+      for (const [name, values] of Object.entries(presets)) env.presetFor(name, values)
+      env.setEffects(false)
+      return env.mount(component, props)
     },
   }
 }
 
 test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染，不抛异常', async () => {
   const env = await setupPlugin()
-  const render = (state) => {
-    env.setPreset([state])
-    return env.section()
-  }
 
   // a) 还没拉到 /state 的加载态。
-  assert.doesNotThrow(() => render(null))
+  assert.doesNotThrow(() => env.renderSection([null]))
 
   // b) 完整状态：整页渲染一遍，并确认关键文案确实在输出里。
   let complete
-  assert.doesNotThrow(() => { complete = render(fullState()) })
-  const plainText = collectText(complete).join('\n')
+  assert.doesNotThrow(() => { complete = env.renderSection([fullState()]) })
+  const plainText = textOf(complete)
   assert.match(plainText, /长任务提醒提示词/)
   assert.match(plainText, /消息通道提醒提示词/)
   assert.match(plainText, /防失联/)
-  // 记忆扩展卡片仍在设置页（入站比对是鱼讯自己的能力，不属于图库页面）。
   assert.match(plainText, /记忆扩展/)
   assert.match(plainText, /比对图像/)
   assert.match(plainText, /比对声纹/)
   assert.match(plainText, /记忆服务：未检测到（需要安装并启用记忆插件）/)
   assert.match(plainText, /本地 AI：可用/)
-  // 收图图库配置项仍在设置页（表情包块的配置在下面的相邻性测试里展开检查）。
   assert.match(plainText, /收图先查图库/)
 
   // 老版本 /state 没有 memory 字段：状态行退回 ai.online，不炸。
   const noMemory = fullState()
   delete noMemory.memory
-  assert.doesNotThrow(() => render(noMemory))
+  assert.doesNotThrow(() => env.renderSection([noMemory]))
 
   // c) 老版本 /state 没有 defaults：占位文字为空也不能炸。
   const noDefault = fullState()
   delete noDefault.defaults
-  assert.doesNotThrow(() => render(noDefault))
+  assert.doesNotThrow(() => env.renderSection([noDefault]))
 
   // 配置里未设置的提醒提示词走空串分支；默认文案缺失时也不能抛。
   const emptyCopy = fullState()
   emptyCopy.defaults = {}
   emptyCopy.config.guardStuckPrompt = '自定义长任务'
-  assert.doesNotThrow(() => render(emptyCopy))
+  assert.doesNotThrow(() => env.renderSection([emptyCopy]))
 })
 
-test('注册：设置页、图库主面板、侧边栏入口与 layout 依赖', async () => {
+test('注册：只注册 settings.section，不再有主面板与侧边栏入口', async () => {
   const env = await setupPlugin()
-  assert.deepEqual(env.module.inject, ['slots', 'layout'])
+  assert.deepEqual(env.module.inject, ['slots'])
 
   const settings = env.bySlot.get('settings.section') || []
   assert.equal(settings.length, 1)
   assert.equal(settings[0].mod.id, 'fish-message')
+  assert.equal(settings[0].mod.order, 56)
+  assert.equal(typeof settings[0].mod.label, 'function')
+  assert.equal(settings[0].mod.label(), '鱼讯 QQ')
   assert.equal(typeof settings[0].component, 'function')
 
-  const main = env.bySlot.get('main') || []
-  assert.equal(main.length, 1)
-  assert.deepEqual(main[0].mod, { name: 'main', key: 'fish-gallery' })
-  assert.equal(typeof main[0].component, 'function')
+  assert.equal(env.bySlot.get('main'), undefined, '不应再注册 main 主面板')
+  assert.equal(env.bySlot.get('sidebar.panellist'), undefined, '不应再注册侧边栏入口')
+  assert.deepEqual([...env.bySlot.keys()], ['settings.section'])
 
-  const panels = env.bySlot.get('sidebar.panellist') || []
-  assert.equal(panels.length, 1)
-  assert.equal(panels[0].mod.id, 'fish-gallery')
-  assert.equal(panels[0].mod.order, 20)
-  assert.equal(panels[0].mod.label(), '图库')
-  const icon = panels[0].component({ size: 16, active: true })
-  assert.equal(icon.type, 'svg', '侧边栏入口要渲染一个图标')
-
-  // package.json 的客户端注入声明必须与代码一致，否则 layout 取不到。
+  // package.json 的客户端注入声明必须与代码一致。
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
-  assert.deepEqual(pkg.dsh.client.inject, ['slots', 'layout'])
+  assert.deepEqual(pkg.dsh.client.inject, ['slots'])
 })
 
-test('图库主面板：只有表情库与收图图库两个页签，不残留记忆页签', async () => {
+test('设置页：两个库的块相邻，各有「打开图库管理」，点开落在对应页签', async () => {
   const env = await setupPlugin()
-  const page = env.renderMain(['stickers', fullState()])
-  const tree = expandTree(page, env)
-  const text = collectText(tree).join('\n')
-
-  assert.match(text, /图库管理/)
-  assert.match(text, /表情库/)
-  assert.match(text, /收图图库/)
-  assert.doesNotMatch(text, /记忆图库/)
-  assert.doesNotMatch(text, /声纹库/)
-  assert.doesNotMatch(text, /记忆插件未启用/)
-  assert.doesNotMatch(text, /返回设置/, '主面板是整页，不需要返回设置')
-  // 主面板的标题、页签与内容区都渲染出来。
-  assert.ok(findButton(tree, '表情库').length >= 1)
-  assert.ok(findButton(tree, '收图图库').length >= 1)
-  assert.match(text, /暂无表情/)
-
-  const imagePage = env.renderMain(['images', fullState()])
-  const imageTree = expandTree(imagePage, env)
-  const imageText = collectText(imageTree).join('\n')
-  assert.match(imageText, /缓存图片/)
-  assert.match(imageText, /清空图库/)
-  assert.match(imageText, /打开图库文件夹/)
-  // 配置项留在设置页，主面板不再重复一份。
-  assert.doesNotMatch(imageText, /收图图库设置/)
-})
-
-test('设置页：两块相邻，入口先记页签再切主面板', async () => {
-  const env = await setupPlugin()
-  const sectionPage = env.renderSection([fullState()])
-  const page = expandTree(sectionPage, env)
+  const page = env.renderSection([fullState()])
   const blocks = Array.isArray(page.children) ? page.children : []
-  const textOf = (node) => collectText(node).join('\n')
   const stickerAt = blocks.findIndex((node) => /保存位置/.test(textOf(node)))
   const imageAt = blocks.findIndex((node) => /收图先查图库/.test(textOf(node)))
   assert.ok(stickerAt >= 0, '设置页应该有表情包块')
@@ -370,59 +483,233 @@ test('设置页：两块相邻，入口先记页签再切主面板', async () =>
   assert.equal(stickerButton.length, 1)
   assert.equal(imageButton.length, 1)
 
-  stickerButton[0].props.onClick()
-  assert.deepEqual(env.selected, ['fish-gallery'], '点击入口要切到图库主面板')
-  assert.equal(env.module.__test.galleryStore.get(), 'stickers')
+  // 配置项仍在各自块里，弹窗不接管配置。
+  assert.match(textOf(blocks[stickerAt]), /保存位置/)
+  assert.match(textOf(blocks[stickerAt]), /收到图片时自动存入表情包/)
+  assert.match(textOf(blocks[imageAt]), /图库条数上限/)
+  assert.match(textOf(blocks[imageAt]), /在图库里存原图/)
 
-  imageButton[0].props.onClick()
-  assert.deepEqual(env.selected, ['fish-gallery', 'fish-gallery'])
-  assert.equal(env.module.__test.galleryStore.get(), 'images')
+  const trigger = { focused: 0, focus() { this.focused += 1 } }
+  stickerButton[0].props.onClick({ currentTarget: trigger })
+  let tree = env.flush()
+  assert.match(textOf(tree), /图库管理/)
+  assert.equal(findButton(tree, '表情库')[0].props['aria-pressed'], true)
+  assert.match(textOf(tree), /上传图片/)
+
+  // 关闭后焦点回到触发按钮。
+  findByLabel(tree, '关闭图库管理')[0].props.onClick()
+  tree = env.flush()
+  assert.equal(findByLabel(tree, '关闭图库管理').length, 0, '关闭后弹窗应该消失')
+  assert.equal(trigger.focused, 1)
+
+  // 从收图图库块进入，默认停在收图图库页签。
+  const reopen = findButton(tree, '打开图库管理')
+  assert.equal(reopen.length, 2)
+  const imageTrigger = { focus() {} }
+  reopen[1].props.onClick({ currentTarget: imageTrigger })
+  tree = env.flush()
+  assert.equal(findButton(tree, '收图图库')[0].props['aria-pressed'], true)
+  assert.match(textOf(tree), /清空图库/)
 })
 
-test('图库主面板：已经在该面板时也能切页签', async () => {
+test('弹窗：页签可切换，Esc 只关弹窗并阻止事件冒泡到宿主', async () => {
   const env = await setupPlugin()
-  const store = env.module.__test.galleryStore
-  const seen = []
-  const off = store.subscribe((tab) => seen.push(tab))
+  env.setEffects(true)
+  // 弹窗内的页签组件会自己拉数据；这里给一个永远成功的最小响应。
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    json: async () => ({ ok: true, items: [], entries: [], total: 0, stats: {}, tags: [] }),
+  })
+  const listeners = []
+  const originalDocument = globalThis.document
+  globalThis.document = {
+    addEventListener(type, fn, capture) { if (type === 'keydown' && capture) listeners.push(fn) },
+    removeEventListener(type, fn, capture) {
+      const at = listeners.indexOf(fn)
+      if (at >= 0) listeners.splice(at, 1)
+    },
+  }
+  try {
+    let closed = 0
+    const { GalleryModal } = env.module.__test
+    let tree = env.mount(GalleryModal, { open: true, initialTab: 'stickers', onClose: () => { closed += 1 }, bindings: [] })
+    assert.match(textOf(tree), /图库管理/)
+    assert.equal(findButton(tree, '表情库')[0].props['aria-pressed'], true)
 
-  // 设置页入口走的是同一条模块级 store：面板已挂载时靠订阅切页签。
-  env.module.__test.openGallery('images')
-  assert.deepEqual(seen, ['images'])
-  assert.equal(store.get(), 'images')
-  assert.deepEqual(env.selected, ['fish-gallery'])
+    findButton(tree, '收图图库')[0].props.onClick()
+    tree = env.flush()
+    assert.equal(findButton(tree, '收图图库')[0].props['aria-pressed'], true)
+    assert.match(textOf(tree), /清空图库/)
+    assert.doesNotMatch(textOf(tree), /上传图片/)
 
-  // 下一次挂载（或重新打开主面板）也读得到同一个页签。
-  const page = env.renderMain([])
-  const tree = expandTree(page, env)
-  assert.match(collectText(tree).join('\n'), /缓存图片/)
+    // 点关闭按钮：弹窗消失，回调触发。
+    findByLabel(tree, '关闭图库管理')[0].props.onClick()
+    env.flush()
+    assert.equal(closed, 1)
 
-  off()
-  store.set('stickers')
-  assert.deepEqual(seen, ['images'], '取消订阅后不再收到通知')
+    // 重新打开并模拟 Esc：preventDefault/stopPropagation 都要调用，且只关自己。
+    tree = env.mount(GalleryModal, { open: true, initialTab: 'stickers', onClose: () => { closed += 1 }, bindings: [] })
+    assert.ok(listeners.length >= 1, '打开弹窗时要注册 document 捕获阶段 keydown 监听')
+    const event = {
+      key: 'Escape',
+      defaultPrevented: 0,
+      propagationStopped: 0,
+      immediateStopped: 0,
+      preventDefault() { this.defaultPrevented += 1 },
+      stopPropagation() { this.propagationStopped += 1 },
+      stopImmediatePropagation() { this.immediateStopped += 1 },
+    }
+    listeners[listeners.length - 1](event)
+    env.flush()
+    assert.equal(event.defaultPrevented, 1)
+    assert.equal(event.propagationStopped, 1)
+    assert.equal(event.immediateStopped, 1)
+    assert.ok(closed >= 2, 'Esc 应该关闭图库弹窗')
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalDocument === undefined) delete globalThis.document
+    else globalThis.document = originalDocument
+  }
+})
+
+test('统一空态/加载态：两个库用同一句文案', async () => {
+  const env = await setupPlugin()
+  const { StickerGallery, ImageGallery } = env.module.__test
+
+  let tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm() {} }, {
+    StickerGallery: [{ items: [], total: 0, stats: {} }, '', true, false, '', null, {}, {}],
+  })
+  assert.match(textOf(tree), /正在读取图库…/)
+
+  tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm() {} }, {
+    StickerGallery: [{ items: [], total: 0, stats: {} }, '', false, false, '', null, {}, {}],
+  })
+  assert.match(textOf(tree), /图库是空的。/)
+
+  tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
+    ImageGallery: [{ entries: [], total: 0, stats: {} }, '', true, false, '', null, {}],
+  })
+  assert.match(textOf(tree), /正在读取图库…/)
+
+  tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
+    ImageGallery: [{ entries: [], total: 0, stats: {} }, '', false, false, '', null, {}],
+  })
+  assert.match(textOf(tree), /图库是空的。/)
+})
+
+test('收图图库：点卡片进详情，返回回到网格，且「存为表情」只在详情里', async () => {
+  const env = await setupPlugin()
+  const { StickerGallery, ImageGallery } = env.module.__test
+  const entry = imageEntry()
+
+  // 网格里没有「存为表情」，只有详情里才有。
+  let tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
+    ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}],
+  })
+  assert.doesNotMatch(textOf(tree), /存为表情/)
+  const card = findAll(tree, (node) => node.props && node.props.role === 'button')[0]
+  assert.ok(card, '网格卡片要能点击')
+  card.props.onClick()
+  tree = env.flush()
+
+  assert.match(textOf(tree), /返回/)
+  assert.match(textOf(tree), /存为表情/)
+  assert.match(textOf(tree), /打开原图/)
+  assert.match(textOf(tree), /保存描述/)
+
+  findButton(tree, '返回')[0].props.onClick()
+  tree = env.flush()
+  assert.doesNotMatch(textOf(tree), /存为表情/)
+  assert.match(textOf(tree), /命中 2 次/)
+
+  // 表情库详情不出现收图图库专属的「存为表情」。
+  const sticker = stickerEntry()
+  tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm() {} }, {
+    StickerGallery: [{ items: [sticker], total: 1, stats: {} }, '', false, false, '', sticker, {}, {}],
+  })
+  assert.match(textOf(tree), /保存描述与标签/)
+  assert.doesNotMatch(textOf(tree), /存为表情/)
+})
+
+test('危险操作：删除表情、清空图库都走弹窗内二次确认，不再用 window.confirm', async () => {
+  const env = await setupPlugin()
+  const { StickerGallery, ImageGallery } = env.module.__test
+  const sticker = stickerEntry()
+  const entry = imageEntry()
+
+  let confirmCalls = 0
+  const originalWindow = globalThis.window
+  globalThis.window = { confirm() { confirmCalls += 1; return true } }
+  try {
+    // 删除表情：确认框出现，取消不删。
+    let tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm(opts) { tree._ask = opts } }, {
+      StickerGallery: [{ items: [sticker], total: 1, stats: {} }, '', false, false, '', sticker, {}, {}],
+    })
+    findButton(tree, '删除')[0].props.onClick()
+    assert.ok(tree._ask, '删除要走 askConfirm')
+    assert.match(tree._ask.title, /删除这个表情/)
+    assert.match(tree._ask.description, /无法撤销/)
+
+    // 清空收图图库：确认框文案明确且同样走 askConfirm。
+    tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm(opts) { tree._clear = opts } }, {
+      ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}],
+    })
+    findButton(tree, '清空图库')[0].props.onClick()
+    assert.ok(tree._clear, '清空图库要走 askConfirm')
+    assert.match(tree._clear.title, /清空收图图库/)
+    assert.match(tree._clear.description, /无法撤销/)
+    assert.equal(confirmCalls, 0, '图库里的危险操作不能再用 window.confirm')
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+
+  // 确认框本身渲染成和弹窗一致的对话框，有明确的取消/确认。
+  const { ConfirmDialog } = env.module.__test
+  const dialog = env.renderComponent(ConfirmDialog, {
+    title: '删除这个表情？',
+    description: '无法撤销。',
+    confirmLabel: '删除',
+    onCancel() {},
+    onConfirm() {},
+  })
+  assert.equal(findByLabel(dialog, '删除这个表情？').length, 1)
+  assert.equal(findByLabel(dialog, '删除这个表情？')[0].props.role, 'alertdialog')
+  assert.equal(findButton(dialog, '取消').length, 1)
+  assert.equal(findButton(dialog, '删除').length, 1)
+})
+
+test('弹窗：危险操作在弹窗内二次确认，取消后回到原列表', async () => {
+  const env = await setupPlugin()
+  const { GalleryModal } = env.module.__test
+  const entry = imageEntry()
+  env.presetFor('ImageGallery', [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}])
+  let tree = env.mount(GalleryModal, { open: true, initialTab: 'images', onClose() {}, imageDir: 'C:/tmp/images', bindings: [] })
+
+  findButton(tree, '清空图库')[0].props.onClick()
+  tree = env.flush()
+  assert.equal(findByLabel(tree, '清空收图图库？').length, 1, '清空图库要先弹确认框')
+  assert.equal(findButton(tree, '取消').length, 1)
+  assert.equal(findButton(tree, '清空图库').length, 2, '工具条按钮与确认按钮各一个')
+
+  findButton(tree, '取消')[0].props.onClick()
+  tree = env.flush()
+  assert.equal(findByLabel(tree, '清空收图图库？').length, 0, '取消后确认框关闭')
+  assert.ok(findButton(tree, '清空图库').length >= 1)
 })
 
 test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', async () => {
   const env = await setupPlugin()
-  const entry = {
-    sha256: 'a'.repeat(64),
-    file: 'img/aa/x.png',
-    path: 'C:/tmp/fish-message-images/img/aa/x.png',
-    desc: '一只猫',
-    descSource: 'local',
-    bytes: 100,
-    width: 1,
-    height: 1,
-    hits: 2,
-    firstSeenAt: '2026-11-16T12:00:00',
-  }
-  // 收图页签的第一个 useState 是列表；给一条缓存条目，按钮才会渲染出来。
-  env.presetFor('imageTab', [{ entries: [entry], total: 1, stats: { count: 1 } }])
-  const page = env.renderMain(['images', fullState()])
-  const expanded = expandTree(page, env)
-  const buttons = findButton(expanded, '存为表情')
+  const { ImageGallery } = env.module.__test
+  const entry = imageEntry()
+  const tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
+    ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', entry, {}],
+  })
+  const buttons = findButton(tree, '存为表情')
   assert.equal(buttons.length, 1)
 
   const calls = []
+  const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options })
     return { json: async () => ({ ok: true, created: true }) }
@@ -430,7 +717,7 @@ test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', asyn
   try {
     await buttons[0].props.onClick()
   } finally {
-    delete globalThis.fetch
+    globalThis.fetch = originalFetch
   }
 
   const save = calls.find((call) => call.url.endsWith('/stickers/save'))
@@ -444,13 +731,13 @@ test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', asyn
 test('客户端设置页：默认文案常量声明在第一次使用之前（防 TDZ 白屏）', () => {
   const source = readFileSync(join(repoRoot, 'client.js'), 'utf8').split(/\r?\n/)
   for (const name of ['defaultLongTaskReminder', 'defaultMessageChannelReminder', 'defaultImagePrompt']) {
-    const declare = source.findIndex((row) => row.includes(`const ${name} =`))
-    assert.ok(declare >= 0, `${name} 应该有 const 声明`)
+    const declare = source.findIndex((row) => row.includes('const ' + name + ' ='))
+    assert.ok(declare >= 0, name + ' 应该有 const 声明')
     const firstSaveReference = source.findIndex((row, i) => i !== declare && row.includes(name))
-    assert.ok(firstSaveReference >= 0, `${name} 应该被用到`)
+    assert.ok(firstSaveReference >= 0, name + ' 应该被用到')
     assert.ok(
       declare < firstSaveReference,
-      `${name} 在第 ${declare + 1} 行声明，但第 ${firstSaveReference + 1} 行就用了；这会在打开设置页时抛 TDZ、整页白屏`,
+      name + ' 在第 ' + (declare + 1) + ' 行声明，但第 ' + (firstSaveReference + 1) + ' 行就用了；这会在打开设置页时抛 TDZ、整页白屏',
     )
   }
 })

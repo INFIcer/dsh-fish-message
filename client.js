@@ -2,7 +2,7 @@
 //
 // 纯原生 JS + React（DSH 平台自带），没有 npm、没有 CDN、没有构建步骤。
 // 挂载方式照 dsh-qq-bridge 的 client.js：window.__ModuleLoader__.load → slots.register。
-// 设置页注册 settings.section；图库管理注册 main 主面板 + sidebar.panellist 侧边栏入口。
+// 只注册 settings.section；图库管理是设置页里的弹窗，不注册主面板与侧边栏入口。
 // 这里只读写宿主路由，不直接碰 QQ / 会话。
 
 window.__ModuleLoader__.load({
@@ -11,8 +11,7 @@ window.__ModuleLoader__.load({
     const module = { exports: {} }
     const exports = module.exports
     const React = require('react')
-    // layout 用来从设置页切到图库主面板（selectPanel）。
-    const inject = ['slots', 'layout']
+    const inject = ['slots']
     const h = React.createElement
     const B = '/dsh-fish-message'
 
@@ -145,15 +144,6 @@ window.__ModuleLoader__.load({
         gap: 10,
         marginTop: 8,
       },
-      stickerCard: {
-        border: '1px solid var(--dsw-alias-border-l2)',
-        borderRadius: 8,
-        padding: 8,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-        background: 'var(--dsw-alias-bg-layer-1)',
-      },
       thumb: {
         width: '100%',
         height: 128,
@@ -170,26 +160,6 @@ window.__ModuleLoader__.load({
         fontSize: 11,
         opacity: 0.8,
       },
-      tabBar: { display: 'flex', gap: 6, flexWrap: 'wrap' },
-      tab: {
-        border: '1px solid var(--dsw-alias-border-l2)',
-        borderRadius: 20,
-        padding: '3px 14px',
-        background: 'transparent',
-        color: 'inherit',
-        fontSize: 12.5,
-        cursor: 'pointer',
-      },
-      tabOn: {
-        border: '1px solid var(--dsw-alias-state-business-primary)',
-        borderRadius: 20,
-        padding: '3px 14px',
-        background: 'var(--dsw-alias-state-business-primary)',
-        color: '#fff',
-        fontSize: 12.5,
-        cursor: 'pointer',
-      },
-      toolbar: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
       log: {
         fontFamily: 'ui-monospace, Consolas, monospace',
         fontSize: 11.5,
@@ -201,6 +171,194 @@ window.__ModuleLoader__.load({
         borderRadius: 6,
         padding: 8,
       },
+      // 图库弹窗：遮罩固定定位，面板限高、内部滚动。
+      btnDanger: {
+        border: '1px solid #c0392b',
+        borderRadius: 6,
+        padding: '4px 12px',
+        background: '#c0392b',
+        color: '#fff',
+        fontSize: 12,
+        cursor: 'pointer',
+      },
+      overlay: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+        background: 'rgba(0,0,0,.45)',
+      },
+      dialog: {
+        width: 'min(880px, 100%)',
+        maxHeight: '84vh',
+        display: 'flex',
+        flexDirection: 'column',
+        position: 'relative',
+        background: 'var(--dsw-alias-bg-layer-1, #fff)',
+        color: 'var(--dsw-alias-label-primary, inherit)',
+        border: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.1))',
+        borderRadius: 14,
+        boxShadow: '0 18px 50px rgba(0,0,0,.35)',
+        overflow: 'hidden',
+        outline: 'none',
+      },
+      modalHead: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        padding: '12px 16px',
+        borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.08))',
+      },
+      modalTitle: { fontSize: 16, fontWeight: 700 },
+      modalClose: {
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: 'transparent',
+        color: 'inherit',
+        borderRadius: 8,
+        width: 28,
+        height: 28,
+        lineHeight: 1,
+        fontSize: 16,
+        cursor: 'pointer',
+        padding: 0,
+      },
+      modalTabs: { display: 'flex', padding: '10px 16px 0' },
+      segment: {
+        display: 'inline-flex',
+        padding: 3,
+        gap: 2,
+        borderRadius: 9,
+        background: 'rgba(0,0,0,.06)',
+      },
+      segmentOn: {
+        border: 'none',
+        borderRadius: 7,
+        padding: '4px 16px',
+        background: 'var(--dsw-alias-state-business-primary)',
+        color: '#fff',
+        fontSize: 12.5,
+        cursor: 'pointer',
+      },
+      segmentOff: {
+        border: 'none',
+        borderRadius: 7,
+        padding: '4px 16px',
+        background: 'transparent',
+        color: 'inherit',
+        fontSize: 12.5,
+        cursor: 'pointer',
+      },
+      modalBody: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
+      galleryBody: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
+      toolbarRow: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        padding: '10px 16px 0',
+      },
+      search: {
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 6,
+        padding: '4px 8px',
+        background: 'transparent',
+        color: 'inherit',
+        fontSize: 12.5,
+        width: 240,
+        boxSizing: 'border-box',
+      },
+      content: { flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: '12px 16px' },
+      galleryCard: {
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 10,
+        padding: 8,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        background: 'var(--dsw-alias-bg-layer-1)',
+        cursor: 'pointer',
+        textAlign: 'left',
+      },
+      cardName: {
+        fontSize: 11.5,
+        opacity: 0.7,
+        wordBreak: 'break-all',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      },
+      cardDesc: {
+        fontSize: 12,
+        lineHeight: 1.5,
+        opacity: 0.85,
+        display: '-webkit-box',
+        WebkitLineClamp: 2,
+        WebkitBoxOrient: 'vertical',
+        overflow: 'hidden',
+        minHeight: '2.9em',
+      },
+      cardMeta: { fontSize: 11, opacity: 0.55 },
+      thumbFallback: {
+        width: '100%',
+        height: 128,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0,0,0,.05)',
+        borderRadius: 6,
+        fontSize: 11,
+        opacity: 0.6,
+      },
+      detailHead: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 },
+      detailTitle: { fontSize: 13.5, fontWeight: 600, wordBreak: 'break-all' },
+      detailBody: { display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' },
+      detailPreview: {
+        flex: '0 1 320px',
+        minWidth: 200,
+        background: 'rgba(0,0,0,.05)',
+        borderRadius: 10,
+        padding: 8,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minHeight: 160,
+      },
+      detailImage: { maxWidth: '100%', maxHeight: '46vh', objectFit: 'contain' },
+      detailFields: { flex: '1 1 300px', minWidth: 240, display: 'flex', flexDirection: 'column', gap: 8 },
+      detailField: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 },
+      detailActions: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 },
+      status: {
+        minHeight: 32,
+        padding: '8px 16px',
+        borderTop: '1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.08))',
+        fontSize: 12,
+      },
+      loaderBox: { padding: '40px 0', textAlign: 'center', opacity: 0.6, fontSize: 12.5 },
+      confirmMask: {
+        position: 'absolute',
+        inset: 0,
+        zIndex: 2,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+        background: 'rgba(0,0,0,.3)',
+      },
+      confirmPanel: {
+        width: 'min(420px, 100%)',
+        background: 'var(--dsw-alias-bg-layer-1, #fff)',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: 12,
+        padding: 16,
+        boxShadow: '0 12px 36px rgba(0,0,0,.3)',
+      },
+      confirmTitle: { fontSize: 14, fontWeight: 650, marginBottom: 8 },
+      confirmDesc: { fontSize: 12.5, opacity: 0.8, lineHeight: 1.7, whiteSpace: 'pre-wrap' },
+      confirmActions: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 },
     }
 
     const hint = (text) => h('div', { style: S.hint }, text)
@@ -258,105 +416,361 @@ window.__ModuleLoader__.load({
         }, '打开文件夹'))
     }
 
-    // ---------------- 图库管理页 ----------------
-    // 四个库合成一个整页：顶部吸顶条放「返回设置」与页签，各页签自己带工具栏与状态提示。
-    // 表情库、收图图库都由鱼讯自己提供（/stickers*、/images*）；记忆图库与声纹库的页面
-    // 归记忆插件，本插件不注册它们的入口。
-    // 预览直接用 <img> 指向库中原图，GIF 会自己动；loading="lazy" 做惰性加载。
-    function stickerTab({ bindings }) {
+    // ---------------- 图库管理（设置内弹窗） ----------------
+    // 两个库共用同一份基础组件：Toolbar / CardGrid / DetailShell / ConfirmDialog /
+    // StatusLine / EmptyState / LoadingState，差异只通过参数注入（库级操作、详情动作），
+    // 基础交互的改动集中在这里，不需要每个库各改一遍。
+    //
+    // 弹窗盖在设置页之上：固定定位的遮罩 + 限高面板，内容区自己滚动。
+    // 宿主的设置弹窗也监听 Esc，所以这里在 document 捕获阶段拦下 Esc 并停止传播，
+    // 保证只关本弹窗；二次确认打开时 Esc 只关确认框。
+    const GALLERIES = [
+      {
+        id: 'stickers',
+        label: '表情库',
+        description: '长期收藏的表情包，不会自动删除。',
+      },
+      {
+        id: 'images',
+        label: '收图图库',
+        description: '按内容指纹缓存的收图，超过上限会淘汰最久没见到的图。',
+      },
+    ]
+
+    /** 空态：两个库用同一句文案，具体提示交给库级说明。 */
+    function EmptyState({ text = '图库是空的。' }) {
+      return h('div', { style: S.loaderBox }, text)
+    }
+
+    /** 加载态：与空态共用位置和字号，避免切换时跳动。 */
+    function LoadingState({ text = '正在读取图库…' }) {
+      return h('div', { style: S.loaderBox }, text)
+    }
+
+    /** 底部状态行：成功/失败各一句；失败时页面与列表保持原样。 */
+    function StatusLine({ text }) {
+      if (!text) return h('div', { style: S.status })
+      return h('div', { style: { ...S.status, ...(isError(text) ? S.danger : S.ok) } }, text)
+    }
+
+    /**
+     * 工具条：左搜索、右刷新与本库的库级操作。
+     * actions 由各库注入；children 放上传这类需要额外元素的入口。
+     */
+    function Toolbar({ query, onQuery, onRefresh, busy, actions = [], children }) {
+      return h('div', { style: S.toolbarRow },
+        h('input', {
+          style: S.search,
+          value: query,
+          placeholder: '搜索名称、描述或标签',
+          onChange: (e) => onQuery(e.target.value),
+        }),
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginLeft: 'auto' } },
+          children,
+          h('button', { type: 'button', style: S.btn, onClick: onRefresh, disabled: busy }, '刷新'),
+          actions.map((action) => h('button', {
+            key: action.key || action.label,
+            type: 'button',
+            style: action.danger ? S.btnDanger : S.btn,
+            onClick: action.onClick,
+            disabled: busy || !!action.disabled,
+          }, action.label))))
+    }
+
+    /** 卡片内容：缩略图、名称、两行描述、标签。两个库的卡片都用它。 */
+    function CardBody({ src, alt, name, desc, tags = [], meta, noImageText }) {
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } },
+        src
+          ? h('img', { src, alt: alt || name, loading: 'lazy', style: S.thumb })
+          : h('div', { style: S.thumbFallback }, noImageText || '没有预览图'),
+        h('div', { style: S.cardName, title: name }, name),
+        h('div', { style: S.cardDesc }, desc || '还没有描述。'),
+        tags.length
+          ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
+            tags.map((tag) => h('span', { key: tag, style: S.chip }, tag)))
+          : null,
+        meta ? h('div', { style: S.cardMeta }, meta) : null)
+    }
+
+    /** 网格：统一加载态/空态与卡片点击，具体卡片内容由 renderCard 决定。 */
+    function CardGrid({ items, loading, emptyText, keyOf, onOpen, renderCard }) {
+      if (loading) return h(LoadingState)
+      if (!items.length) return h(EmptyState, { text: emptyText })
+      return h('div', { style: S.grid }, items.map((item) => h('div', {
+        key: keyOf(item),
+        style: S.galleryCard,
+        role: 'button',
+        tabIndex: 0,
+        onClick: () => onOpen(item),
+        onKeyDown: (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onOpen(item)
+          }
+        },
+      }, renderCard(item))))
+    }
+
+    /** 详情外壳：左上返回、标题、预览与字段区，动作按钮由各库注入。 */
+    function DetailShell({ title, onBack, preview, actions, children }) {
+      return h('div', null,
+        h('div', { style: S.detailHead },
+          h('button', { type: 'button', style: S.btn, onClick: onBack }, '返回'),
+          h('div', { style: S.detailTitle }, title)),
+        h('div', { style: S.detailBody },
+          h('div', { style: S.detailPreview }, preview),
+          h('div', { style: S.detailFields }, children)),
+        actions ? h('div', { style: S.detailActions }, actions) : null)
+    }
+
+    /** 详情里的带标签字段。 */
+    const field = (label, control) => h('label', { style: S.detailField },
+      h('span', { style: { opacity: 0.7 } }, label),
+      control)
+
+    /** 危险操作的二次确认：与弹窗同源样式，明确「取消 / 确认」。 */
+    function ConfirmDialog({ title, description, confirmLabel = '确认', cancelLabel = '取消', busy, onCancel, onConfirm }) {
+      const focusRef = React.useRef(null)
+      React.useEffect(() => {
+        try { focusRef.current?.focus?.() } catch { /* 聚焦失败不影响确认 */ }
+      }, [])
+      return h('div', {
+        style: S.confirmMask,
+        onClick: (e) => { if (e.target === e.currentTarget) onCancel() },
+      },
+        h('div', { style: S.confirmPanel, role: 'alertdialog', 'aria-modal': 'true', 'aria-label': title },
+          h('div', { style: S.confirmTitle }, title),
+          description ? h('div', { style: S.confirmDesc }, description) : null,
+          h('div', { style: S.confirmActions },
+            h('button', { type: 'button', style: S.btn, onClick: onCancel, disabled: busy }, cancelLabel),
+            h('button', {
+              type: 'button', style: S.btnDanger, ref: focusRef, onClick: onConfirm, disabled: busy,
+            }, busy ? '正在处理…' : confirmLabel))))
+    }
+
+    /**
+     * 图库弹窗：标题、页签、内容区与底部状态行。
+     * 页签内容由两个库组件提供，弹窗只负责壳、Esc、遮罩与二次确认的挂载。
+     */
+    function GalleryModal({ open, initialTab = 'stickers', onClose, imageDir = '', bindings = [] }) {
+      const [tab, setTab] = React.useState(initialTab)
+      const [confirm, setConfirm] = React.useState(null)
+      const [confirmBusy, setConfirmBusy] = React.useState(false)
+      const panelRef = React.useRef(null)
+
+      // 每次打开都回到触发入口对应的页签，并把焦点移进面板。
+      React.useEffect(() => {
+        if (!open) return undefined
+        setTab(initialTab)
+        try { panelRef.current?.focus?.() } catch { /* 聚焦失败不影响弹窗 */ }
+        return undefined
+      }, [open, initialTab])
+
+      // 捕获阶段拦 Esc：阻止宿主设置弹窗也跟着关；确认框打开时只关确认框。
+      React.useEffect(() => {
+        if (!open || typeof document === 'undefined') return undefined
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          event.stopPropagation()
+          try { event.stopImmediatePropagation?.() } catch { /* 老浏览器没有这个方法 */ }
+          if (confirm !== null) {
+            // 正在处理的确认框不关，避免请求还在跑时失去反馈。
+            if (!confirmBusy) setConfirm(null)
+          } else onClose()
+        }
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => document.removeEventListener('keydown', onKeyDown, true)
+      }, [open, confirm, confirmBusy, onClose])
+
+      if (!open) return null
+      const current = GALLERIES.find((item) => item.id === tab) || GALLERIES[0]
+      const askConfirm = (options) => setConfirm(options)
+      const runConfirm = async () => {
+        const action = confirm && confirm.run
+        if (!action) {
+          setConfirm(null)
+          return
+        }
+        setConfirmBusy(true)
+        try { await action() } finally {
+          setConfirmBusy(false)
+          setConfirm(null)
+        }
+      }
+      const body = current.id === 'stickers'
+        ? h(StickerGallery, { bindings, askConfirm })
+        : h(ImageGallery, { imageDir, askConfirm })
+
+      return h('div', {
+        style: S.overlay,
+        onClick: (e) => {
+          if (confirm === null && e.target === e.currentTarget) onClose()
+        },
+      },
+        h('div', {
+          style: S.dialog,
+          ref: panelRef,
+          tabIndex: -1,
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': '图库管理',
+          // 兜底：焦点留在面板内时，Esc 也不往宿主冒泡。
+          onKeyDown: (e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              e.stopPropagation()
+            }
+          },
+        },
+          h('div', { style: S.modalHead },
+            h('div', { style: S.modalTitle }, '图库管理'),
+            h('button', {
+              type: 'button', style: S.modalClose, 'aria-label': '关闭图库管理', onClick: onClose,
+            }, '×')),
+          h('div', { style: S.modalTabs },
+            h('div', { style: S.segment },
+              GALLERIES.map((item) => h('button', {
+                key: item.id,
+                type: 'button',
+                style: item.id === current.id ? S.segmentOn : S.segmentOff,
+                'aria-pressed': item.id === current.id,
+                onClick: () => setTab(item.id),
+              }, item.label)))),
+          h('div', { style: S.modalBody }, body),
+          confirm
+            ? h(ConfirmDialog, {
+              title: confirm.title,
+              description: confirm.description,
+              confirmLabel: confirm.confirmLabel || '确认',
+              busy: confirmBusy,
+              onCancel: () => { if (!confirmBusy) setConfirm(null) },
+              onConfirm: runConfirm,
+            })
+            : null))
+    }
+
+    // ---------------- 表情库页签 ----------------
+    // 长期收藏：搜索、上传、清理是库级操作；改标签与描述、发送、删除在详情里做。
+    function StickerGallery({ bindings = [], askConfirm }) {
       const [list, setList] = React.useState({ items: [], total: 0, stats: {}, tags: [] })
       const [q, setQ] = React.useState('')
-      const [tags, setTags] = React.useState('')
-      const [sort, setSort] = React.useState('used')
-      const [edits, setEdit] = React.useState({})
-      const [object, setObject] = React.useState({})
+      const [loading, setLoading] = React.useState(true)
       const [busy, setBusy] = React.useState(false)
       const [say, setSay] = React.useState('')
+      const [selected, setSelected] = React.useState(null)
+      const [edits, setEdits] = React.useState({})
+      const [object, setObject] = React.useState({})
+      const fileRef = React.useRef(null)
 
       const error = (r) => String((r && (r.error || r.message)) || '没有收到服务响应。')
 
-      const fetch = async () => {
+      const load = async () => {
+        setLoading(true)
         const p = new URLSearchParams()
         p.set('limit', '200')
-        p.set('sort', sort)
+        p.set('sort', 'used')
         if (q.trim()) p.set('q', q.trim())
-        if (tags) p.set('tag', tags)
         const r = await get('/stickers?' + p.toString())
+        setLoading(false)
         if (r && r.ok) setList(r)
-        else if (r && r.error) setSay('无法读取表情包：' + error(r))
+        else if (r && r.error) setSay('无法读取表情库：' + error(r))
       }
-      React.useEffect(() => { fetch() }, [])
+      React.useEffect(() => { load() }, [])
       React.useEffect(() => {
-        const t = setTimeout(fetch, 300)
+        const t = setTimeout(load, 300)
         return () => clearTimeout(t)
-      }, [q, tags, sort])
+      }, [q])
 
       const upload = async (files) => {
         const array = Array.from(files || []).filter((f) => f && f.size)
         if (!array.length) return
-        setBusy(true); setSay(`正在上传 ${array.length} 张图片…`)
+        setBusy(true)
+        setSay('正在上传 ' + array.length + ' 张图片…')
         const form = new FormData()
         for (const f of array) form.append('file', f, f.name)
         const r = await postForm('/stickers/save', form)
         setBusy(false)
         if (!r || !r.ok) setSay('上传失败：' + error(r))
         else {
-          setSay(`上传完成：成功 ${r.count || 0} 张${r.failed ? `，失败 ${r.failed} 张` : ''}。`)
-          await fetch()
+          setSay('上传完成：成功 ' + (r.count || 0) + ' 张' + (r.failed ? '，失败 ' + r.failed + ' 张' : '') + '。')
+          await load()
         }
       }
 
-      // 只开插件自己的库目录，路径由后端按配置决定，前端不传。
       const openStoreFolder = async () => {
-        setBusy(true); setSay('正在打开表情库文件夹…')
+        setBusy(true)
+        setSay('正在打开表情库文件夹…')
         const r = await post('/stickers/open-folder', {})
         setBusy(false)
-        if (!r || !r.ok) setSay('没打开文件夹：' + error(r))
-        else setSay('已在资源管理器中打开表情库文件夹。')
+        setSay(r && r.ok ? '已在资源管理器中打开表情库文件夹。' : '没打开文件夹：' + error(r))
       }
 
-      const cleanup = async (mode) => {
+      // 库级危险操作统一走弹窗内二次确认。
+      const cleanup = (mode) => {
         const copy = {
           unused: '删除所有未使用过的表情及其图片文件？此操作无法撤销。',
           dedupe: '删除内容重复的表情，只保留使用次数最多的一份？此操作无法撤销。',
         }[mode]
-        if (!window.confirm(copy)) return
-        setBusy(true); setSay('正在清理…')
-        const r = await post('/stickers/cleanup', { mode })
-        setBusy(false)
-        setSay(r && r.ok ? `清理完成：删除 ${r.removed || 0} 个，释放 ${r.freedMB || 0}MB。` : '清理失败：' + error(r))
-        await fetch()
+        askConfirm({
+          title: mode === 'unused' ? '删除未使用的表情？' : '清理重复的表情？',
+          description: copy,
+          confirmLabel: mode === 'unused' ? '删除未使用' : '清理重复',
+          run: async () => {
+            setBusy(true)
+            setSay('正在清理…')
+            const r = await post('/stickers/cleanup', { mode })
+            setBusy(false)
+            setSay(r && r.ok
+              ? '清理完成：删除 ' + (r.removed || 0) + ' 个，释放 ' + (r.freedMB || 0) + 'MB。'
+              : '清理失败：' + error(r))
+            await load()
+          },
+        })
       }
 
-      const getValue = (entry) => edits[entry.id] || {
+      const cards = Array.isArray(list.items) ? list.items : []
+      const current = selected ? (cards.find((item) => item.id === selected.id) || selected) : null
+      const valueOf = (entry) => edits[entry.id] || {
         tags: (entry.tags || []).join('，'),
         desc: entry.desc || '',
       }
-      const setValue = (entry, patch) => setEdit((prev) => ({
+      const setValue = (entry, patch) => setEdits((prev) => ({
         ...prev,
-        [entry.id]: { ...(prev[entry.id] || getValue(entry)), ...patch },
+        [entry.id]: { ...(prev[entry.id] || valueOf(entry)), ...patch },
       }))
 
-      const saveCard = async (entry) => {
-        const v = getValue(entry)
+      const save = async (entry) => {
+        const value = valueOf(entry)
         setBusy(true)
-        const r = await post('/stickers/update', { id: entry.id, tags: v.tags, desc: v.desc })
+        const r = await post('/stickers/update', { id: entry.id, tags: value.tags, desc: value.desc })
         setBusy(false)
         if (r && r.ok) {
           setSay('标签与描述已保存。')
-          setEdit((prev) => { const next = { ...prev }; delete next[entry.id]; return next })
-          await fetch()
+          setEdits((prev) => {
+            const next = { ...prev }
+            delete next[entry.id]
+            return next
+          })
+          await load()
         } else setSay('保存失败：' + error(r))
       }
 
-      const remove = async (entry) => {
-        if (!window.confirm(`删除表情「${entry.file}」及其图片文件？此操作无法撤销。`)) return
-        setBusy(true)
-        const r = await post('/stickers/delete', { id: entry.id })
-        setBusy(false)
-        setSay(r && r.ok ? '已删除。' : '删除失败：' + error(r))
-        await fetch()
-      }
+      const remove = (entry) => askConfirm({
+        title: '删除这个表情？',
+        description: '删除「' + entry.file + '」及其图片文件，无法撤销。',
+        confirmLabel: '删除',
+        run: async () => {
+          setBusy(true)
+          const r = await post('/stickers/delete', { id: entry.id })
+          setBusy(false)
+          if (r && r.ok) {
+            setSay('已删除。')
+            setSelected(null)
+          } else setSay('删除失败：' + error(r))
+          await load()
+        },
+      })
 
       const copyPath = async (entry) => {
         try {
@@ -369,131 +783,132 @@ window.__ModuleLoader__.load({
 
       const send = async (entry) => {
         const qq = object[entry.id] || (bindings[0] && bindings[0].qq) || ''
-        if (!qq) { setSay('尚未配置 QQ 绑定，请先在「私聊绑定」中添加。'); return }
-        setBusy(true); setSay(`正在向 QQ ${qq} 发送 ${entry.file}…`)
+        if (!qq) {
+          setSay('尚未配置 QQ 绑定，请先在「私聊绑定」中添加。')
+          return
+        }
+        setBusy(true)
+        setSay('正在向 QQ ' + qq + ' 发送 ' + entry.file + '…')
         const r = await post('/stickers/send', { qq, name: entry.id })
         setBusy(false)
         if (!r || !r.ok) setSay('发送失败：' + error(r))
-        else if (r.queued) setSay(`QQ 当前无法发送，消息已加入待发列表（积压 ${r.pending || 0} 条）。`)
-        else setSay(`已发送至 QQ ${r.qq || qq}。`)
-        await fetch()
+        else if (r.queued) setSay('QQ 当前无法发送，消息已加入待发列表（积压 ' + (r.pending || 0) + ' 条）。')
+        else setSay('已发送至 QQ ' + (r.qq || qq) + '。')
+        await load()
       }
 
-      const stats = list.stats || {}
-      const cards = Array.isArray(list.items) ? list.items : []
+      const toolbar = h(Toolbar, {
+        query: q,
+        onQuery: setQ,
+        onRefresh: load,
+        busy,
+        actions: [
+          { label: '打开表情库文件夹', onClick: openStoreFolder },
+          { label: '删除未使用', onClick: () => cleanup('unused') },
+          { label: '清理重复', onClick: () => cleanup('dedupe') },
+        ],
+      },
+        h('button', {
+          type: 'button', style: S.btn, disabled: busy,
+          onClick: () => { try { fileRef.current?.click?.() } catch { /* 无文件选择器时忽略 */ } },
+        }, '上传图片'),
+        h('input', {
+          ref: fileRef,
+          type: 'file',
+          multiple: true,
+          accept: 'image/*',
+          style: { display: 'none' },
+          onChange: (e) => { upload(e.target.files); e.target.value = '' },
+        }))
 
-      // 页签内的工具栏：上传与批量清理留在内容区，避免和页签挤在吸顶条里。
-      const toolbar = h('div', { style: S.card },
-        h('div', { style: S.toolbar },
-          h('input', {
-            type: 'file', multiple: true, accept: 'image/*', disabled: busy,
-            onChange: (e) => { upload(e.target.files); e.target.value = '' },
+      const grid = h(CardGrid, {
+        items: cards,
+        loading,
+        emptyText: '图库是空的。',
+        keyOf: (entry) => entry.id,
+        onOpen: (entry) => setSelected(entry),
+        renderCard: (entry) => h(CardBody, {
+          src: imageUrl(entry),
+          alt: entry.desc || entry.file,
+          name: entry.file,
+          desc: entry.desc,
+          tags: (entry.tags || []).map((tag) => '#' + tag),
+          meta: (entry.width || 0) + '×' + (entry.height || 0) + '｜' + (entry.size_kb || 0) + 'KB｜已使用 ' + (entry.used_count || 0) + ' 次',
+        }),
+      })
+
+      const detail = current ? (() => {
+        const value = valueOf(current)
+        const qq = object[current.id] || (bindings[0] && bindings[0].qq) || ''
+        return h(DetailShell, {
+          title: current.file || current.id,
+          onBack: () => setSelected(null),
+          preview: h('img', {
+            src: imageUrl(current), alt: current.desc || current.file, style: S.detailImage,
           }),
-          h('button', {
-            type: 'button', style: S.btn, onClick: openStoreFolder, disabled: busy,
-          }, '打开表情库文件夹'),
-          h('button', {
-            type: 'button', style: S.btn, onClick: () => cleanup('unused'), disabled: busy,
-          }, '删除未使用'),
-          h('button', {
-            type: 'button', style: S.btn, onClick: () => cleanup('dedupe'), disabled: busy,
-          }, '清理重复'),
-          h('button', { type: 'button', style: S.btn, onClick: fetch, disabled: busy }, '刷新')),
-        h('div', { style: { ...S.hint, marginTop: 6 } }, '可一次选多张，也可以把图片直接拖进本页；删除与清理无法撤销。'),
-        say ? h('div', { style: { ...(isError(say) ? S.danger : S.ok), marginTop: 6 } }, say) : null)
-
-      // 搜索、标签、排序和统计不常用到必须一直可见，放在工具栏下面跟着内容滚。
-      const filterBar = h('div', { style: S.card },
-        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
-          h('input', {
-            style: { ...S.input, width: 200 },
-            value: q, placeholder: '搜索标签、描述或文件名',
-            onChange: (e) => setQ(e.target.value),
-          }),
-          h('select', { style: S.small, value: tags, onChange: (e) => setTags(e.target.value) },
-            h('option', { value: '' }, '全部标签'),
-            (list.tags || []).map((t) => h('option', { key: t.tag, value: t.tag }, `#${t.tag}（${t.count}）`))),
-          h('select', { style: S.small, value: sort, onChange: (e) => setSort(e.target.value) },
-            h('option', { value: 'used' }, '按用量'),
-            h('option', { value: 'recent' }, '按加入时间'),
-            h('option', { value: 'name' }, '按文件名'))),
-        h('div', { style: { ...S.dim, marginTop: 6 } },
-          `共 ${stats.count || 0} 个（上限 ${stats.maxCount || '?'}）｜占用 ${stats.sizeMB || 0}MB（上限 ${stats.maxMB || '?'}MB）｜已使用 ${stats.used || 0} 个｜未使用 ${stats.unused || 0} 个`))
-
-      const grid = h('div', { style: { ...S.card } },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, `表情（${list.total ?? cards.length} 个）`),
-        cards.length === 0
-          ? h('div', { style: S.dim }, '暂无表情。可以上传图片，或把图片拖进本页。')
-          : h('div', { style: S.grid }, cards.map((entry) => {
-            const v = getValue(entry)
-            const qq = object[entry.id] || (bindings[0] && bindings[0].qq) || ''
-            return h('div', { key: entry.id, style: S.stickerCard },
-              h('img', { src: imageUrl(entry), loading: 'lazy', alt: entry.desc || entry.file, style: S.thumb }),
-              h('div', { style: { fontSize: 11, opacity: 0.65, wordBreak: 'break-all' } }, entry.file),
-              h('div', { style: { fontSize: 11, opacity: 0.6 } },
-                `${entry.width || 0}×${entry.height || 0}｜${entry.size_kb || 0}KB｜已使用 ${entry.used_count || 0} 次`),
-              h('div', null, (entry.tags || []).map((t) => h('span', { key: t, style: S.chip }, `#${t}`))),
-              h('input', {
-                style: S.input, value: v.tags, placeholder: '标签，以逗号分隔',
-                onChange: (e) => setValue(entry, { tags: e.target.value }),
-              }),
-              h('input', {
-                style: S.input, value: v.desc, placeholder: '描述（可选）',
-                onChange: (e) => setValue(entry, { desc: e.target.value }),
-              }),
-              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                h('button', { type: 'button', style: S.btn, onClick: () => saveCard(entry), disabled: busy }, '保存'),
-                h('button', {
-                  type: 'button', style: S.btn, onClick: () => copyPath(entry),
-                }, '复制路径'),
-                h('button', { type: 'button', style: S.btn, onClick: () => remove(entry), disabled: busy }, '删除')),
-              h('div', { style: { display: 'flex', gap: 6 } },
-                h('select', {
-                  style: S.input, value: qq,
-                  onChange: (e) => setObject((prev) => ({ ...prev, [entry.id]: e.target.value })),
-                },
-                  bindings.length === 0 ? h('option', { value: '' }, '（暂无绑定）') : null,
-                  bindings.map((b) => h('option', { key: b.qq, value: b.qq }, `发送至 ${b.qq}${b.name ? `（${b.name}）` : ''}`))),
-                h('button', { type: 'button', style: S.btn, onClick: () => send(entry), disabled: busy || !qq }, '发送')),
-            )
-          })))
+          actions: [
+            h('button', { key: 'save', type: 'button', style: S.btnOn, onClick: () => save(current), disabled: busy }, '保存描述与标签'),
+            h('button', { key: 'copy', type: 'button', style: S.btn, onClick: () => copyPath(current) }, '复制路径'),
+            h('select', {
+              key: 'qq',
+              style: { ...S.btn, minWidth: 150 },
+              value: qq,
+              onChange: (e) => setObject((prev) => ({ ...prev, [current.id]: e.target.value })),
+            },
+              bindings.length === 0 ? h('option', { value: '' }, '（暂无绑定）') : null,
+              bindings.map((b) => h('option', { key: b.qq, value: b.qq }, '发送至 ' + b.qq + (b.name ? '（' + b.name + '）' : '')))),
+            h('button', { key: 'send', type: 'button', style: S.btn, onClick: () => send(current), disabled: busy || !qq }, '发送'),
+            h('button', { key: 'delete', type: 'button', style: S.btnDanger, onClick: () => remove(current), disabled: busy }, '删除'),
+          ],
+        },
+          h('div', { style: S.dim },
+            (current.width || 0) + '×' + (current.height || 0) + '｜' + (current.size_kb || 0) + 'KB｜已使用 ' + (current.used_count || 0) + ' 次｜加入 ' + timeText(current.added_at)),
+          field('标签（逗号分隔）', input(value.tags, (v) => setValue(current, { tags: v }), '标签，以逗号分隔')),
+          field('描述', input(value.desc, (v) => setValue(current, { desc: v }), '描述（可选）')))
+      })() : null
 
       return h('div', {
+        style: S.galleryBody,
         onDragOver: (e) => { e.preventDefault() },
         onDrop: (e) => { e.preventDefault(); upload(e.dataTransfer && e.dataTransfer.files) },
-      }, toolbar, filterBar, grid)
+      }, toolbar, h('div', { style: S.content }, detail || grid), h(StatusLine, { text: say }))
     }
 
     // ---------------- 收图图库页签 ----------------
-    // 缓存语义：列出「见过什么图、上次认成什么」，可以改描述、存为表情、打开原图。
-    // 图库配置项留在设置页的「收图图库」块里；主面板只做浏览与单条操作。
-    function imageTab({ imageDir = '' }) {
+    // 缓存语义：浏览、改描述、存为表情、打开原图；清空与打开文件夹是库级操作。
+    function ImageGallery({ imageDir = '', askConfirm }) {
       const [list, setList] = React.useState({ entries: [], total: 0, stats: {} })
       const [q, setQ] = React.useState('')
-      const [edits, setEdit] = React.useState({})
+      const [loading, setLoading] = React.useState(true)
       const [busy, setBusy] = React.useState(false)
       const [say, setSay] = React.useState('')
+      const [selected, setSelected] = React.useState(null)
+      const [edits, setEdits] = React.useState({})
 
       const error = (r) => String((r && (r.error || r.message)) || '没有收到服务响应。')
 
-      const fetch = async () => {
+      const load = async () => {
+        setLoading(true)
         const p = new URLSearchParams()
         p.set('limit', '200')
         if (q.trim()) p.set('q', q.trim())
         const r = await get('/images?' + p.toString())
+        setLoading(false)
         if (r && r.ok) setList(r)
         else if (r && r.error) setSay('无法读取收图图库：' + error(r))
       }
-      React.useEffect(() => { fetch() }, [])
+      React.useEffect(() => { load() }, [])
       React.useEffect(() => {
-        const t = setTimeout(fetch, 300)
+        const t = setTimeout(load, 300)
         return () => clearTimeout(t)
       }, [q])
 
-      const stats = list.stats || {}
       const entries = Array.isArray(list.entries) ? list.entries : []
+      const current = selected
+        ? (entries.find((item) => item.sha256 === selected.sha256) || selected)
+        : null
       const descOf = (entry) => (edits[entry.sha256] === undefined ? (entry.desc || '') : edits[entry.sha256])
-      const setDesc = (entry, value) => setEdit((prev) => ({ ...prev, [entry.sha256]: value }))
+      const setDesc = (entry, value) => setEdits((prev) => ({ ...prev, [entry.sha256]: value }))
 
       const saveDesc = async (entry) => {
         setBusy(true)
@@ -502,8 +917,12 @@ window.__ModuleLoader__.load({
         if (!r || !r.ok) setSay('保存描述失败：' + error(r))
         else {
           setSay('描述已保存。')
-          setEdit((prev) => { const next = { ...prev }; delete next[entry.sha256]; return next })
-          await fetch()
+          setEdits((prev) => {
+            const next = { ...prev }
+            delete next[entry.sha256]
+            return next
+          })
+          await load()
         }
       }
 
@@ -522,177 +941,108 @@ window.__ModuleLoader__.load({
       }
 
       const openOriginal = async (entry) => {
+        setBusy(true)
         const r = await post('/images/open', { sha256: entry.sha256 })
+        setBusy(false)
         setSay(r && r.ok ? '已在本机打开原图。' : '打不开原图：' + error(r))
       }
 
       const openImageFolder = async () => {
         if (!imageDir) return
+        setBusy(true)
         const r = await post('/open-folder', { path: imageDir })
+        setBusy(false)
         setSay(r && r.ok ? '已在资源管理器中打开图库文件夹。' : '打开失败：' + error(r))
       }
 
-      const clearLibrary = async () => {
-        const n = Number(stats.count) || 0
-        if (n > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function'
-          && !window.confirm(`确定清空收图图库里的 ${n} 张图？清空后同一张图再来会重新识图。`)) return
-        setBusy(true); setSay('正在清空收图图库…')
-        const r = await post('/images/clear', {})
-        setBusy(false)
-        setSay(r && r.ok
-          ? `已清空 ${r.removed || 0} 张，释放 ${Math.round((r.freedBytes || 0) / 1048576 * 10) / 10}MB。`
-          : '清空失败：' + error(r))
-        await fetch()
+      const clearLibrary = () => {
+        const n = Number(list.stats?.count) || 0
+        askConfirm({
+          title: '清空收图图库？',
+          description: n > 0
+            ? '将删除图库里的 ' + n + ' 张图；同一张图再来会重新识图。此操作无法撤销。'
+            : '将清空收图图库；同一张图再来会重新识图。此操作无法撤销。',
+          confirmLabel: '清空图库',
+          run: async () => {
+            setBusy(true)
+            setSay('正在清空收图图库…')
+            const r = await post('/images/clear', {})
+            setBusy(false)
+            setSay(r && r.ok
+              ? '已清空 ' + (r.removed || 0) + ' 张，释放 ' + Math.round((r.freedBytes || 0) / 1048576 * 10) / 10 + 'MB。'
+              : '清空失败：' + error(r))
+            setSelected(null)
+            await load()
+          },
+        })
       }
 
-      const toolbarCard = h('div', { style: S.card },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '收图图库'),
-        h('div', { style: S.dim }, '把收到的图片按内容指纹存下来，并记住上次识别出的描述；同一张图再来就直接用描述，不再识图。'),
-        h('div', { style: { ...S.dim, marginTop: 6 } },
-          `共 ${stats.count || 0} 张｜有描述 ${stats.withDesc || 0} 张｜命中 ${stats.hits || 0} 次｜占用 ${stats.sizeMB || 0}MB`),
-        h('div', { style: S.toolbar, marginTop: 8 },
-          h('input', {
-            style: { ...S.input, width: 220 },
-            value: q, placeholder: '搜索描述、指纹或文件名',
-            onChange: (e) => setQ(e.target.value),
-          }),
-          h('button', { type: 'button', style: S.btn, onClick: fetch, disabled: busy }, '刷新'),
-          h('button', { type: 'button', style: S.btn, onClick: clearLibrary, disabled: busy }, '清空图库'),
-          imageDir ? h('button', { type: 'button', style: S.btn, onClick: openImageFolder, disabled: busy }, '打开图库文件夹') : null),
-        h('div', { style: { ...S.hint, marginTop: 6 } }, '收图先查图库、条数上限、空间上限与存不存原图，都在设置页「收图图库」里改。'),
-        say ? h('div', { style: { ...(isError(say) ? S.danger : S.ok), marginTop: 6 } }, say) : null)
+      const actions = [{ label: '清空图库', danger: true, onClick: clearLibrary }]
+      if (imageDir) actions.push({ label: '打开图库文件夹', onClick: openImageFolder })
 
-      const gridCard = h('div', { style: S.card },
-        h('div', { style: { ...S.h, margin: '0 0 8px' } }, `缓存图片（${list.total ?? entries.length} 张）`),
-        entries.length === 0
-          ? h('div', { style: { ...S.dim, marginTop: 8 } }, '暂无图片。收到的图片会按内容指纹先进这里。')
-          : h('div', { style: S.grid }, entries.map((entry) => {
-            const hasFile = Boolean(entry.file && entry.path)
-            return h('div', { key: entry.sha256, style: S.stickerCard },
-              hasFile
-                ? h('img', { src: cachedImageUrl(entry), loading: 'lazy', alt: entry.desc || entry.sha256, style: S.thumb })
-                : h('div', {
-                  style: {
-                    ...S.thumb, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, opacity: 0.6,
-                  },
-                }, '没有存原图'),
-              h('div', { style: { fontSize: 11, opacity: 0.65, wordBreak: 'break-all' } }, entry.file || entry.sha256.slice(0, 16)),
-              h('div', { style: { fontSize: 11, opacity: 0.6 } },
-                `${entry.width || 0}×${entry.height || 0}｜${Math.round((entry.bytes || 0) / 102.4) / 10}KB｜命中 ${entry.hits || 0} 次`),
-              h('div', { style: { fontSize: 11, opacity: 0.6 } },
-                `描述来自${descSourceText(entry.descSource)}｜加入 ${timeText(entry.firstSeenAt)}`),
-              h('input', {
-                style: S.input, value: descOf(entry), placeholder: '描述',
-                onChange: (e) => setDesc(entry, e.target.value),
-              }),
-              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                h('button', { type: 'button', style: S.btn, onClick: () => saveDesc(entry), disabled: busy }, '保存描述'),
-                h('button', {
-                  type: 'button', style: S.btn, onClick: () => saveAsSticker(entry), disabled: busy || !hasFile,
-                }, '存为表情'),
-                h('button', {
-                  type: 'button', style: S.btn, onClick: () => openOriginal(entry), disabled: busy || !hasFile,
-                }, '打开原图')))
-          })))
+      const toolbar = h(Toolbar, {
+        query: q,
+        onQuery: setQ,
+        onRefresh: load,
+        busy,
+        actions,
+      })
 
-      return h('div', null, toolbarCard, gridCard)
-    }
+      const grid = h(CardGrid, {
+        items: entries,
+        loading,
+        emptyText: '图库是空的。',
+        keyOf: (entry) => entry.sha256,
+        onOpen: (entry) => setSelected(entry),
+        renderCard: (entry) => h(CardBody, {
+          src: entry.file && entry.path ? cachedImageUrl(entry) : '',
+          alt: entry.desc || entry.sha256,
+          name: entry.file || String(entry.sha256 || '').slice(0, 16),
+          desc: entry.desc,
+          tags: [descSourceText(entry.descSource)],
+          meta: (entry.width || 0) + '×' + (entry.height || 0) + '｜' + Math.round((entry.bytes || 0) / 102.4) / 10 + 'KB｜命中 ' + (entry.hits || 0) + ' 次',
+          noImageText: '没有存原图',
+        }),
+      })
 
-    // 图库主面板的页签：只服务鱼讯自己的两个库。
-    const galleryTabs = [
-      { id: 'stickers', label: '表情库' },
-      { id: 'images', label: '收图图库' },
-    ]
-
-    /**
-     * 跨面板的小 store：设置页按钮先把目标页签写进来，再切主面板。
-     * GalleryPage 在面板常驻时订阅它，所以「已经在本面板」也能切页签，
-     * 不依赖 React 父子传参（设置页与主面板是两棵组件树）。
-     */
-    const galleryStore = (() => {
-      let tab = 'stickers'
-      const listeners = new Set()
-      return {
-        get: () => tab,
-        set(next) {
-          tab = next === 'images' ? 'images' : 'stickers'
-          for (const fn of [...listeners]) {
-            try { fn(tab) } catch { /* 单个订阅出错不影响其它订阅 */ }
-          }
+      const detail = current ? (() => {
+        const hasFile = Boolean(current.file && current.path)
+        return h(DetailShell, {
+          title: current.file || String(current.sha256 || '').slice(0, 16),
+          onBack: () => setSelected(null),
+          preview: hasFile
+            ? h('img', {
+              src: cachedImageUrl(current), alt: current.desc || current.sha256, style: S.detailImage,
+            })
+            : h('div', { style: S.dim }, '没有存原图'),
+          actions: [
+            h('button', { key: 'save', type: 'button', style: S.btnOn, onClick: () => saveDesc(current), disabled: busy }, '保存描述'),
+            h('button', {
+              key: 'sticker', type: 'button', style: S.btn, onClick: () => saveAsSticker(current), disabled: busy || !hasFile,
+            }, '存为表情'),
+            h('button', {
+              key: 'open', type: 'button', style: S.btn, onClick: () => openOriginal(current), disabled: busy || !hasFile,
+            }, '打开原图'),
+          ],
         },
-        subscribe(fn) {
-          listeners.add(fn)
-          return () => listeners.delete(fn)
-        },
-      }
-    })()
-    let layoutService = null
+          h('div', { style: S.dim },
+            (current.width || 0) + '×' + (current.height || 0) + '｜' + Math.round((current.bytes || 0) / 102.4) / 10 + 'KB｜命中 ' + (current.hits || 0) + ' 次'),
+          h('div', { style: S.dim },
+            '描述来自' + descSourceText(current.descSource) + '｜加入 ' + timeText(current.firstSeenAt)),
+          field('描述', input(descOf(current), (v) => setDesc(current, v), '描述')))
+      })() : null
 
-    /** 切到图库主面板；layout 不可用（极简宿主/测试）时至少把页签记对。 */
-    function openGallery(tab) {
-      galleryStore.set(tab)
-      try {
-        layoutService?.selectPanel?.('fish-gallery')
-      } catch { /* 主面板切不过去时页面仍能通过侧边栏进入 */ }
-    }
-
-    /** 侧边栏「图库」入口图标：相框 + 山与太阳，跟随主题色。 */
-    function galleryIcon({ size = 18 } = {}) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 1.2,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-        'aria-hidden': 'true',
-      },
-      h('rect', { x: 1.75, y: 2.75, width: 12.5, height: 10.5, rx: 2 }),
-      h('circle', { cx: 5.4, cy: 6.3, r: 1.15 }),
-      h('path', { d: 'M2.6 11.3l3.2-3 2.2 2 2.5-2.5 3 3.2' }))
+      return h('div', { style: S.galleryBody },
+        toolbar,
+        h('div', { style: S.content }, detail || grid),
+        h(StatusLine, { text: say }))
     }
 
     /**
-     * 图库管理主面板：自带标题、页签与内容区，由侧边栏「图库」或设置页入口打开。
-     * 绑定与图库目录从 /state 现取；页签状态放模块级 store，跨面板可见。
+     * 设置页里的表情包入口：配置项、统计与一个「打开图库管理」主按钮。
+     * 图库内容在设置内弹窗里，不再注册主面板或侧边栏入口。
      */
-    function galleryPage() {
-      const [tab, setTab] = React.useState(galleryStore.get())
-      const [state, setState] = React.useState(null)
-      React.useEffect(() => galleryStore.subscribe(setTab), [])
-      React.useEffect(() => {
-        let valid = true
-        get('/state').then((s) => { if (valid && s) setState(s) })
-        return () => { valid = false }
-      }, [])
-
-      const current = galleryTabs.some((item) => item.id === tab) ? tab : 'stickers'
-      const config = (state && state.config) || {}
-      const bindings = Array.isArray(config.bindings) ? config.bindings : []
-      const imageDir = String((state && state.imageDir) || '')
-      const bar = h('div', { style: S.bar },
-        h('div', { style: S.barRow },
-          h('div', { style: { ...S.h1, margin: 0 } }, '图库管理'),
-          h('div', { style: S.dim }, '表情库与收图图库都存在本机，各自独立。')),
-        h('div', { style: S.tabBar }, galleryTabs.map((item) => h('button', {
-          key: item.id,
-          type: 'button',
-          style: item.id === current ? S.tabOn : S.tab,
-          onClick: () => galleryStore.set(item.id),
-        }, item.label))))
-      const body = current === 'stickers' ? h(stickerTab, { bindings }) : h(imageTab, { imageDir })
-      return h('div', {
-        className: 'fish-msg-settings',
-        style: {
-          ...S.wrap, minHeight: '100%', border: 'none', borderRadius: 0, background: 'transparent',
-        },
-      }, bar, body)
-    }
-
-    /** 设置页里的表情包入口：只放统计与入口按钮，页面内容在「图库管理 → 表情库」。 */
-    function stickerSettings({ config, change, open, savedDir = '', dirExists = false }) {
+    function stickerSettings({ config, change, onOpen, savedDir = '', dirExists = false }) {
       const [stats, setStats] = React.useState({})
       const [say, setSay] = React.useState('')
       const [error, setError] = React.useState(false)
@@ -722,6 +1072,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '表情包'),
+        h('div', { style: S.dim }, '长期收藏的表情包，可上传、改标签与描述、直接发送；不会自动删除。'),
         row('保存位置', pathInput(config.stickerDir, (v) => change('stickerDir', v), '使用默认位置', canOpen, openFolder),
           null,
           '更换后只读取新目录，原有图片不会迁移。'),
@@ -742,9 +1093,11 @@ window.__ModuleLoader__.load({
           onChange: (e) => change('stickerMaxFileMB', Number(e.target.value)),
         }), null, '入库前先按文件大小挡掉超大文件，避免整读进内存；超过这个值会提示换小图。'),
         h('div', { style: { ...S.dim, marginTop: 8 } },
-          `共 ${amount} 个（上限 ${config.stickerMaxCount ?? 2000}）｜占用 ${stats.sizeMB || 0}MB（上限 ${config.stickerMaxMB ?? 1024}MB）｜已使用 ${stats.used || 0} 个｜未使用 ${stats.unused || 0} 个`),
+          '共 ' + amount + ' 个（上限 ' + (config.stickerMaxCount ?? 2000) + '）｜占用 ' + (stats.sizeMB || 0) + 'MB（上限 ' + (config.stickerMaxMB ?? 1024) + 'MB）｜已使用 ' + (stats.used || 0) + ' 个｜未使用 ' + (stats.unused || 0) + ' 个'),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 } },
-          h('button', { type: 'button', style: S.btn, onClick: open }, '打开图库管理')),
+          h('button', {
+            type: 'button', style: S.btnOn, onClick: (e) => onOpen('stickers', e),
+          }, '打开图库管理')),
         say ? h('div', { style: { ...(error ? S.danger : S.ok), marginTop: 6 } }, say) : null)
     }
 
@@ -793,6 +1146,10 @@ window.__ModuleLoader__.load({
       // 发送音色下拉：只在本地 AI 的语音能力可用时拉一次；失败就退回文本输入。
       const [voices, setVoices] = React.useState(null)
       const [voiceHint, setVoiceHint] = React.useState('')
+      // 图库管理是设置页里的弹窗：值存当前页签，null 表示关闭。
+      const [gallery, setGallery] = React.useState(null)
+      // 弹窗关闭后把焦点还给触发它的按钮。
+      const galleryTrigger = React.useRef(null)
       const canFetchVoices = Boolean(state && state.ai && state.ai.tts)
       React.useEffect(() => {
         if (!canFetchVoices) return undefined
@@ -837,6 +1194,19 @@ window.__ModuleLoader__.load({
         change('bindings', [...bindings(), { qq: '', session: firstSession, name: '主人', enabled: true }])
       }
       const deleteBinding = (i) => change('bindings', bindings().filter((_, j) => j !== i))
+
+      // 打开图库弹窗：记住触发按钮，关闭时把焦点还回去。
+      const openGallery = (tab, event) => {
+        galleryTrigger.current = (event && event.currentTarget) || null
+        setGallery(tab === 'images' ? 'images' : 'stickers')
+      }
+      const closeGallery = () => {
+        setGallery(null)
+        const trigger = galleryTrigger.current
+        if (trigger && typeof trigger.focus === 'function') {
+          try { trigger.focus() } catch { /* 焦点回不去不影响关闭 */ }
+        }
+      }
 
       const store = async () => {
         setBusy(true); setAction('保存'); setSay('正在保存…')
@@ -1080,26 +1450,8 @@ window.__ModuleLoader__.load({
         '留空时使用内置默认提示词。'))
 
       // 收图图库：缓存的只是「原图 + 描述」，关掉总开关就退回每次都识图的老行为。
+      // 清空图库与打开图库文件夹移到弹窗的工具条，二次确认也在弹窗内完成。
       const imageStats = state.images || {}
-      const imageDir = String(state.imageDir || '').trim()
-      const openImageDir = async () => {
-        if (!imageDir) return
-        const r = await post('/open-folder', { path: imageDir })
-        if (!r || !r.ok) setSay('打开失败：' + String((r && (r.error || r.hint)) || '没有收到服务响应，请稍后重试。'))
-        else setSay('已在资源管理器中打开图库文件夹。')
-      }
-      const clearImageLibrary = async () => {
-        const n = Number(imageStats.count) || 0
-        if (n > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function'
-          && !window.confirm(`确定清空收图图库里的 ${n} 张图？清空后同一张图再来会重新识图。`)) return
-        setBusy(true); setSay('正在清空收图图库…')
-        const r = await post('/images/clear', {})
-        setBusy(false)
-        setSay(r && r.ok
-          ? `已清空 ${r.removed || 0} 张，释放 ${Math.round((r.freedBytes || 0) / 1048576 * 10) / 10}MB。`
-          : '清空失败：' + String((r && r.error) || '没有收到服务响应，请稍后重试。'))
-        await fetch()
-      }
       const imageLibraryPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '收图图库'),
         h('div', { style: S.dim }, '把收到的图片按内容指纹存下来，并记住上次识别出的描述；同一张图再来就直接用描述，不再识图。'),
@@ -1120,11 +1472,9 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...S.dim, marginTop: 8 } },
           `共 ${imageStats.count || 0} 张（上限 ${config.imageLibraryMaxItems ?? 1000}）｜有描述 ${imageStats.withDesc || 0} 张｜命中 ${imageStats.hits || 0} 次｜占用 ${imageStats.sizeMB || 0}MB（上限 ${config.imageLibraryMaxMB ?? 512}MB）`),
         h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
-          h('button', { type: 'button', style: S.btn, onClick: () => openGallery('images') }, '打开图库管理'),
-          h('button', { type: 'button', style: S.btn, onClick: clearImageLibrary, disabled: busy }, '清空图库'),
-          imageDir
-            ? h('button', { type: 'button', style: S.btn, onClick: openImageDir, disabled: busy }, '打开图库文件夹')
-            : null))
+          h('button', {
+            type: 'button', style: S.btnOn, onClick: (e) => openGallery('images', e),
+          }, '打开图库管理')))
 
       // 记忆扩展：紧挨收图图库，只影响入站消息的附注，不参与任何缓存。
       // 状态数据由 /state 的 memory 字段下发；老版本 /state 没有它时退回 ai.online。
@@ -1248,41 +1598,54 @@ window.__ModuleLoader__.load({
         h(stickerSettings, {
           config,
           change,
-          open: () => openGallery('stickers'),
+          onOpen: openGallery,
           savedDir: state.stickerDir || '',
           dirExists: Boolean(state.stickerDirExists),
         }),
         imageLibraryPage,
         memoryPage, backfillPage, outboxPage,
         h('div', { style: { ...S.h, marginTop: 14 } }, '最近日志'),
-        h('pre', { style: S.log }, log || '暂无日志。'))
+        h('pre', { style: S.log }, log || '暂无日志。'),
+        // 图库弹窗盖在设置页之上；只有两个库的入口在设置页里。
+        h(GalleryModal, {
+          // key 随入口页签变化：每次打开都重新挂载，页签、二次确认与滚动位置都从头开始。
+          key: gallery || 'closed',
+          open: gallery !== null,
+          initialTab: gallery || 'stickers',
+          onClose: closeGallery,
+          imageDir: String(state.imageDir || ''),
+          bindings: bindings(),
+        }))
     }
 
     function apply(ctx) {
       injectWidgetStyle()
       const slots = ctx.get('slots')
       if (slots === undefined) return
-      // 主面板切换靠 layout；极简宿主没有这个服务时，侧边栏仍能进入面板。
-      try { layoutService = ctx.get('layout') || ctx.layout || null } catch { layoutService = null }
+      // 只注册设置分区；图库管理是设置页里的弹窗，不占主面板与侧边栏。
       slots.inject('settings.section', () => slots.register(
         { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' },
         Section,
-      ))
-      // 图库管理是独立主面板（不是设置内嵌页）：侧边栏「图库」和设置页入口都指向它。
-      slots.inject('main', () => slots.register(
-        { name: 'main', key: 'fish-gallery' },
-        galleryPage,
-      ))
-      slots.inject('sidebar.panellist', () => slots.register(
-        { name: 'sidebar.panellist', id: 'fish-gallery', order: 20, label: () => '图库' },
-        galleryIcon,
       ))
     }
 
     exports.apply = apply
     exports.inject = inject
-    // 测试用：跨面板页签 store 与入口函数；生产代码只经页签按钮与设置页按钮使用。
-    exports.__test = { galleryStore, openGallery }
+    // 测试用：弹窗与共享组件的内部面；生产代码只经设置页按钮使用。
+    exports.__test = {
+      GALLERIES,
+      GalleryModal,
+      StickerGallery,
+      ImageGallery,
+      ConfirmDialog,
+      CardBody,
+      CardGrid,
+      DetailShell,
+      Toolbar,
+      StatusLine,
+      EmptyState,
+      LoadingState,
+    }
     return module.exports
   },
 })
