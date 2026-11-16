@@ -35,7 +35,7 @@ DSH 会话（模型照常开一轮）
 供别的插件按需取用），设置页/诊断走 `/dsh-fish-message/*` 本地路由；
 表情库另有 `lib/stickers.js`（纯磁盘逻辑）和 `lib/sticker-routes.js`（HTTP 门面）两层；
 收图图库是 `lib/image-library.js`（纯磁盘逻辑）+ `lib/vision-cache.js`（识图策略）；
-图库管理页的数据路由在 `lib/gallery-routes.js`（收图图库列表/出图，记忆图库与声纹库的只读转发）。
+图库管理主面板的数据路由在 `lib/gallery-routes.js`（收图图库列表/出图/改描述/打开原图）。
 
 **职责边界：鱼讯只做 QQ 传输。** 语音和图片的基础链路（落盘、发送、补发）始终可用；
 语音识别 / 合成 / 本地识图是**可选能力**，由本地 AI 插件提供的 `fish.service` 支持。
@@ -73,7 +73,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 | `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
 | `lib/sticker-routes.js` | `/stickers*` 路由：参数校验、multipart、取图防穿越 | 不实现存储算法 |
-| `lib/gallery-routes.js` | 图库管理数据路由：收图图库列表/出图/改描述/打开原图，记忆图库与声纹库只读转发 | 不实现存储算法，不直接读写记忆库 |
+| `lib/gallery-routes.js` | 图库主面板数据路由：收图图库列表/出图/改描述/打开原图 | 不实现存储算法，不碰记忆插件 |
 | `lib/image-library.js` | 收图图库：按 sha256 存原图与描述、命中计数、上限淘汰 | 不碰 HTTP / DSH，也不认识「识图」 |
 | `lib/vision-cache.js` | 入站图片的识别缓存策略：查库 / 本地识图 / 交给模型看 | 不存盘、不拼消息正文 |
 | `lib/memory-extension.js` | 记忆扩展策略：开关判定、调 `memory.library` 只读比对、附注格式、超时降级 | 不写记忆库、不碰收图图库/表情库、不 import 记忆插件 |
@@ -449,8 +449,7 @@ v1 不实现群聊。将来要加群：
 - 状态/日志/HTTP 路由由 DSH 的本地 Web 服务提供，默认只在 `127.0.0.1` 访问；
 - 表情取图路由只接受 `stickerDir` 内的路径（`..`、绝对路径越界一律 403）、只允许图片扩展名；
   最近图片路由只接受文件名，不接受路径；
-- 图库管理出图路由只接受内容指纹，文件位置由存储层或记忆服务按索引解析（前端不传路径）；
-  记忆图库与声纹库只经 `memory.library` 读写，不直接碰记忆库目录；
+- 图库管理出图路由只接受内容指纹，文件位置由收图图库存储层按索引解析（前端不传路径）；
 - 不修改本地 AI 服务、ComfyUI、`D:\dsh_ws\qq-voice`、旧桥数据文件。
 
 ---
@@ -556,27 +555,36 @@ v1 不实现群聊。将来要加群：
 
 ---
 
-## 10. 图库管理页（客户端）
+## 10. 图库管理主面板（客户端）
 
-`client.js` 里的整页视图 `galleryPage` 由设置页两个入口进入（「表情包」块与「收图图库」块相邻，
-各带「打开图库管理」），顶部吸顶条放返回按钮与四个页签，页签内容各自带工具栏与状态行。
+图库管理是 DSH 的独立主面板，不是设置页里的内嵌视图。`client.js` 向两个 slot 注册：
+
+| slot | 注册内容 | 作用 |
+|---|---|---|
+| `main` | `{ name: 'main', key: 'fish-gallery' }` + `galleryPage` | 主列里的图库整页 |
+| `sidebar.panellist` | `{ name, id: 'fish-gallery', order: 20, label: () => '图库' }` + `galleryIcon` | 侧边栏入口 |
+
+客户端 `inject` 声明 `['slots', 'layout']`（package.json 的 `dsh.client.inject` 同步），
+`apply` 里取 `ctx.get('layout')`；设置页两个入口的 `openGallery(tab)` 先写模块级
+`galleryStore`，再调 `layout.selectPanel('fish-gallery')`。设置页与主面板是两棵组件树，
+`galleryPage` 订阅 `galleryStore`，所以面板已经打开时再点入口也能换页签；面板重新挂载时
+从 store 读上次的页签。
+
+页签只有鱼讯自己的两个库：
 
 | 页签 | 数据来源 | 写操作 |
 |---|---|---|
 | 表情库 | `/stickers*`（`lib/sticker-routes.js`） | 上传、改标签与描述、删除、删除未使用、清理重复、发送 |
 | 收图图库 | `GET /images`、`GET /images/file`（`lib/gallery-routes.js` → `ImageLibrary.list/lookup`） | `POST /images/note` 改描述；`POST /images/open` 打开原图；`POST /stickers/save` 存为表情 |
-| 记忆图库 | `GET /memory/images`、`GET /memory/images/file`（→ `memory.library.images.list/get`） | `POST /memory/images/note`（`images.note`：改描述、并集追加标签） |
-| 声纹库 | `GET /memory/voices`（→ `memory.library.voices.list`） | 无（登记与删除留给记忆插件自己的工具） |
 
 约定：
 
-- **出图只认指纹**：`/images/file` 与 `/memory/images/file` 都只接受 `sha256`，文件位置由存储层
-  或记忆服务按索引解析，前端不传路径；收图图库的出图不会越出图库目录。
-- **记忆服务可选**：`getMemory` 每次请求现取 `ctx.get('memory.library')`；取不到时两个记忆接口
-  返回 `{ ok:true, service:false, hint:'记忆插件未启用' }`，页面只降级对应页签，收图图库与
-  表情库照常。服务调用失败返回 502 + `code/hint`，不把裸异常抛给页面。
-- **配置只有一份**：收图图库页签的四个配置项与设置页共用 Section 的 config 状态，保存走同一个
-  `POST /save`；页面不另存副本，所以改完要点「保存设置」。
+- **主面板只有两个库**：记忆图库与声纹库的页面归记忆插件（`memory.library` 服务仍只用于
+  入站记忆扩展比对，见 3.9）；鱼讯不再注册 `/memory/*` 路由，客户端也不引用记忆服务。
+- **出图只认指纹**：`/images/file` 只接受 `sha256`，文件位置由收图图库存储层按索引解析，
+  前端不传路径，不会越出图库目录。
+- **配置只有一份**：表情包与收图图库的配置项留在设置页；主面板的收图页签不重复一份配置，
+  只展示统计并提供清空 / 打开文件夹。
 - **缓存与收藏互不影响**：「存为表情」固定用条目原图绝对路径 + `source=qq-inbox` 调
   `/stickers/save`，同图已在表情库时只合并描述；删缓存条目不碰表情库，反之亦然。
 - **旧入口已删**：「最近收到的图片」列表与「清空最近图片」按钮不再出现在客户端；
