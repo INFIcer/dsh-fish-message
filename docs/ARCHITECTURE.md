@@ -18,6 +18,7 @@ Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
    ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（可选附情感/背景音/转写）
    ├─ 图片：image → inbox → 图库（按 sha256 命中描述就不附原图）→ 本地识图 / DSH 附件
+   ├─ 记忆扩展：图片/语音 → memory.library 只读比对 → 正文附「记忆：…」（可选，默认关）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
    ├─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
    │    └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
@@ -39,6 +40,9 @@ DSH 会话（模型照常开一轮）
 语音识别 / 合成 / 本地识图是**可选能力**，由本地 AI 插件提供的 `fish.service` 支持。
 鱼讯不直连本地 AI 服务，也不把它当硬依赖：没装插件时，收发文字/图片/文件、表情、
 离线补投等原有功能照常，语音相关设置灰掉，发语音时只回一句提示。
+
+记忆扩展是另一个可选依赖：记忆插件提供的 `memory.library` 服务，只读比对入站图片与语音。
+没装、抛错或超时都只跳过附注，不改变消息收发；两个底层库（收图图库、表情库）不受影响。
 
 ```text
 dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
@@ -70,6 +74,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/sticker-routes.js` | `/stickers*` 路由：参数校验、multipart、取图防穿越 | 不实现存储算法 |
 | `lib/image-library.js` | 收图图库：按 sha256 存原图与描述、命中计数、上限淘汰 | 不碰 HTTP / DSH，也不认识「识图」 |
 | `lib/vision-cache.js` | 入站图片的识别缓存策略：查库 / 本地识图 / 交给模型看 | 不存盘、不拼消息正文 |
+| `lib/memory-extension.js` | 记忆扩展策略：开关判定、调 `memory.library` 只读比对、附注格式、超时降级 | 不写记忆库、不碰收图图库/表情库、不 import 记忆插件 |
 | `lib/tools.js` | `fish_sticker_list` / `fish_sticker_send` / `fish_sticker_save` 工具定义与注册 | 不直接读写索引 |
 | `lib/image-tools.js` | `fish_image_get` / `fish_image_note` 工具定义与注册 | 不直接读写索引（走 `fish.message`） |
 | `lib/service.js` | `fish.message` 门面（发送/历史/语音/表情/图库） | 不重新实现发送 |
@@ -229,6 +234,35 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
   表情包）…」，并把它写回收图图库，下次直接命中。两个库仍是两套存储，分工不变。
 - **两份图库代码，不做抽象层**：鱼讯这份服务「QQ 收图 / 表情包」场景；记忆插件以后
   另有一份服务「用户形象 / 用户照片 / 梗图」场景。允许代码重复，不为此抽公共底层。
+
+### 3.9 记忆扩展（可选，只读）
+
+```text
+入站图片（收图图库 / 识图之后）
+  → memory.library.images.match({ buffer })      // 只算 sha256，不发图
+       ├─ 命中且有描述 → 正文追加「（记忆：<描述>｜标签：a、b）」
+       ├─ 命中但无描述 → 追加「（记忆：这张图在图库里〔标签：a〕，还没写描述）」
+       └─ 未命中 / 服务缺失 / 抛错 / 超时 → 不追加
+
+入站语音（recordToFile 之后）
+  → memory.library.voices.identify({ wavPath })   // 音频只发给本机记忆服务
+       ├─ 认出 → 追加「（记忆：声音来自<名字>，相似度 0.83）」
+       └─ 认不出 / ok:false / 抛错 / 超时 → 只记日志，正文不变
+```
+
+接入方式：`host.js` 用一个惰性取值函数 `() => ctx.get('memory.library')` 把服务传给
+`Bridge`，不 import 记忆插件、也不加进 `inject`；插件晚加载时下次消息仍能取到。
+`MemoryExtension`（`lib/memory-extension.js`）负责开关判定、调用、格式化与超时（5 秒）。
+两个分支分别受 `memoryCompareImages` / `memoryCompareVoices` 控制；总开关
+`memoryExtension` 为假时连取值函数都不调用。
+
+约束：
+
+- **只读**：`match` / `identify` 都不写记忆库；登记图片、写描述、加声纹样本由记忆插件自己的工具完成。
+- **不影响收发**：服务缺失、抛错、超时都只跳过附注，消息正文回到现状；每进程首次探测缺失只 warn 一次。
+- **不共用底层**：不收图、不写鱼讯收图图库、不写表情库，也不缓存比对结果，与两者完全解耦。
+- **开销**：图片只在本机算内容指纹；语音要把音频交给本机记忆服务（本地 AI），不上外网。
+- **状态**：`/state` 的 `memory` 字段给设置页两条状态行（`service` / `localAI`），不另开轮询。
 
 ---
 
@@ -431,6 +465,9 @@ v1 不实现群聊。将来要加群：
 | 入站图片识图失败 | 退回图片附件 + 路径，不丢图；图库不写，下次这张图重新识图 |
 | 图库读写失败 | 记 warn，本次按「不复用缓存」处理（照常识图/递原图），不影响收消息 |
 | 图库索引损坏 | 整份留档 `index.json.bad-*` 后从空索引继续；单条坏条目丢弃并 warn |
+| 记忆服务缺失 | 记忆扩展跳过比对；每进程首次探测 warn 一次，消息照常收发 |
+| 记忆比对失败 / 超时 | 记 debug，正文不加记忆附注；消息照常收发 |
+| 声纹服务不可用 | 只跳过声纹比对，图像比对照常 |
 | 文字/图片/文件发送失败 | 入持久化出站队列；恢复后按 FIFO 补发 |
 | `record` 发送失败 | 三种 file 形态重试 3 次；仍失败存路径入队 |
 | 出站队列写盘失败 | 日志报错；本次消息可能丢（磁盘满等硬故障） |
