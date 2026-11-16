@@ -30,6 +30,7 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
 
   const routes = new Map()
   const listen = new Map()
+  const toolDefinitions = []
   const agent = {
     session: { id: session },
     async followup(msg) { this.received = msg },
@@ -42,6 +43,12 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
     on(event, fn) {
       listen.set(event, fn)
       return () => listen.delete(event)
+    },
+    tools: {
+      register(definition) {
+        toolDefinitions.push(definition)
+        return () => {}
+      },
     },
     get(service) {
       if (service === 'sessions') return { list: () => [{ id: session, title: '宿主测试' }], flush: async () => {} }
@@ -107,9 +114,26 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(healthResponse.statusCode, 200)
   assert.equal(JSON.parse(healthResponse.body).ok, true)
 
+  // 表情库与收图图库的工具都注册上了；图库是缓存，默认空库。
+  assert.deepEqual(
+    toolDefinitions.map((item) => item.name).sort(),
+    ['fish_image_get', 'fish_image_note', 'fish_sticker_list', 'fish_sticker_save', 'fish_sticker_send'],
+  )
+  assert.equal(status.images.count, 0)
+  assert.equal(status.images.keepFiles, true)
+  assert.equal(status.images.maxItems, 1000)
+  assert.equal(typeof status.imageDir, 'string')
+
   // 表情库路由已经在宿主里挂上；空库返回 0 条。
   assert.equal(typeof routes.get('/dsh-fish-message/stickers'), 'function')
   assert.equal(typeof routes.get('/dsh-fish-message/open-folder'), 'function')
+  assert.equal(typeof routes.get('/dsh-fish-message/images/clear'), 'function')
+
+  const clearImages = fakeResponse()
+  await routes.get('/dsh-fish-message/images/clear')({ method: 'POST', url: '/dsh-fish-message/images/clear' }, clearImages)
+  const cleared = JSON.parse(clearImages.body)
+  assert.equal(cleared.ok, true)
+  assert.equal(cleared.removed, 0)
   const stickerResponse = fakeResponse()
   await routes.get('/dsh-fish-message/stickers')({ method: 'GET', url: '/dsh-fish-message/stickers' }, stickerResponse)
   const sticker = JSON.parse(stickerResponse.body)

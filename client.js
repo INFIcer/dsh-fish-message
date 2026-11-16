@@ -877,6 +877,52 @@ window.__ModuleLoader__.load({
             : null),
         '留空时使用内置默认提示词。'))
 
+      // 收图图库：缓存的只是「原图 + 描述」，关掉总开关就退回每次都识图的老行为。
+      const imageStats = state.images || {}
+      const imageDir = String(state.imageDir || '').trim()
+      const openImageDir = async () => {
+        if (!imageDir) return
+        const r = await post('/open-folder', { path: imageDir })
+        if (!r || !r.ok) setSay('打开失败：' + String((r && (r.error || r.hint)) || '没有收到服务响应，请稍后重试。'))
+        else setSay('已在资源管理器中打开图库文件夹。')
+      }
+      const clearImageLibrary = async () => {
+        const n = Number(imageStats.count) || 0
+        if (n > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function'
+          && !window.confirm(`确定清空收图图库里的 ${n} 张图？清空后同一张图再来会重新识图。`)) return
+        setBusy(true); setSay('正在清空收图图库…')
+        const r = await post('/images/clear', {})
+        setBusy(false)
+        setSay(r && r.ok
+          ? `已清空 ${r.removed || 0} 张，释放 ${Math.round((r.freedBytes || 0) / 1048576 * 10) / 10}MB。`
+          : '清空失败：' + String((r && r.error) || '没有收到服务响应，请稍后重试。'))
+        await fetch()
+      }
+      const imageLibraryPage = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '收图图库'),
+        h('div', { style: S.dim }, '把收到的图片按内容指纹存下来，并记住上次识别出的描述；同一张图再来就直接用描述，不再识图。'),
+        row('收图先查图库', flag(config.imageLibraryEnabled !== false, (v) => change('imageLibraryEnabled', v)),
+          null,
+          '关掉后每次按「收到图片后先在本地识图」的设置重新识别，不查库也不写库。'),
+        row('图库条数上限', h('input', {
+          style: S.small, type: 'number', min: 1, max: 100000, value: config.imageLibraryMaxItems ?? 1000,
+          onChange: (e) => change('imageLibraryMaxItems', Number(e.target.value)),
+        }), null, '超过上限时淘汰最久没见到的图；图库是缓存，淘汰不提示。'),
+        row('原图占用上限（MB）', h('input', {
+          style: S.small, type: 'number', min: 1, max: 102400, value: config.imageLibraryMaxMB ?? 512,
+          onChange: (e) => change('imageLibraryMaxMB', Number(e.target.value)),
+        }), null, '只算图库自己存的那些原图。'),
+        row('在图库里存原图', flag(config.imageLibraryKeepFiles !== false, (v) => change('imageLibraryKeepFiles', v)),
+          null,
+          '关掉只留描述与尺寸；入站缓存被清理后就没法回看图库里的原图。'),
+        h('div', { style: { ...S.dim, marginTop: 8 } },
+          `共 ${imageStats.count || 0} 张（上限 ${config.imageLibraryMaxItems ?? 1000}）｜有描述 ${imageStats.withDesc || 0} 张｜命中 ${imageStats.hits || 0} 次｜占用 ${imageStats.sizeMB || 0}MB（上限 ${config.imageLibraryMaxMB ?? 512}MB）`),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+          h('button', { type: 'button', style: S.btn, onClick: clearImageLibrary, disabled: busy }, '清空图库'),
+          imageDir
+            ? h('button', { type: 'button', style: S.btn, onClick: openImageDir, disabled: busy }, '打开图库文件夹')
+            : null))
+
       const backfillPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '同步与补发'),
         row('离线消息补发范围（小时）', h('input', {
@@ -970,7 +1016,7 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { ...S.danger, marginTop: 4 } },
               `离线原因：${offlineReason}。请检查 QQ 服务是否已启动、地址是否正确。`)
             : null),
-        connectPage, bindingPage, behaviorPage, guardPage, voicePage, backfillPage, h(stickerSettings, {
+        connectPage, bindingPage, behaviorPage, guardPage, voicePage, imageLibraryPage, backfillPage, h(stickerSettings, {
           config,
           change,
           open: () => setView('stickers'),
