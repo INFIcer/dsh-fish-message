@@ -41,6 +41,11 @@ function makeReact() {
     React,
     /** 给第 n 个 useState 预设值；不传就按组件自己的初值渲染。 */
     setPreset(values) { preset = values || []; order = 0 },
+    /**
+     * 展开子组件前把游标归零：假 React 的 useState 按调用顺序取预设，
+     * 每个组件从自己的第一个 hook 开始，才不会串到父组件的预设上。
+     */
+    resetOrder() { order = 0 },
   }
 }
 
@@ -65,6 +70,66 @@ function collectText(node, result = []) {
     collectText(children, result)
   }
   return result
+}
+
+/**
+ * 展开函数组件：假 React 的 createElement 只生成元素对象、不执行子组件，
+ * 要看到图库管理页签里的内容，得手动递归调用函数组件。每次调用前把 hook 游标归零，
+ * 让每个组件从自己的第一个 useState 开始取预设。
+ */
+function expandTree(node, fake) {
+  if (node == null || typeof node !== 'object') return node
+  if (Array.isArray(node)) return node.map((child) => expandTree(child, fake))
+  if (typeof node.type === 'function') {
+    fake.resetOrder()
+    return expandTree(node.type(node.props), fake)
+  }
+  return { ...node, children: (node.children || []).map((child) => expandTree(child, fake)) }
+}
+
+/** 深度优先找出所有满足条件的元素。 */
+function findAll(node, predicate, output = []) {
+  if (node == null || typeof node !== 'object') return output
+  if (Array.isArray(node)) {
+    for (const child of node) findAll(child, predicate, output)
+    return output
+  }
+  if (predicate(node)) output.push(node)
+  for (const child of node.children || []) findAll(child, predicate, output)
+  return output
+}
+
+/** 按按钮里的可见文字找按钮（props 里的 type 等属性不算）。 */
+function findButton(root, text) {
+  return findAll(root, (node) => node.type === 'button' && collectText(node.children).join('') === text)
+}
+
+/** Section 的 hook 顺序：state / dirty / busy / action / say / view / galleryTab / voices / voiceHint。 */
+function sectionPreset({ state = fullState(), view = 'main', galleryTab = 'stickers' } = {}) {
+  return [state, undefined, undefined, undefined, undefined, view, galleryTab, undefined, undefined]
+}
+
+/** 注册 Section 并返回可反复渲染的测试环境。 */
+async function setupSection() {
+  const fake = await loadClient()
+  const registrations = []
+  const slots = {
+    inject(name, registrar) { assert.equal(name, 'settings.section'); registrar() },
+    register(mod, component) { registrations.push({ mod, component }); return () => {} },
+  }
+  fake.module.apply({ get: (name) => (name === 'slots' ? slots : undefined) })
+  assert.equal(registrations.length, 1, '应该注册一个设置区块')
+  const component = registrations[0].component
+  return {
+    ...fake,
+    component,
+    render(preset) {
+      fake.setPreset(preset)
+      return component()
+    },
+    /** 展开子组件前清空预设，让各页签按自己的初始 state 渲染。 */
+    clearPreset() { fake.setPreset([]) },
+  }
 }
 
 /** 一条足够渲染整页的 /state 快照。 */
@@ -221,6 +286,113 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   emptyCopy.defaults = {}
   emptyCopy.config.guardStuckPrompt = '自定义长任务'
   assert.doesNotThrow(() => render(emptyCopy))
+})
+
+
+test('图库管理页：四个页签都能渲染，记忆服务缺失时降级', async () => {
+  const env = await setupSection()
+  const cases = [
+    ['stickers', /暂无表情/],
+    ['images', /收图图库设置/],
+    ['memory', /记忆插件未启用/],
+    ['voices', /记忆插件未启用/],
+  ]
+  for (const [tab, expected] of cases) {
+    const page = env.render(sectionPreset({ view: 'gallery', galleryTab: tab }))
+    env.clearPreset()
+    const tree = expandTree(page, env)
+    const text = collectText(tree).join('\n')
+    for (const label of ['表情库', '收图图库', '记忆图库', '声纹库']) {
+      assert.match(text, new RegExp(label), `页签「${label}」应该一直可见`)
+    }
+    assert.match(text, expected, `页签 ${tab} 的内容应该渲染出来`)
+    // 四个页签共用吸顶条上的返回按钮。
+    assert.ok(findButton(tree, '返回设置').length >= 1)
+  }
+
+  // 旧的「最近收到的图片」块与「清空最近图片」按钮已经删掉，能力迁到收图图库页签。
+  const stickerPage = env.render(sectionPreset({ view: 'gallery', galleryTab: 'stickers' }))
+  env.clearPreset()
+  const stickers = expandTree(stickerPage, env)
+  const stickerText = collectText(stickers).join('\n')
+  assert.doesNotMatch(stickerText, /最近收到的图片/)
+  assert.doesNotMatch(stickerText, /清空最近图片/)
+})
+
+test('图库管理页：记忆服务可用时记忆图库与声纹库走正常内容', async () => {
+  const env = await setupSection()
+  const state = fullState()
+  state.memory = { service: true, localAI: true }
+
+  const memoryPage = env.render(sectionPreset({ state, view: 'gallery', galleryTab: 'memory' }))
+  env.clearPreset()
+  const memory = expandTree(memoryPage, env)
+  const memoryText = collectText(memory).join('\n')
+  assert.match(memoryText, /记忆图库里还没有图片/)
+  assert.doesNotMatch(memoryText, /记忆插件未启用/)
+
+  const voicesPage = env.render(sectionPreset({ state, view: 'gallery', galleryTab: 'voices' }))
+  env.clearPreset()
+  const voices = expandTree(voicesPage, env)
+  const voicesText = collectText(voices).join('\n')
+  assert.match(voicesText, /声纹库里还没有人/)
+  assert.doesNotMatch(voicesText, /记忆插件未启用/)
+})
+
+test('设置页：表情包与收图图库两块相邻，各带「打开图库管理」入口', async () => {
+  const env = await setupSection()
+  const mainPage = env.render(sectionPreset())
+  env.clearPreset()
+  const page = expandTree(mainPage, env)
+  const blocks = Array.isArray(page.children) ? page.children : []
+  const textOf = (node) => collectText(node).join('\n')
+  const stickerAt = blocks.findIndex((node) => /保存位置/.test(textOf(node)))
+  const imageAt = blocks.findIndex((node) => /收图先查图库/.test(textOf(node)))
+  assert.ok(stickerAt >= 0, '设置页应该有表情包块')
+  assert.ok(imageAt >= 0, '设置页应该有收图图库块')
+  assert.equal(imageAt, stickerAt + 1, '表情包与收图图库两块必须相邻')
+  assert.ok(findButton(blocks[stickerAt], '打开图库管理').length >= 1, '表情包块要有图库管理入口')
+  assert.ok(findButton(blocks[imageAt], '打开图库管理').length >= 1, '收图图库块要有图库管理入口')
+})
+
+test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', async () => {
+  const env = await setupSection()
+  const entry = {
+    sha256: 'a'.repeat(64),
+    file: 'img/aa/x.png',
+    path: 'C:/tmp/fish-message-images/img/aa/x.png',
+    desc: '一只猫',
+    descSource: 'local',
+    bytes: 100,
+    width: 1,
+    height: 1,
+    hits: 2,
+    firstSeenAt: '2026-11-16T12:00:00',
+  }
+  const page = env.render(sectionPreset({ view: 'gallery', galleryTab: 'images' }))
+  // 收图页签的第一个 useState 是列表；给一条缓存条目，按钮才会渲染出来。
+  env.setPreset([{ entries: [entry], total: 1, stats: { count: 1 } }])
+  const expanded = expandTree(page, env)
+  const buttons = findButton(expanded, '存为表情')
+  assert.equal(buttons.length, 1)
+
+  const calls = []
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options })
+    return { json: async () => ({ ok: true, created: true }) }
+  }
+  try {
+    await buttons[0].props.onClick()
+  } finally {
+    delete globalThis.fetch
+  }
+
+  const save = calls.find((call) => call.url.endsWith('/stickers/save'))
+  assert.ok(save, '应该调用 /stickers/save')
+  const body = JSON.parse(save.options.body)
+  assert.equal(body.path, entry.path, 'path 必须是图库条目的原图绝对路径')
+  assert.equal(body.source, 'qq-inbox', 'source 必须是 qq-inbox')
+  assert.equal(body.desc, '一只猫')
 })
 
 test('客户端设置页：默认文案常量声明在第一次使用之前（防 TDZ 白屏）', () => {
