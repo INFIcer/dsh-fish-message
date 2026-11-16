@@ -35,7 +35,7 @@ DSH 会话（模型照常开一轮）
 供别的插件按需取用），设置页/诊断走 `/dsh-fish-message/*` 本地路由；
 表情库另有 `lib/stickers.js`（纯磁盘逻辑）和 `lib/sticker-routes.js`（HTTP 门面）两层；
 收图图库是 `lib/image-library.js`（纯磁盘逻辑）+ `lib/vision-cache.js`（识图策略）；
-设置页图库弹窗的数据路由在 `lib/gallery-routes.js`（收图图库列表/出图/改描述/打开原图）。
+图库弹窗的数据路由在 `lib/gallery-routes.js`（收图图库列表/出图/改描述/打开原图）。
 
 **职责边界：鱼讯只做 QQ 传输。** 语音和图片的基础链路（落盘、发送、补发）始终可用；
 语音识别 / 合成 / 本地识图是**可选能力**，由本地 AI 插件提供的 `fish.service` 支持。
@@ -555,39 +555,49 @@ v1 不实现群聊。将来要加群：
 
 ---
 
-## 10. 图库管理弹窗（客户端）
+## 10. 图库弹窗（客户端：一份模板 + 两个变体）
 
-图库管理是设置页里的弹窗，不是独立主面板。`client.js` 只注册一个 slot：
+图库管理不是独立主面板。`client.js` 只注册一个 slot：
 
 | slot | 注册内容 | 作用 |
 |---|---|---|
 | `settings.section` | `{ name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' }` | 设置页分区 |
 
-客户端 `inject` 声明 `['slots']`（package.json 的 `dsh.client.inject` 同步），不再依赖
-`layout.selectPanel`。设置页里「表情包」与「收图图库」两块相邻，各自的「打开图库管理」把
-目标页签写进 `Section` 的本地 state；`GalleryModal` 以该页签为初值挂载，并使用随页签变化的
-`key`，保证每次打开都是全新状态（页签、二次确认、滚动位置）。关闭时把焦点还给触发按钮。
+客户端 `inject` 声明 `['slots']`（package.json 的 `dsh.client.inject` 同步），不依赖
+`layout.selectPanel`。设置页里「表情包」与「收图图库」两块相邻，各有「打开图库管理」；
+点击只把 `Section` 的 `gallery` 设成 `'stickers'` 或 `'images'`，并且只在打开时挂载
+对应的那个弹窗。两个弹窗互斥，没有页签，也不能互相跳转；关闭时把焦点还给触发按钮。
 
-页签只有鱼讯自己的两个库：
+模板与变体：
 
-| 页签 | 数据来源 | 写操作 |
+| 层 | 函数 / 组件 | 职责 |
+|---|---|---|
+| 模板 | `GalleryModal` | 遮罩、限高面板、标题与关闭、Esc、遮罩点击、焦点、二次确认挂载；正文由 `children({ askConfirm })` 注入 |
+| 模板基础组件 | `Toolbar` / `CardGrid` / `CardBody` / `DetailShell` / `GalleryBody` / `ConfirmDialog` / `StatusLine` / `EmptyState` / `LoadingState` | 工具条、卡片网格、卡片内容、详情壳、正文骨架、确认框、状态行、空态/加载态，全库共用一份 |
+| 变体 | `StickerGallery` | 表情库的数据、卡片字段、详情字段与动作、库级操作 |
+| 变体 | `ImageGallery` | 收图图库的数据、卡片字段、详情字段与动作、库级操作 |
+| 入口弹窗 | `StickerGalleryModal` / `ImageGalleryModal` | 把标题、关闭标签和变体正文交给模板，各自只显示自己的库 |
+
+基础交互（弹窗结构、工具条、网格、详情、确认、Esc、遮罩、焦点、空态/加载态）只改模板层
+一处；变体只写差异，不复制模板代码。
+
+数据来源与写操作：
+
+| 弹窗 | 数据来源 | 写操作 |
 |---|---|---|
 | 表情库 | `/stickers*`（`lib/sticker-routes.js`） | 上传、改标签与描述、删除、发送、删除未使用、清理重复、打开文件夹 |
 | 收图图库 | `GET /images`、`GET /images/file`（`lib/gallery-routes.js` → `ImageLibrary.list/lookup`） | `POST /images/note` 改描述；`POST /images/open` 打开原图；`POST /stickers/save` 存为表情；`POST /images/clear` 清空；`POST /open-folder` 打开文件夹 |
-
-共享组件（都在 `client.js` 内，无构建步骤）：`Toolbar`、`CardGrid`、`DetailShell`、
-`ConfirmDialog`、`StatusLine`、`EmptyState`、`LoadingState`，以及 `GALLERIES` 描述表。
-两个页签只注入自己的库级操作、卡片内容与详情动作，不复制一套 JSX。
 
 约定：
 
 - **弹窗只有两个库**：记忆图库与声纹库的页面归记忆插件（`memory.library` 服务仍只用于
   入站记忆扩展比对，见 3.9）；鱼讯不再注册 `/memory/*` 路由，客户端也不引用记忆服务。
+- **没有页签**：两个库各是一个弹窗，入口按钮只开自己那个；弹窗不显示另一个库，也不能互跳。
 - **Esc 与遮罩**：Esc 在 document 捕获阶段拦截并 `preventDefault` / `stopPropagation` /
-  `stopImmediatePropagation`，只关弹窗，不触发宿主设置弹窗的 Esc；二次确认打开时只关确认框。
+  `stopImmediatePropagation`，只关当前弹窗，不触发宿主设置弹窗的 Esc；二次确认打开时只关确认框。
 - **出图只认指纹**：`/images/file` 只接受 `sha256`，文件位置由收图图库存储层按索引解析，
   前端不传路径，不会越出图库目录。
-- **配置只有一份**：表情包与收图图库的配置项留在设置页；弹窗里的收图页签不重复一份配置，
+- **配置只有一份**：表情包与收图图库的配置项留在设置页；弹窗里的收图图库不重复一份配置，
   只展示数据并提供清空 / 打开文件夹。
 - **缓存与收藏互不影响**：「存为表情」固定用条目原图绝对路径 + `source=qq-inbox` 调
   `/stickers/save`，同图已在表情库时只合并描述；删缓存条目不碰表情库，反之亦然。
