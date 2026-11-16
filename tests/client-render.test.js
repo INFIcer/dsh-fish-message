@@ -106,6 +106,9 @@ function fullState() {
       asrLanguage: 'auto',
       describeInboundImages: 'inherit',
       inboundImagePrompt: '',
+      memoryExtension: false,
+      memoryCompareImages: true,
+      memoryCompareVoices: true,
       logLevel: 'info',
     },
     defaults: {
@@ -135,6 +138,7 @@ function fullState() {
     sessions: [{ id: 'session-test-0001', title: '测试会话' }],
     stickers: { items: [], total: 0, stats: {}, tags: [] },
     ai: { installed: true, online: true, tts: true, asr: true, vision: true },
+    memory: { service: false, localAI: true },
     stickerDir: 'C:/tmp/stickers',
     stickerDirExists: true,
     logs: [],
@@ -195,6 +199,17 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.match(plainText, /长任务提醒提示词/)
   assert.match(plainText, /消息通道提醒提示词/)
   assert.match(plainText, /防失联/)
+  // 记忆扩展卡片：三个开关与两条状态行都要渲染出来。
+  assert.match(plainText, /记忆扩展/)
+  assert.match(plainText, /比对图像/)
+  assert.match(plainText, /比对声纹/)
+  assert.match(plainText, /记忆服务：未检测到（需要安装并启用记忆插件）/)
+  assert.match(plainText, /本地 AI：可用/)
+
+  // 老版本 /state 没有 memory 字段：状态行退回 ai.online，不炸。
+  const noMemory = fullState()
+  delete noMemory.memory
+  assert.doesNotThrow(() => render(noMemory))
 
   // c) 老版本 /state 没有 defaults：占位文字为空也不能炸。
   const noDefault = fullState()

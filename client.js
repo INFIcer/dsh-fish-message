@@ -923,6 +923,30 @@ window.__ModuleLoader__.load({
             ? h('button', { type: 'button', style: S.btn, onClick: openImageDir, disabled: busy }, '打开图库文件夹')
             : null))
 
+      // 记忆扩展：与「收图图库」并列，只影响入站消息的附注，不参与任何缓存。
+      // 状态数据由 /state 的 memory 字段下发；老版本 /state 没有它时退回 ai.online。
+      const memoryState = state.memory || {}
+      const memoryConnected = Boolean(memoryState.service)
+      const memoryExtensionOn = config.memoryExtension === true
+      const localAIOnline = memoryState.localAI === undefined ? aiOnline : Boolean(memoryState.localAI)
+      const memoryPage = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '记忆扩展'),
+        h('div', { style: S.dim },
+          '装了记忆插件后开启：收到的图片、语音会与记忆库比对，把识别结果附在消息上。'),
+        row('开启记忆扩展', flag(config.memoryExtension === true, (v) => change('memoryExtension', v))),
+        row('比对图像', flag(config.memoryCompareImages !== false, (v) => change('memoryCompareImages', v), !memoryExtensionOn),
+          memoryExtensionOn
+            ? '与记忆图库按内容指纹比对，只算内容指纹、不发图。'
+            : '需先开启记忆扩展。'),
+        row('比对声纹', flag(config.memoryCompareVoices !== false, (v) => change('memoryCompareVoices', v), !memoryExtensionOn),
+          memoryExtensionOn
+            ? '与声纹库按声音认人；需要本地 AI 服务在运行。'
+            : '需先开启记忆扩展。'),
+        h('div', { style: { ...S.dim, marginTop: 8 } },
+          `记忆服务：${memoryConnected ? '已连接' : '未检测到（需要安装并启用记忆插件）'}`),
+        h('div', { style: { ...S.dim, marginTop: 2 } },
+          `本地 AI：${localAIOnline ? '可用' : '未运行（声纹比对将跳过）'}`))
+
       const backfillPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '同步与补发'),
         row('离线消息补发范围（小时）', h('input', {
@@ -1016,7 +1040,7 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { ...S.danger, marginTop: 4 } },
               `离线原因：${offlineReason}。请检查 QQ 服务是否已启动、地址是否正确。`)
             : null),
-        connectPage, bindingPage, behaviorPage, guardPage, voicePage, imageLibraryPage, backfillPage, h(stickerSettings, {
+        connectPage, bindingPage, behaviorPage, guardPage, voicePage, imageLibraryPage, memoryPage, backfillPage, h(stickerSettings, {
           config,
           change,
           open: () => setView('stickers'),

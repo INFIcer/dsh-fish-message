@@ -31,6 +31,8 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   const routes = new Map()
   const listen = new Map()
   const toolDefinitions = []
+  // 记忆插件是可选的：宿主只按服务名探测，不 import 对方代码。
+  const memoryLibrary = { version: '0.1', images: {}, voices: {} }
   const agent = {
     session: { id: session },
     async followup(msg) { this.received = msg },
@@ -51,6 +53,7 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
       },
     },
     get(service) {
+      if (service === 'memory.library') return memoryLibrary
       if (service === 'sessions') return { list: () => [{ id: session, title: '宿主测试' }], flush: async () => {} }
       if (service === 'sessionTitle') return { get: () => ({ title: '宿主测试' }) }
       if (service === 'workspaceRegistry') return { archivedSessionIds: [] }
@@ -123,6 +126,12 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(status.images.keepFiles, true)
   assert.equal(status.images.maxItems, 1000)
   assert.equal(typeof status.imageDir, 'string')
+
+  // 记忆扩展：三个开关默认关/开/开；状态接口直接下发记忆服务与本地 AI 的可用性。
+  assert.equal(status.config.memoryExtension, false)
+  assert.equal(status.config.memoryCompareImages, true)
+  assert.equal(status.config.memoryCompareVoices, true)
+  assert.deepEqual(status.memory, { service: true, localAI: false })
 
   // 表情库路由已经在宿主里挂上；空库返回 0 条。
   assert.equal(typeof routes.get('/dsh-fish-message/stickers'), 'function')
