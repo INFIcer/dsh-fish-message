@@ -2,7 +2,7 @@
 //
 // 纯原生 JS + React（DSH 平台自带），没有 npm、没有 CDN、没有构建步骤。
 // 挂载方式照 dsh-qq-bridge 的 client.js：window.__ModuleLoader__.load → slots.register。
-// 只注册 settings.section；图库管理是设置页里的弹窗，不注册主面板与侧边栏入口。
+// 只注册 settings.section；表情库与收图图库各有一个设置内弹窗，不注册主面板与侧边栏入口。
 // 这里只读写宿主路由，不直接碰 QQ / 会话。
 
 window.__ModuleLoader__.load({
@@ -226,32 +226,6 @@ window.__ModuleLoader__.load({
         cursor: 'pointer',
         padding: 0,
       },
-      modalTabs: { display: 'flex', padding: '10px 16px 0' },
-      segment: {
-        display: 'inline-flex',
-        padding: 3,
-        gap: 2,
-        borderRadius: 9,
-        background: 'rgba(0,0,0,.06)',
-      },
-      segmentOn: {
-        border: 'none',
-        borderRadius: 7,
-        padding: '4px 16px',
-        background: 'var(--dsw-alias-state-business-primary)',
-        color: '#fff',
-        fontSize: 12.5,
-        cursor: 'pointer',
-      },
-      segmentOff: {
-        border: 'none',
-        borderRadius: 7,
-        padding: '4px 16px',
-        background: 'transparent',
-        color: 'inherit',
-        fontSize: 12.5,
-        cursor: 'pointer',
-      },
       modalBody: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
       galleryBody: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
       toolbarRow: {
@@ -416,26 +390,16 @@ window.__ModuleLoader__.load({
         }, '打开文件夹'))
     }
 
-    // ---------------- 图库管理（设置内弹窗） ----------------
-    // 两个库共用同一份基础组件：Toolbar / CardGrid / DetailShell / ConfirmDialog /
-    // StatusLine / EmptyState / LoadingState，差异只通过参数注入（库级操作、详情动作），
-    // 基础交互的改动集中在这里，不需要每个库各改一遍。
+    // ---------------- 图库弹窗（模板 + 变体） ----------------
+    // 模板层承担所有库共有的交互：GalleryModal 管弹窗壳、二次确认、Esc、遮罩与焦点，
+    // Toolbar / CardGrid / CardBody / DetailShell / GalleryBody / StatusLine / EmptyState / LoadingState
+    // 管工具条、卡片网格、卡片内容、详情壳、正文骨架、状态行与空态/加载态；基础交互只有这一处实现。
+    // 两个变体只提供自己的数据、卡片字段、详情字段与库级操作，不复制模板代码。
+    // 每个库各自是一个弹窗：没有页签，也不显示另一个库。
     //
     // 弹窗盖在设置页之上：固定定位的遮罩 + 限高面板，内容区自己滚动。
     // 宿主的设置弹窗也监听 Esc，所以这里在 document 捕获阶段拦下 Esc 并停止传播，
     // 保证只关本弹窗；二次确认打开时 Esc 只关确认框。
-    const GALLERIES = [
-      {
-        id: 'stickers',
-        label: '表情库',
-        description: '长期收藏的表情包，不会自动删除。',
-      },
-      {
-        id: 'images',
-        label: '收图图库',
-        description: '按内容指纹缓存的收图，超过上限会淘汰最久没见到的图。',
-      },
-    ]
 
     /** 空态：两个库用同一句文案，具体提示交给库级说明。 */
     function EmptyState({ text = '图库是空的。' }) {
@@ -445,6 +409,14 @@ window.__ModuleLoader__.load({
     /** 加载态：与空态共用位置和字号，避免切换时跳动。 */
     function LoadingState({ text = '正在读取图库…' }) {
       return h('div', { style: S.loaderBox }, text)
+    }
+
+    /** 变体正文骨架：工具条、可滚动内容区与底部状态行；两个变体共用这一层，不各拼一遍。 */
+    function GalleryBody({ toolbar, content, say, ...rest }) {
+      return h('div', { style: S.galleryBody, ...rest },
+        toolbar,
+        h('div', { style: S.content }, content),
+        h(StatusLine, { text: say }))
     }
 
     /** 底部状态行：成功/失败各一句；失败时页面与列表保持原样。 */
@@ -549,22 +521,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 图库弹窗：标题、页签、内容区与底部状态行。
-     * 页签内容由两个库组件提供，弹窗只负责壳、Esc、遮罩与二次确认的挂载。
+     * 图库弹窗模板：遮罩与限高面板、标题与关闭、二次确认，以及 Esc、遮罩点击与焦点。
+     * 正文由变体通过 children({ askConfirm }) 提供；工具条、网格、详情与状态行
+     * 由模板层的基础组件负责，模板本身不认识具体是哪个库。
      */
-    function GalleryModal({ open, initialTab = 'stickers', onClose, imageDir = '', bindings = [] }) {
-      const [tab, setTab] = React.useState(initialTab)
+    function GalleryModal({ open, title = '图库管理', closeLabel, onClose = () => {}, children }) {
       const [confirm, setConfirm] = React.useState(null)
       const [confirmBusy, setConfirmBusy] = React.useState(false)
       const panelRef = React.useRef(null)
 
-      // 每次打开都回到触发入口对应的页签，并把焦点移进面板。
+      // 打开时把焦点移进面板；关闭后由设置页把焦点还给触发按钮。
       React.useEffect(() => {
         if (!open) return undefined
-        setTab(initialTab)
         try { panelRef.current?.focus?.() } catch { /* 聚焦失败不影响弹窗 */ }
         return undefined
-      }, [open, initialTab])
+      }, [open])
 
       // 捕获阶段拦 Esc：阻止宿主设置弹窗也跟着关；确认框打开时只关确认框。
       React.useEffect(() => {
@@ -584,7 +555,6 @@ window.__ModuleLoader__.load({
       }, [open, confirm, confirmBusy, onClose])
 
       if (!open) return null
-      const current = GALLERIES.find((item) => item.id === tab) || GALLERIES[0]
       const askConfirm = (options) => setConfirm(options)
       const runConfirm = async () => {
         const action = confirm && confirm.run
@@ -598,12 +568,11 @@ window.__ModuleLoader__.load({
           setConfirm(null)
         }
       }
-      const body = current.id === 'stickers'
-        ? h(StickerGallery, { bindings, askConfirm })
-        : h(ImageGallery, { imageDir, askConfirm })
+      const body = typeof children === 'function' ? children({ askConfirm }) : children
 
       return h('div', {
         style: S.overlay,
+        'data-gallery-overlay': 'true',
         onClick: (e) => {
           if (confirm === null && e.target === e.currentTarget) onClose()
         },
@@ -614,7 +583,7 @@ window.__ModuleLoader__.load({
           tabIndex: -1,
           role: 'dialog',
           'aria-modal': 'true',
-          'aria-label': '图库管理',
+          'aria-label': title,
           // 兜底：焦点留在面板内时，Esc 也不往宿主冒泡。
           onKeyDown: (e) => {
             if (e.key === 'Escape') {
@@ -624,19 +593,13 @@ window.__ModuleLoader__.load({
           },
         },
           h('div', { style: S.modalHead },
-            h('div', { style: S.modalTitle }, '图库管理'),
+            h('div', { style: S.modalTitle }, title),
             h('button', {
-              type: 'button', style: S.modalClose, 'aria-label': '关闭图库管理', onClick: onClose,
+              type: 'button',
+              style: S.modalClose,
+              'aria-label': closeLabel || ('关闭' + title),
+              onClick: onClose,
             }, '×')),
-          h('div', { style: S.modalTabs },
-            h('div', { style: S.segment },
-              GALLERIES.map((item) => h('button', {
-                key: item.id,
-                type: 'button',
-                style: item.id === current.id ? S.segmentOn : S.segmentOff,
-                'aria-pressed': item.id === current.id,
-                onClick: () => setTab(item.id),
-              }, item.label)))),
           h('div', { style: S.modalBody }, body),
           confirm
             ? h(ConfirmDialog, {
@@ -650,7 +613,8 @@ window.__ModuleLoader__.load({
             : null))
     }
 
-    // ---------------- 表情库页签 ----------------
+    // ---------------- 表情库变体 ----------------
+    // 只写表情库特有的部分：数据、卡片字段、详情与库级操作；弹窗骨架由 GalleryModal 提供。
     // 长期收藏：搜索、上传、清理是库级操作；改标签与描述、发送、删除在详情里做。
     function StickerGallery({ bindings = [], askConfirm }) {
       const [list, setList] = React.useState({ items: [], total: 0, stats: {}, tags: [] })
@@ -867,14 +831,17 @@ window.__ModuleLoader__.load({
           field('描述', input(value.desc, (v) => setValue(current, { desc: v }), '描述（可选）')))
       })() : null
 
-      return h('div', {
-        style: S.galleryBody,
+      return h(GalleryBody, {
+        toolbar,
+        content: detail || grid,
+        say,
         onDragOver: (e) => { e.preventDefault() },
         onDrop: (e) => { e.preventDefault(); upload(e.dataTransfer && e.dataTransfer.files) },
-      }, toolbar, h('div', { style: S.content }, detail || grid), h(StatusLine, { text: say }))
+      })
     }
 
-    // ---------------- 收图图库页签 ----------------
+    // ---------------- 收图图库变体 ----------------
+    // 只写收图图库特有的部分：数据、卡片字段、详情与库级操作；弹窗骨架由 GalleryModal 提供。
     // 缓存语义：浏览、改描述、存为表情、打开原图；清空与打开文件夹是库级操作。
     function ImageGallery({ imageDir = '', askConfirm }) {
       const [list, setList] = React.useState({ entries: [], total: 0, stats: {} })
@@ -1032,10 +999,33 @@ window.__ModuleLoader__.load({
           field('描述', input(descOf(current), (v) => setDesc(current, v), '描述')))
       })() : null
 
-      return h('div', { style: S.galleryBody },
-        toolbar,
-        h('div', { style: S.content }, detail || grid),
-        h(StatusLine, { text: say }))
+      return h(GalleryBody, { toolbar, content: detail || grid, say })
+    }
+
+    // ---------------- 两个独立弹窗 ----------------
+    // 变体只交出自己的正文；标题、关闭、Esc、遮罩、确认框与焦点都留在模板里。
+    // 每个入口只挂自己那个弹窗，两个弹窗没有页签，也不能互相跳转。
+
+    /** 表情库弹窗：只显示表情库。 */
+    function StickerGalleryModal({ open = false, onClose, bindings = [] }) {
+      return h(GalleryModal, {
+        open,
+        title: '表情库',
+        closeLabel: '关闭表情库',
+        onClose,
+        children: ({ askConfirm }) => h(StickerGallery, { bindings, askConfirm }),
+      })
+    }
+
+    /** 收图图库弹窗：只显示收图图库。 */
+    function ImageGalleryModal({ open = false, onClose, imageDir = '' }) {
+      return h(GalleryModal, {
+        open,
+        title: '收图图库',
+        closeLabel: '关闭收图图库',
+        onClose,
+        children: ({ askConfirm }) => h(ImageGallery, { imageDir, askConfirm }),
+      })
     }
 
     /**
@@ -1146,7 +1136,7 @@ window.__ModuleLoader__.load({
       // 发送音色下拉：只在本地 AI 的语音能力可用时拉一次；失败就退回文本输入。
       const [voices, setVoices] = React.useState(null)
       const [voiceHint, setVoiceHint] = React.useState('')
-      // 图库管理是设置页里的弹窗：值存当前页签，null 表示关闭。
+      // 图库弹窗是设置页里的独立界面：值存当前打开的是哪个库，null 表示关闭。
       const [gallery, setGallery] = React.useState(null)
       // 弹窗关闭后把焦点还给触发它的按钮。
       const galleryTrigger = React.useRef(null)
@@ -1196,9 +1186,9 @@ window.__ModuleLoader__.load({
       const deleteBinding = (i) => change('bindings', bindings().filter((_, j) => j !== i))
 
       // 打开图库弹窗：记住触发按钮，关闭时把焦点还回去。
-      const openGallery = (tab, event) => {
+      const openGallery = (name, event) => {
         galleryTrigger.current = (event && event.currentTarget) || null
-        setGallery(tab === 'images' ? 'images' : 'stickers')
+        setGallery(name === 'images' ? 'images' : 'stickers')
       }
       const closeGallery = () => {
         setGallery(null)
@@ -1594,7 +1584,7 @@ window.__ModuleLoader__.load({
               `离线原因：${offlineReason}。请检查 QQ 服务是否已启动、地址是否正确。`)
             : null),
         connectPage, bindingPage, behaviorPage, guardPage, voicePage,
-        // 表情包（收藏）与收图图库（缓存）相邻：两块各有「打开图库管理」，直接落到对应页签。
+        // 表情包（收藏）与收图图库（缓存）相邻：两块各有「打开图库管理」，各开各的弹窗。
         h(stickerSettings, {
           config,
           change,
@@ -1606,23 +1596,28 @@ window.__ModuleLoader__.load({
         memoryPage, backfillPage, outboxPage,
         h('div', { style: { ...S.h, marginTop: 14 } }, '最近日志'),
         h('pre', { style: S.log }, log || '暂无日志。'),
-        // 图库弹窗盖在设置页之上；只有两个库的入口在设置页里。
-        h(GalleryModal, {
-          // key 随入口页签变化：每次打开都重新挂载，页签、二次确认与滚动位置都从头开始。
-          key: gallery || 'closed',
-          open: gallery !== null,
-          initialTab: gallery || 'stickers',
-          onClose: closeGallery,
-          imageDir: String(state.imageDir || ''),
-          bindings: bindings(),
-        }))
+        // 只在打开时挂载对应的那个弹窗：关闭即卸载，下次打开是全新状态。
+        // 同一时间只有一个 gallery 值，两个弹窗不会同时出现。
+        gallery === 'stickers'
+          ? h(StickerGalleryModal, {
+            open: true,
+            onClose: closeGallery,
+            bindings: bindings(),
+          })
+          : gallery === 'images'
+            ? h(ImageGalleryModal, {
+              open: true,
+              onClose: closeGallery,
+              imageDir: String(state.imageDir || ''),
+            })
+            : null)
     }
 
     function apply(ctx) {
       injectWidgetStyle()
       const slots = ctx.get('slots')
       if (slots === undefined) return
-      // 只注册设置分区；图库管理是设置页里的弹窗，不占主面板与侧边栏。
+      // 只注册设置分区；两个图库弹窗都在设置页之内，不占主面板与侧边栏。
       slots.inject('settings.section', () => slots.register(
         { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' },
         Section,
@@ -1631,10 +1626,11 @@ window.__ModuleLoader__.load({
 
     exports.apply = apply
     exports.inject = inject
-    // 测试用：弹窗与共享组件的内部面；生产代码只经设置页按钮使用。
+    // 测试用：模板、两个变体与共享组件的内部面；生产代码只经设置页按钮使用。
     exports.__test = {
-      GALLERIES,
       GalleryModal,
+      StickerGalleryModal,
+      ImageGalleryModal,
       StickerGallery,
       ImageGallery,
       ConfirmDialog,

@@ -35,6 +35,7 @@ function makeRuntime() {
   let pending = false
   let effectQueue = []
   let effectsEnabled = true
+  let focusCalls = 0
 
   function expand(node, path, visited) {
     if (Array.isArray(node)) return node.map((child, i) => expand(child, path + '/' + i, visited))
@@ -58,7 +59,15 @@ function makeRuntime() {
       index = previousIndex
       return expand(output, key, visited)
     }
-    return { ...node, children: (node.children || []).map((child, i) => expand(child, path + '/' + i, visited)) }
+    const expanded = { ...node, children: (node.children || []).map((child, i) => expand(child, path + '/' + i, visited)) }
+    // 迷你运行时没有真实 DOM：给 ref 挂一个可调用的假节点，用来验证弹窗打开时确实聚焦了面板。
+    if (node.props && node.props.ref && node.props.ref.current == null) {
+      node.props.ref.current = {
+        focus() { focusCalls += 1 },
+        click() {},
+      }
+    }
+    return expanded
   }
 
   function render() {
@@ -179,6 +188,7 @@ function makeRuntime() {
     flush,
     presetFor(name, values) { presets.set(name, values || []) },
     setEffects(enabled) { effectsEnabled = !!enabled },
+    focusCount() { return focusCalls },
   }
 }
 
@@ -235,7 +245,7 @@ function textOf(node) {
 function fullState() {
   return {
     ok: true,
-    version: '0.2.2',
+    version: '0.2.3',
     config: {
       napcatBaseUrl: 'http://127.0.0.1:3000',
       napcatToken: '***已设置***',
@@ -468,7 +478,18 @@ test('注册：只注册 settings.section，不再有主面板与侧边栏入口
   assert.deepEqual(pkg.dsh.client.inject, ['slots'])
 })
 
-test('设置页：两个库的块相邻，各有「打开图库管理」，点开落在对应页签', async () => {
+/** 找到弹窗面板（可按 aria-label 指定是哪个库）。 */
+function dialogOf(root, title) {
+  const dialogs = findAll(root, (node) => node.props && node.props.role === 'dialog')
+  return title ? dialogs.find((node) => node.props['aria-label'] === title) : dialogs[0]
+}
+
+/** 找到弹窗遮罩。 */
+function overlayOf(root) {
+  return findAll(root, (node) => node.props && node.props['data-gallery-overlay'] !== undefined)[0]
+}
+
+test('设置页：两个库的块相邻，各开各的独立弹窗，互不显示对方', async () => {
   const env = await setupPlugin()
   const page = env.renderSection([fullState()])
   const blocks = Array.isArray(page.children) ? page.children : []
@@ -489,37 +510,171 @@ test('设置页：两个库的块相邻，各有「打开图库管理」，点�
   assert.match(textOf(blocks[imageAt]), /图库条数上限/)
   assert.match(textOf(blocks[imageAt]), /在图库里存原图/)
 
+  // 表情包块只开表情库弹窗：有表情库的操作，没有收图图库的操作，也没有页签。
   const trigger = { focused: 0, focus() { this.focused += 1 } }
   stickerButton[0].props.onClick({ currentTarget: trigger })
   let tree = env.flush()
-  assert.match(textOf(tree), /图库管理/)
-  assert.equal(findButton(tree, '表情库')[0].props['aria-pressed'], true)
-  assert.match(textOf(tree), /上传图片/)
+  const stickerDialog = dialogOf(tree, '表情库')
+  assert.ok(stickerDialog, '表情包块应该打开表情库弹窗')
+  assert.equal(dialogOf(tree).props['aria-label'], '表情库')
+  assert.equal(dialogOf(tree, '收图图库'), undefined, '同时只能有一个图库弹窗')
+  const stickerText = textOf(stickerDialog)
+  assert.match(stickerText, /上传图片/)
+  assert.match(stickerText, /打开表情库文件夹/)
+  assert.match(stickerText, /删除未使用/)
+  assert.match(stickerText, /清理重复/)
+  assert.doesNotMatch(stickerText, /清空图库/, '表情库弹窗不能出现收图图库的操作')
+  assert.equal(findButton(stickerDialog, '表情库').length, 0, '弹窗里不应再有表情库页签')
+  assert.equal(findButton(stickerDialog, '收图图库').length, 0, '弹窗里不应再有收图图库页签')
 
   // 关闭后焦点回到触发按钮。
-  findByLabel(tree, '关闭图库管理')[0].props.onClick()
+  findByLabel(stickerDialog, '关闭表情库')[0].props.onClick()
   tree = env.flush()
-  assert.equal(findByLabel(tree, '关闭图库管理').length, 0, '关闭后弹窗应该消失')
+  assert.equal(findAll(tree, (node) => node.props && node.props.role === 'dialog').length, 0)
   assert.equal(trigger.focused, 1)
 
-  // 从收图图库块进入，默认停在收图图库页签。
+  // 收图图库块只开收图图库弹窗。
   const reopen = findButton(tree, '打开图库管理')
   assert.equal(reopen.length, 2)
-  const imageTrigger = { focus() {} }
-  reopen[1].props.onClick({ currentTarget: imageTrigger })
+  reopen[1].props.onClick({ currentTarget: { focus() {} } })
   tree = env.flush()
-  assert.equal(findButton(tree, '收图图库')[0].props['aria-pressed'], true)
-  assert.match(textOf(tree), /清空图库/)
+  const imageDialog = dialogOf(tree, '收图图库')
+  assert.ok(imageDialog, '收图图库块应该打开收图图库弹窗')
+  assert.equal(dialogOf(tree).props['aria-label'], '收图图库')
+  assert.equal(dialogOf(tree, '表情库'), undefined, '同时只能有一个图库弹窗')
+  const imageText = textOf(imageDialog)
+  assert.match(imageText, /清空图库/)
+  assert.match(imageText, /打开图库文件夹/)
+  assert.doesNotMatch(imageText, /上传图片/, '收图图库弹窗不能出现表情库的操作')
+  assert.doesNotMatch(imageText, /删除未使用/)
+  assert.equal(findButton(imageDialog, '表情库').length, 0)
+  assert.equal(findButton(imageDialog, '收图图库').length, 0)
 })
 
-test('弹窗：页签可切换，Esc 只关弹窗并阻止事件冒泡到宿主', async () => {
+test('两个弹窗的详情：进入、返回，各自的动作不串库', async () => {
   const env = await setupPlugin()
-  env.setEffects(true)
-  // 弹窗内的页签组件会自己拉数据；这里给一个永远成功的最小响应。
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => ({
-    json: async () => ({ ok: true, items: [], entries: [], total: 0, stats: {}, tags: [] }),
+  const { StickerGalleryModal, ImageGalleryModal } = env.module.__test
+  const sticker = stickerEntry()
+  const entry = imageEntry()
+
+  // 表情库：工具条 + 卡片 + 详情。
+  let tree = env.renderComponent(StickerGalleryModal, { open: true, onClose() {}, bindings: [] }, {
+    StickerGallery: [{ items: [sticker], total: 1, stats: {} }, '', false, false, '', null, {}, {}],
   })
+  let dialog = dialogOf(tree, '表情库')
+  assert.ok(dialog)
+  assert.match(textOf(dialog), /打哈欠的猫/)
+  assert.match(textOf(dialog), /#睡觉/)
+  let card = findAll(dialog, (node) => node.props && node.props.role === 'button')[0]
+  assert.ok(card, '表情库网格卡片要能点击')
+  card.props.onClick()
+  tree = env.flush()
+  dialog = dialogOf(tree, '表情库')
+  assert.match(textOf(dialog), /返回/)
+  assert.match(textOf(dialog), /保存描述与标签/)
+  assert.match(textOf(dialog), /复制路径/)
+  assert.match(textOf(dialog), /发送/)
+  assert.match(textOf(dialog), /删除/)
+  assert.doesNotMatch(textOf(dialog), /存为表情/, '表情库详情不出现收图图库的「存为表情」')
+  assert.doesNotMatch(textOf(dialog), /打开原图/)
+  findButton(dialog, '返回')[0].props.onClick()
+  tree = env.flush()
+  dialog = dialogOf(tree, '表情库')
+  assert.match(textOf(dialog), /打哈欠的猫/, '返回后回到网格')
+  assert.doesNotMatch(textOf(dialog), /保存描述与标签/)
+
+  // 收图图库：工具条 + 卡片 + 详情。
+  tree = env.renderComponent(ImageGalleryModal, { open: true, onClose() {}, imageDir: 'C:/tmp/images' }, {
+    ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}],
+  })
+  dialog = dialogOf(tree, '收图图库')
+  assert.ok(dialog)
+  assert.match(textOf(dialog), /本地识图/, '卡片要写明描述来源')
+  card = findAll(dialog, (node) => node.props && node.props.role === 'button')[0]
+  assert.ok(card, '收图图库网格卡片要能点击')
+  card.props.onClick()
+  tree = env.flush()
+  dialog = dialogOf(tree, '收图图库')
+  assert.match(textOf(dialog), /返回/)
+  assert.match(textOf(dialog), /保存描述/)
+  assert.match(textOf(dialog), /存为表情/)
+  assert.match(textOf(dialog), /打开原图/)
+  assert.doesNotMatch(textOf(dialog), /保存描述与标签/, '收图图库详情不出现表情库的动作')
+  assert.doesNotMatch(textOf(dialog), /复制路径/)
+  findButton(dialog, '返回')[0].props.onClick()
+  tree = env.flush()
+  dialog = dialogOf(tree, '收图图库')
+  assert.match(textOf(dialog), /命中 2 次/)
+
+  // 没有原图的条目：打开原图与存为表情都不可用。
+  const noFile = { ...entry, file: '', path: '' }
+  tree = env.renderComponent(ImageGalleryModal, { open: true, onClose() {}, imageDir: 'C:/tmp/images' }, {
+    ImageGallery: [{ entries: [noFile], total: 1, stats: { count: 1 } }, '', false, false, '', noFile, {}],
+  })
+  dialog = dialogOf(tree, '收图图库')
+  assert.equal(findButton(dialog, '打开原图')[0].props.disabled, true)
+  assert.equal(findButton(dialog, '存为表情')[0].props.disabled, true)
+})
+
+test('二次确认：两个弹窗都在弹窗内确认，不用 window.confirm', async () => {
+  const env = await setupPlugin()
+  const { StickerGalleryModal, ImageGalleryModal } = env.module.__test
+  const sticker = stickerEntry()
+  const entry = imageEntry()
+
+  let confirmCalls = 0
+  const originalWindow = globalThis.window
+  globalThis.window = { confirm() { confirmCalls += 1; return true } }
+  try {
+    // 表情库：详情删除 → 确认框；取消后回到详情。
+    let tree = env.renderComponent(StickerGalleryModal, { open: true, onClose() {}, bindings: [] }, {
+      StickerGallery: [{ items: [sticker], total: 1, stats: {} }, '', false, false, '', sticker, {}, {}],
+    })
+    let dialog = dialogOf(tree, '表情库')
+    findButton(dialog, '删除')[0].props.onClick()
+    tree = env.flush()
+    dialog = dialogOf(tree, '表情库')
+    assert.equal(findByLabel(dialog, '删除这个表情？').length, 1, '删除表情要先弹确认框')
+    assert.match(textOf(findByLabel(dialog, '删除这个表情？')[0]), /无法撤销/)
+    findButton(dialog, '取消')[0].props.onClick()
+    tree = env.flush()
+    dialog = dialogOf(tree, '表情库')
+    assert.equal(findByLabel(dialog, '删除这个表情？').length, 0, '取消后确认框关闭')
+    assert.match(textOf(dialog), /保存描述与标签/, '取消后仍在详情页')
+
+    // 表情库：库级「删除未使用」→ 确认框；确认按钮带对象。
+    findButton(dialog, '删除未使用')[0].props.onClick()
+    tree = env.flush()
+    dialog = dialogOf(tree, '表情库')
+    assert.equal(findByLabel(dialog, '删除未使用的表情？').length, 1)
+    assert.equal(findButton(dialog, '删除未使用').length, 2, '工具条与确认框各一个')
+    findButton(dialog, '取消').length === 1 ? findButton(dialog, '取消')[0].props.onClick() : null
+    tree = env.flush()
+
+    // 收图图库：清空图库 → 确认框；取消不执行。
+    tree = env.renderComponent(ImageGalleryModal, { open: true, onClose() {}, imageDir: 'C:/tmp/images' }, {
+      ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}],
+    })
+    dialog = dialogOf(tree, '收图图库')
+    findButton(dialog, '清空图库')[0].props.onClick()
+    tree = env.flush()
+    dialog = dialogOf(tree, '收图图库')
+    assert.equal(findByLabel(dialog, '清空收图图库？').length, 1)
+    assert.match(textOf(findByLabel(dialog, '清空收图图库？')[0]), /无法撤销/)
+    findButton(dialog, '取消')[0].props.onClick()
+    tree = env.flush()
+    dialog = dialogOf(tree, '收图图库')
+    assert.equal(findByLabel(dialog, '清空收图图库？').length, 0)
+    assert.ok(findButton(dialog, '清空图库').length >= 1)
+    assert.equal(confirmCalls, 0, '图库里的危险操作不能再用 window.confirm')
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('Esc：只关当前弹窗，确认框打开时只关确认框，不关设置页', async () => {
+  const env = await setupPlugin()
   const listeners = []
   const originalDocument = globalThis.document
   globalThis.document = {
@@ -529,180 +684,123 @@ test('弹窗：页签可切换，Esc 只关弹窗并阻止事件冒泡到宿主'
       if (at >= 0) listeners.splice(at, 1)
     },
   }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    json: async () => ({ ok: true, items: [], entries: [], total: 0, stats: {}, tags: [] }),
+  })
+  const esc = () => ({
+    key: 'Escape',
+    defaultPrevented: 0,
+    propagationStopped: 0,
+    immediateStopped: 0,
+    preventDefault() { this.defaultPrevented += 1 },
+    stopPropagation() { this.propagationStopped += 1 },
+    stopImmediatePropagation() { this.immediateStopped += 1 },
+  })
   try {
-    let closed = 0
-    const { GalleryModal } = env.module.__test
-    let tree = env.mount(GalleryModal, { open: true, initialTab: 'stickers', onClose: () => { closed += 1 }, bindings: [] })
-    assert.match(textOf(tree), /图库管理/)
-    assert.equal(findButton(tree, '表情库')[0].props['aria-pressed'], true)
+    // 用设置页真实入口打开弹窗；设置页自身的请求不跑，只有弹窗的监听生效。
+    let tree = env.renderSection([fullState()])
+    env.setEffects(true)
 
-    findButton(tree, '收图图库')[0].props.onClick()
+    const focusBefore = env.focusCount()
+    findButton(tree, '打开图库管理')[0].props.onClick({ currentTarget: { focus() {} } })
     tree = env.flush()
-    assert.equal(findButton(tree, '收图图库')[0].props['aria-pressed'], true)
-    assert.match(textOf(tree), /清空图库/)
-    assert.doesNotMatch(textOf(tree), /上传图片/)
-
-    // 点关闭按钮：弹窗消失，回调触发。
-    findByLabel(tree, '关闭图库管理')[0].props.onClick()
-    env.flush()
-    assert.equal(closed, 1)
-
-    // 重新打开并模拟 Esc：preventDefault/stopPropagation 都要调用，且只关自己。
-    tree = env.mount(GalleryModal, { open: true, initialTab: 'stickers', onClose: () => { closed += 1 }, bindings: [] })
+    assert.ok(env.focusCount() > focusBefore, '打开弹窗时焦点要进入面板')
+    assert.ok(dialogOf(tree, '表情库'))
     assert.ok(listeners.length >= 1, '打开弹窗时要注册 document 捕获阶段 keydown 监听')
-    const event = {
-      key: 'Escape',
-      defaultPrevented: 0,
-      propagationStopped: 0,
-      immediateStopped: 0,
-      preventDefault() { this.defaultPrevented += 1 },
-      stopPropagation() { this.propagationStopped += 1 },
-      stopImmediatePropagation() { this.immediateStopped += 1 },
-    }
+    let event = esc()
     listeners[listeners.length - 1](event)
-    env.flush()
+    tree = env.flush()
+    assert.equal(findAll(tree, (node) => node.props && node.props.role === 'dialog').length, 0, 'Esc 关掉表情库弹窗')
+    assert.match(textOf(tree), /鱼讯 QQ/, '设置页不能被一起关掉')
     assert.equal(event.defaultPrevented, 1)
     assert.equal(event.propagationStopped, 1)
     assert.equal(event.immediateStopped, 1)
-    assert.ok(closed >= 2, 'Esc 应该关闭图库弹窗')
+
+    // 收图图库弹窗同样只关自己。
+    findButton(tree, '打开图库管理')[1].props.onClick({ currentTarget: { focus() {} } })
+    tree = env.flush()
+    assert.ok(dialogOf(tree, '收图图库'))
+    event = esc()
+    listeners[listeners.length - 1](event)
+    tree = env.flush()
+    assert.equal(findAll(tree, (node) => node.props && node.props.role === 'dialog').length, 0)
+    assert.match(textOf(tree), /鱼讯 QQ/)
+
+    // 确认框打开时：第一次 Esc 只关确认框，弹窗还在；第二次才关弹窗。
+    findButton(tree, '打开图库管理')[0].props.onClick({ currentTarget: { focus() {} } })
+    tree = env.flush()
+    findButton(tree, '删除未使用')[0].props.onClick()
+    tree = env.flush()
+    assert.equal(findByLabel(tree, '删除未使用的表情？').length, 1)
+    event = esc()
+    listeners[listeners.length - 1](event)
+    tree = env.flush()
+    assert.equal(findByLabel(tree, '删除未使用的表情？').length, 0, 'Esc 先关确认框')
+    assert.ok(dialogOf(tree, '表情库'), '确认框关掉后弹窗还在')
+    event = esc()
+    listeners[listeners.length - 1](event)
+    tree = env.flush()
+    assert.equal(findAll(tree, (node) => node.props && node.props.role === 'dialog').length, 0)
   } finally {
+    env.mount(() => null)
     globalThis.fetch = originalFetch
     if (originalDocument === undefined) delete globalThis.document
     else globalThis.document = originalDocument
   }
 })
 
-test('统一空态/加载态：两个库用同一句文案', async () => {
+test('遮罩：两个弹窗都能点遮罩关闭', async () => {
   const env = await setupPlugin()
-  const { StickerGallery, ImageGallery } = env.module.__test
+  const { StickerGalleryModal, ImageGalleryModal } = env.module.__test
 
-  let tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm() {} }, {
-    StickerGallery: [{ items: [], total: 0, stats: {} }, '', true, false, '', null, {}, {}],
-  })
-  assert.match(textOf(tree), /正在读取图库…/)
-
-  tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm() {} }, {
+  let closed = 0
+  let tree = env.renderComponent(StickerGalleryModal, { open: true, onClose() { closed += 1 }, bindings: [] }, {
     StickerGallery: [{ items: [], total: 0, stats: {} }, '', false, false, '', null, {}, {}],
   })
-  assert.match(textOf(tree), /图库是空的。/)
+  let overlay = overlayOf(tree)
+  assert.ok(overlay, '表情库弹窗要有遮罩')
+  overlay.props.onClick({ target: overlay, currentTarget: overlay })
+  assert.equal(closed, 1, '点遮罩关闭表情库弹窗')
 
-  tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
-    ImageGallery: [{ entries: [], total: 0, stats: {} }, '', true, false, '', null, {}],
-  })
-  assert.match(textOf(tree), /正在读取图库…/)
-
-  tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
+  closed = 0
+  tree = env.renderComponent(ImageGalleryModal, { open: true, onClose() { closed += 1 }, imageDir: '' }, {
     ImageGallery: [{ entries: [], total: 0, stats: {} }, '', false, false, '', null, {}],
   })
-  assert.match(textOf(tree), /图库是空的。/)
+  overlay = overlayOf(tree)
+  assert.ok(overlay, '收图图库弹窗要有遮罩')
+  overlay.props.onClick({ target: overlay, currentTarget: overlay })
+  assert.equal(closed, 1, '点遮罩关闭收图图库弹窗')
 })
 
-test('收图图库：点卡片进详情，返回回到网格，且「存为表情」只在详情里', async () => {
+test('空态/加载态：两个独立弹窗各自显示统一文案', async () => {
   const env = await setupPlugin()
-  const { StickerGallery, ImageGallery } = env.module.__test
-  const entry = imageEntry()
+  const { StickerGalleryModal, ImageGalleryModal } = env.module.__test
 
-  // 网格里没有「存为表情」，只有详情里才有。
-  let tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
-    ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}],
+  let tree = env.renderComponent(StickerGalleryModal, { open: true, onClose() {} }, {
+    StickerGallery: [{ items: [], total: 0, stats: {} }, '', true, false, '', null, {}, {}],
   })
-  assert.doesNotMatch(textOf(tree), /存为表情/)
-  const card = findAll(tree, (node) => node.props && node.props.role === 'button')[0]
-  assert.ok(card, '网格卡片要能点击')
-  card.props.onClick()
-  tree = env.flush()
-
-  assert.match(textOf(tree), /返回/)
-  assert.match(textOf(tree), /存为表情/)
-  assert.match(textOf(tree), /打开原图/)
-  assert.match(textOf(tree), /保存描述/)
-
-  findButton(tree, '返回')[0].props.onClick()
-  tree = env.flush()
-  assert.doesNotMatch(textOf(tree), /存为表情/)
-  assert.match(textOf(tree), /命中 2 次/)
-
-  // 表情库详情不出现收图图库专属的「存为表情」。
-  const sticker = stickerEntry()
-  tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm() {} }, {
-    StickerGallery: [{ items: [sticker], total: 1, stats: {} }, '', false, false, '', sticker, {}, {}],
+  assert.match(textOf(dialogOf(tree, '表情库')), /正在读取图库…/)
+  tree = env.renderComponent(StickerGalleryModal, { open: true, onClose() {} }, {
+    StickerGallery: [{ items: [], total: 0, stats: {} }, '', false, false, '', null, {}, {}],
   })
-  assert.match(textOf(tree), /保存描述与标签/)
-  assert.doesNotMatch(textOf(tree), /存为表情/)
-})
+  assert.match(textOf(dialogOf(tree, '表情库')), /图库是空的。/)
 
-test('危险操作：删除表情、清空图库都走弹窗内二次确认，不再用 window.confirm', async () => {
-  const env = await setupPlugin()
-  const { StickerGallery, ImageGallery } = env.module.__test
-  const sticker = stickerEntry()
-  const entry = imageEntry()
-
-  let confirmCalls = 0
-  const originalWindow = globalThis.window
-  globalThis.window = { confirm() { confirmCalls += 1; return true } }
-  try {
-    // 删除表情：确认框出现，取消不删。
-    let tree = env.renderComponent(StickerGallery, { bindings: [], askConfirm(opts) { tree._ask = opts } }, {
-      StickerGallery: [{ items: [sticker], total: 1, stats: {} }, '', false, false, '', sticker, {}, {}],
-    })
-    findButton(tree, '删除')[0].props.onClick()
-    assert.ok(tree._ask, '删除要走 askConfirm')
-    assert.match(tree._ask.title, /删除这个表情/)
-    assert.match(tree._ask.description, /无法撤销/)
-
-    // 清空收图图库：确认框文案明确且同样走 askConfirm。
-    tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm(opts) { tree._clear = opts } }, {
-      ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}],
-    })
-    findButton(tree, '清空图库')[0].props.onClick()
-    assert.ok(tree._clear, '清空图库要走 askConfirm')
-    assert.match(tree._clear.title, /清空收图图库/)
-    assert.match(tree._clear.description, /无法撤销/)
-    assert.equal(confirmCalls, 0, '图库里的危险操作不能再用 window.confirm')
-  } finally {
-    if (originalWindow === undefined) delete globalThis.window
-    else globalThis.window = originalWindow
-  }
-
-  // 确认框本身渲染成和弹窗一致的对话框，有明确的取消/确认。
-  const { ConfirmDialog } = env.module.__test
-  const dialog = env.renderComponent(ConfirmDialog, {
-    title: '删除这个表情？',
-    description: '无法撤销。',
-    confirmLabel: '删除',
-    onCancel() {},
-    onConfirm() {},
+  tree = env.renderComponent(ImageGalleryModal, { open: true, onClose() {}, imageDir: '' }, {
+    ImageGallery: [{ entries: [], total: 0, stats: {} }, '', true, false, '', null, {}],
   })
-  assert.equal(findByLabel(dialog, '删除这个表情？').length, 1)
-  assert.equal(findByLabel(dialog, '删除这个表情？')[0].props.role, 'alertdialog')
-  assert.equal(findButton(dialog, '取消').length, 1)
-  assert.equal(findButton(dialog, '删除').length, 1)
-})
-
-test('弹窗：危险操作在弹窗内二次确认，取消后回到原列表', async () => {
-  const env = await setupPlugin()
-  const { GalleryModal } = env.module.__test
-  const entry = imageEntry()
-  env.presetFor('ImageGallery', [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', null, {}])
-  let tree = env.mount(GalleryModal, { open: true, initialTab: 'images', onClose() {}, imageDir: 'C:/tmp/images', bindings: [] })
-
-  findButton(tree, '清空图库')[0].props.onClick()
-  tree = env.flush()
-  assert.equal(findByLabel(tree, '清空收图图库？').length, 1, '清空图库要先弹确认框')
-  assert.equal(findButton(tree, '取消').length, 1)
-  assert.equal(findButton(tree, '清空图库').length, 2, '工具条按钮与确认按钮各一个')
-
-  findButton(tree, '取消')[0].props.onClick()
-  tree = env.flush()
-  assert.equal(findByLabel(tree, '清空收图图库？').length, 0, '取消后确认框关闭')
-  assert.ok(findButton(tree, '清空图库').length >= 1)
+  assert.match(textOf(dialogOf(tree, '收图图库')), /正在读取图库…/)
+  tree = env.renderComponent(ImageGalleryModal, { open: true, onClose() {}, imageDir: '' }, {
+    ImageGallery: [{ entries: [], total: 0, stats: {} }, '', false, false, '', null, {}],
+  })
+  assert.match(textOf(dialogOf(tree, '收图图库')), /图库是空的。/)
 })
 
 test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', async () => {
   const env = await setupPlugin()
-  const { ImageGallery } = env.module.__test
+  const { ImageGalleryModal } = env.module.__test
   const entry = imageEntry()
-  const tree = env.renderComponent(ImageGallery, { imageDir: 'C:/tmp/images', askConfirm() {} }, {
+  const tree = env.renderComponent(ImageGalleryModal, { open: true, onClose() {}, imageDir: 'C:/tmp/images' }, {
     ImageGallery: [{ entries: [entry], total: 1, stats: { count: 1 } }, '', false, false, '', entry, {}],
   })
   const buttons = findButton(tree, '存为表情')
@@ -726,6 +824,26 @@ test('收图图库：存为表情用原图绝对路径与 qq-inbox 来源', asyn
   assert.equal(body.path, entry.path, 'path 必须是图库条目的原图绝对路径')
   assert.equal(body.source, 'qq-inbox', 'source 必须是 qq-inbox')
   assert.equal(body.desc, '一只猫')
+})
+
+test('页签与 GALLERIES 清单已不存在，弹窗骨架只有一份实现', async () => {
+  const env = await setupPlugin()
+  const { __test } = env.module
+  assert.equal(__test.GALLERIES, undefined)
+  assert.equal(typeof __test.GalleryModal, 'function', '模板应该保留')
+  assert.equal(typeof __test.StickerGalleryModal, 'function')
+  assert.equal(typeof __test.ImageGalleryModal, 'function')
+  assert.equal(typeof __test.StickerGallery, 'function', '表情库变体应该保留')
+  assert.equal(typeof __test.ImageGallery, 'function', '收图图库变体应该保留')
+
+  const source = readFileSync(join(repoRoot, 'client.js'), 'utf8')
+  assert.doesNotMatch(source, /GALLERIES/, '不应再有 GALLERIES 描述表')
+  assert.doesNotMatch(source, /initialTab|setTab|S\.modalTabs|S\.segment/, '不应再有页签与页签样式')
+  assert.equal((source.match(/role: 'dialog'/g) || []).length, 1, '弹窗骨架只应由模板渲染一次')
+  assert.equal((source.match(/role: 'alertdialog'/g) || []).length, 1, '确认框只应由模板渲染一次')
+  assert.match(source, /function GalleryModal/, '模板落在 GalleryModal')
+  assert.match(source, /function StickerGalleryModal/, '表情库入口弹窗落在 StickerGalleryModal')
+  assert.match(source, /function ImageGalleryModal/, '收图图库入口弹窗落在 ImageGalleryModal')
 })
 
 test('客户端设置页：默认文案常量声明在第一次使用之前（防 TDZ 白屏）', () => {
