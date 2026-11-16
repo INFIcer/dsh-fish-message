@@ -160,8 +160,9 @@ record 段
 image / mface 段
   → url 下载 / base64:// / 本地路径
   → 存 <家目录>\fish-message-inbox\qq-image-*（文件名按内容 sha16 寻址）
-  → 图库（imageLibraryEnabled 默认开）：按 sha256 查缓存
+  → 收图图库（imageLibraryEnabled 默认开）：按 sha256 查缓存
        ├─ 命中且有描述 → 正文只用描述，不附原图
+       ├─ 没有可用描述 + 表情库有同图描述 → 借用并写回收图图库
        ├─ 命中但描述为空 → 按本地识图设置重新识图，补写描述并提醒
        ├─ 未命中 + 本地识图开 → 识图成功后「原图 + 描述」入库
        ├─ 未命中 + 本地识图关 → 原图交给模型，正文提醒用 fish_image_note 写回
@@ -190,6 +191,7 @@ VisionCache.resolve（策略层）
         │  sha256 = sha256(buffer)
         │
         ├─ lookup 命中 + 有描述 → noteHit → { source:'cache', desc }
+        ├─ 无可用描述 + 表情库有同图描述 → remember(写回描述) + noteHit → { source:'sticker', desc }
         ├─ lookup 命中 + 空描述 → 本地识图开着？setDesc + noteMiss : noteMiss，附原图
         ├─ 未命中 + 本地识图开 → remember(原图+描述) + noteMiss
         ├─ 未命中 + 本地识图关 → remember(原图+空描述) + noteMiss，附原图
@@ -222,6 +224,9 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
   `fish_image_get`（有附件服务就返回图片块，否则给本机路径）。
 - **缺描述要提醒**：入库时没有描述会写进正文提醒补；模型疏忽没填的，下次同一张图再来
   仍然没有描述，于是再次识图 / 再次提醒，不会把「空描述」当成命中。
+- **回执写明来源库**：命中时 note 写「来自收图图库（缓存）…」；收图图库没有可用描述、
+  而表情库里同一张图带描述时，借那条描述（只读表情库），note 写「来自表情库（这张图已存为
+  表情包）…」，并把它写回收图图库，下次直接命中。两个库仍是两套存储，分工不变。
 - **两份图库代码，不做抽象层**：鱼讯这份服务「QQ 收图 / 表情包」场景；记忆插件以后
   另有一份服务「用户形象 / 用户照片 / 梗图」场景。允许代码重复，不为此抽公共底层。
 
