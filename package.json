@@ -8,11 +8,13 @@
   "exports": {
     ".": "./lib/host.js",
     "./client": "./client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib",
     "client.js",
+    "locale",
     "cordis.patch.yml",
     "README.md",
     "docs",

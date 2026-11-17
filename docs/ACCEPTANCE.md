@@ -77,7 +77,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 - `state.config.onlyInsideMarkers = true`；
 - 日志里没有 `桥启动失败`。
 
-> 设置页：**DSH 设置 → 鱼讯 QQ**。如果设置页没出现，先看
+> 设置页：**DSH 设置 → 鱼讯**。如果设置页没出现，先看
 > `%USERPROFILE%\.dsh\fish-message.log`，再确认 `client.js` 的 `dsh.client.inject`。
 
 ---

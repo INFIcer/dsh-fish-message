@@ -479,7 +479,7 @@ test('注册：设置分区 + 模型选择器左侧渠道按钮，不再有主�
   assert.equal(settings[0].mod.id, 'fish-message')
   assert.equal(settings[0].mod.order, 56)
   assert.equal(typeof settings[0].mod.label, 'function')
-  assert.equal(settings[0].mod.label(), '鱼讯 QQ')
+  assert.equal(settings[0].mod.label(), '鱼讯')
   assert.equal(typeof settings[0].component, 'function')
 
   // 模型选择器左侧：order 取大值排在这一簇末尾，每个会话一个收发渠道入口。
@@ -1142,7 +1142,7 @@ test('Esc：只关当前弹窗，确认框打开时只关确认框，不关设�
     listeners[listeners.length - 1](event)
     tree = env.flush()
     assert.equal(findAll(tree, (node) => node.props && node.props.role === 'dialog').length, 0, 'Esc 关掉表情库弹窗')
-    assert.match(textOf(tree), /鱼讯 QQ/, '设置页不能被一起关掉')
+    assert.match(textOf(tree), /鱼讯/, '设置页不能被一起关掉')
     assert.equal(event.defaultPrevented, 1)
     assert.equal(event.propagationStopped, 1)
     assert.equal(event.immediateStopped, 1)
@@ -1155,7 +1155,7 @@ test('Esc：只关当前弹窗，确认框打开时只关确认框，不关设�
     listeners[listeners.length - 1](event)
     tree = env.flush()
     assert.equal(findAll(tree, (node) => node.props && node.props.role === 'dialog').length, 0)
-    assert.match(textOf(tree), /鱼讯 QQ/)
+    assert.match(textOf(tree), /鱼讯/)
 
     // 确认框打开时：第一次 Esc 只关确认框，弹窗还在；第二次才关弹窗。
     findButton(tree, '打开图库管理')[0].props.onClick({ currentTarget: { focus() {} } })

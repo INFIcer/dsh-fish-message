@@ -701,7 +701,7 @@ v1 不实现群聊。将来要加群：
 
 | slot | 注册内容 | 作用 |
 |---|---|---|
-| `settings.section` | `{ name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' }` | 设置页分区（含两个图库弹窗） |
+| `settings.section` | `{ name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯' }` | 设置页分区（含两个图库弹窗） |
 | `conversation.input.right` | `{ name: 'conversation.input.right', id: 'fish-bind', order: 200, label: () => '收发渠道' }` | 模型选择器左侧的渠道胶囊按钮（见 11） |
 
 客户端 `inject` 声明 `['slots']`（package.json 的 `dsh.client.inject` 同步），不依赖

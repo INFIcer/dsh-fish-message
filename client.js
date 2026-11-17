@@ -1594,7 +1594,7 @@ window.__ModuleLoader__.load({
         await fetch()
       }
 
-      if (!state) return h('div', { className: 'fish-msg-settings', style: S.wrap }, h('div', { style: S.h1 }, '鱼讯 QQ'), h('div', { style: S.dim }, '正在读取当前状态…'))
+      if (!state) return h('div', { className: 'fish-msg-settings', style: S.wrap }, h('div', { style: S.h1 }, '鱼讯'), h('div', { style: S.dim }, '正在读取当前状态…'))
 
       const bridge = state.bridge || {}
       const pass = bridge.transport || {}
@@ -1683,7 +1683,7 @@ window.__ModuleLoader__.load({
         row('长任务监控（秒）', h('input', {
           style: S.small, type: 'number', min: 1, max: 7200, value: config.guardStuckSeconds ?? 600,
           onChange: (e) => change('guardStuckSeconds', Number(e.target.value)),
-        }), '主会话单轮执行过久时提醒智能体'),
+        }), '主会话单轮执行过久时，提醒智能体'),
         row('长任务提醒提示词', h('div', null,
           h('textarea', {
             style: {
@@ -1706,7 +1706,7 @@ window.__ModuleLoader__.load({
         row('消息通道监控（轮）', h('input', {
           style: S.small, type: 'number', min: 1, max: 50, value: config.guardQqRemindTurns ?? 3,
           onChange: (e) => change('guardQqRemindTurns', Number(e.target.value)),
-        }), '主会话多轮没有使用鱼讯回复内容时提醒智能体'),
+        }), '主会话多轮没有使用鱼讯回复内容时，提醒智能体'),
         row('消息通道提醒提示词', h('div', null,
           h('textarea', {
             style: {
@@ -1921,7 +1921,7 @@ window.__ModuleLoader__.load({
       const actionBar = h('div', { style: S.bar },
         h('div', { style: S.barRow },
           h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap', minWidth: 0 } },
-            h('div', { style: { ...S.h1, margin: 0 } }, '鱼讯 QQ'),
+            h('div', { style: { ...S.h1, margin: 0 } }, '鱼讯'),
             h('span', {
               style: { ...S.badge, ...(online ? S.ok : S.danger) },
               title: online ? (pass.mode === 'ws' ? '按实时连接接收消息' : '按定时查询接收消息') : '暂时连不上 QQ 服务',
@@ -1990,7 +1990,7 @@ window.__ModuleLoader__.load({
       if (slots === undefined) return
       // 设置分区与图库弹窗都在设置页之内，不占主面板与侧边栏。
       slots.inject('settings.section', () => slots.register(
-        { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' },
+        { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯' },
         Section,
       ))
       // 模型选择器左侧：收发渠道胶囊按钮。order 取大值排在这一簇末尾，紧挨模型选择器；
