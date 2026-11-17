@@ -20,8 +20,10 @@ Bridge（lib/bridge.js）
    ├─ 图片：image → inbox → 图库（按 sha256 命中描述就不附原图）→ 本地识图 / DSH 附件
    ├─ 记忆扩展：图片/语音 → memory.library 只读比对 → 正文附「记忆：…」（可选，默认关）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
-   ├─ 出站：session/event → [QQ] 解析 → 发送锁 → 节奏等待 → text / image / record / file
-   │    └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
+   ├─ 出站：session/event → [QQ] 解析 → 发送锁 → 待发记录落盘 → 节奏等待 → text / image / record / file
+   │    ├─ 成功 → 删除待发记录
+   │    ├─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
+   │    └─ 进程在等待中退出 → Inflight（fish-message-inflight.json）→ 启动时回放
    └─ 可选能力：AiService → fish.service（TTS / ASR / 识图；没有就降级）
    │
    ▼
@@ -71,6 +73,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/ai.js` | 可选本地 AI 门面：能力探测、参数校验、错误转人话 | 不实现 AI，不直连服务端口 |
 | `lib/split-voice-text.js` | 长语音按句切段（纯函数） | 不改写原文、不调服务、不读配置 |
 | `lib/outbox.js` | 持久化出站队列：去重、FIFO、退避、TTL、计数 | 不做网络发送 |
+| `lib/inflight.js` | 「发送前等待」期间的待发记录：落盘、按 token/段收敛、启动回放、TTL | 不做网络发送，不做退避（失败转 Outbox） |
 | `lib/delivery.js` | `agent.followup` + 附件 | 不拼消息格式 |
 | `lib/stickers.js` | 表情库：索引、sha256 去重、标签、搜索、导入、清理 | 不碰 HTTP / DSH |
 | `lib/sticker-routes.js` | `/stickers*` 路由：参数校验、multipart、取图防穿越 | 不实现存储算法 |
@@ -384,9 +387,12 @@ extractOutboundBlocks(text, onlyInsideMarkers)
   语音文本（`record_text`）按文本算。字数按「十分之一个字」整数累计，避免浮点尾巴。
 - 等待发生在发送串行锁里（`Bridge.dispatch`）：顺序不变，也不阻塞收消息；
   正常回复、补发、语音、图片都走这里，节奏一致。
+- 等待开始前先把「还没发出去的这条消息」写进待发记录（见 4.4.1），发送成功后立刻删；
+  等待期间 DSH 重启，启动时按记录补发。
 - 等待按「段」计：多个 `[QQ]` 块 = 多条消息 = 多次等待，各自按自己块内的字数算，
   不会按合并后的整段字数只等一次。
-- 两个设置都给 0 就完全不等；`sleep` / `now` 可注入，测试不会真等。
+- 两个设置都给 0 就完全不等，也不写待发记录（行为与旧版一致）；
+  `sleep` / `now` 可注入，测试不会真等。
 
 **任何 token 最终发送失败都不再丢弃**：`Bridge.sendOneItem` 把内部消息段写进持久化出站队列，
 同一轮后续 token 也按顺序入队（避免后发先至），并记日志/事件。入队只包含**还没发出去的**
@@ -435,6 +441,50 @@ extractOutboundBlocks(text, onlyInsideMarkers)
 
 队列状态机就是本节；`/state` 的 `outbox` 字段和设置页卡片都只是这里的只读汇总。
 程序调用走 `fish.message` 服务；HTTP 路由只给设置页/诊断。
+
+#### 4.4.1 发送前等待与重启恢复
+
+出站节奏的等待发生在**落盘之前**是丢消息的根源：等待期间消息只在内存里，进程被杀后
+既不在 QQ 上，也不在 Outbox 里。所以正常发送多了一步：
+
+```text
+正常发送 / 一轮多段
+        │
+        ├─ 进入节奏等待前 → Inflight.add（原子写 fish-message-inflight.json）
+        │       │  dueAt = 预计发送时刻；一轮多段时记录剩余 token
+        │       ▼
+        │   等待 → 发送 → 成功后立刻删记录
+        │
+        └─ 发送失败 → 删记录 + 剩余部分进 Outbox（退避/去重照旧，不在两边各留一份）
+```
+
+记录有两种形状：
+
+| 形状 | 谁写 | 回放时 |
+|---|---|---|
+| `tokens: [...]` | `deliverAssistantTurn`：一轮里还没解析的 `[QQ]` token | 按原顺序逐个解析、发送；每完成一个就把记录缩到剩余 token |
+| `segments: [...]` | `sendOutbound` 直发：已经解析好的消息段 | 按 dueAt 等到点，发完后删除；失败仍转 Outbox |
+
+一轮里当前 token 的 `segments` 可以与后半轮 token 的 `tokens` 同时存在：先补当前消息
+还没发出的段（每段发送前收敛一次），再继续后面的 token。语音合成多段时，崩溃也就只补
+剩下的语音条，而不是整条重来。
+
+启动流程（`Bridge.start`）：
+
+1. 启动约 800ms 后先 `replayInflight('startup')`，再 `flushOutbox('startup', { force: true })`；
+2. 回放按 `seq` 顺序逐条处理，遵守记录里的 `dueAt`：只补等剩余时间，不把已经等过的
+   时间再等一遍；
+3. 整个回放阶段拿一把发送锁，期间新消息排队，不会插到旧消息前面；Outbox 已有积压时，
+   待发记录直接排到队尾；
+4. 发送失败仍走 `sendOneItem` 的入队逻辑，然后删待发记录；入队也失败时保留记录，
+   下次启动再试；
+5. 超过 TTL（与 Outbox 同一个 `outboxTtlHours`，默认 24 小时）的记录丢弃并计入
+   `droppedTotal`。
+
+语义是**至少一次投递**：真正发送成功、删除记录两步之间进程被杀时，重启会重发这一条。
+窗口只落在「已实际发出、尚未删除记录」这一小段；正常路径和优雅停止不会重复发送。
+一条消息多段时，`dispatch` 每段发送前把记录收敛成「从当前段开始的剩余段」，
+所以崩溃后只补发没发出去的气泡。两个节奏延迟都是 0 时不写记录，行为与旧版完全一致。
 
 ### 4.5 表情包链路
 
@@ -559,8 +609,11 @@ v1 不实现群聊。将来要加群：
 | 记忆比对失败 / 超时 | 记 debug，正文不加记忆附注；消息照常收发 |
 | 声纹服务不可用 | 只跳过声纹比对，图像比对照常 |
 | 文字/图片/文件发送失败 | 入持久化出站队列；恢复后按 FIFO 补发 |
+| 发送前节奏等待期间进程退出 | 待发记录还在磁盘；下次启动按 `dueAt` 和顺序回放 |
+| 发送成功、待删记录之间进程退出 | 重启可能重发这一条（至少一次投递的已知窗口） |
 | `record` 发送失败 | 三种 file 形态重试 3 次；仍失败存路径入队 |
 | 出站队列写盘失败 | 日志报错；本次消息可能丢（磁盘满等硬故障） |
+| 待发记录写盘失败 | 日志报错，本次照常发送；只是等待期间重启仍会丢这一条 |
 | 补发失败 | `attempts++`，退避重试；20 次或 TTL 到期丢弃并记统计 |
 | 补发时音频/图片/文件已不存在 | 直接丢弃该条，报错，不重试 20 次 |
 | 图片下载失败 | 文字里标 `[图片（下载失败）]`，不影响其它段 |
@@ -649,7 +702,7 @@ v1 不实现群聊。将来要加群：
 | slot | 注册内容 | 作用 |
 |---|---|---|
 | `settings.section` | `{ name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' }` | 设置页分区（含两个图库弹窗） |
-| `conversation.input.left` | `{ name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => '收发渠道' }` | 会话输入框旁的渠道胶囊按钮（见 11） |
+| `conversation.input.right` | `{ name: 'conversation.input.right', id: 'fish-bind', order: 200, label: () => '收发渠道' }` | 模型选择器左侧的渠道胶囊按钮（见 11） |
 
 客户端 `inject` 声明 `['slots']`（package.json 的 `dsh.client.inject` 同步），不依赖
 `layout.selectPanel`。设置页里「表情包」与「收图图库」两块相邻，各有「打开图库管理」；
@@ -692,18 +745,22 @@ v1 不实现群聊。将来要加群：
 - **旧入口已删**：「最近收到的图片」列表与「清空最近图片」按钮不再出现在客户端；
   `/stickers/recent` 与入站缓存清理仍保留给后端诊断/清理使用。
 
-## 11. 会话级绑定入口（输入框胶囊按钮）
+## 11. 会话级绑定入口（模型选择器左侧胶囊按钮）
 
-绑定不再只能在设置页改。客户端在 `conversation.input.left` 槽位注册一枚胶囊按钮与自定义
-下拉菜单（与本地 AI 插件的开关同一排，颜色全走 `--dsw-alias-*` 变量），组件 props 带当前
-`sessionId`，按会话显示和切换渠道；设置页的绑定编辑器保持原样，两条入口写同一份配置。
+绑定不再只能在设置页改。客户端在 `conversation.input.right` 槽位注册一枚胶囊按钮与自定义
+下拉菜单（order 200 排在该簇末尾，紧挨模型选择器；颜色全走 `--dsw-alias-*` 变量），组件
+props 带当前 `sessionId`，按会话显示和切换渠道；设置页的绑定编辑器保持原样，两条入口写
+同一份配置。按钮高度与字号对齐模型选择器触发器那一排，窗口变窄时允许压缩。
 
 | 项 | 内容 |
 |---|---|
-| 槽位 | `conversation.input.left`：`{ id: 'fish-bind', order: 46, label: () => '收发渠道' }` |
+| 槽位 | `conversation.input.right`：`{ id: 'fish-bind', order: 200, label: () => '收发渠道' }` |
 | 数据 | `GET /state` 的 `bindings`；挂载、会话变化、打开菜单时各拉一次，不做轮询 |
 | 写操作 | `POST /bindings/assign`，body `{ sessionId, qq }`；`qq` 为空串表示解除当前会话的绑定 |
 | 注册容错 | 槽位不存在或注册失败只少一个入口，设置页与收发照常 |
+
+按钮与菜单项只显示「称呼 QQ」：称呼用主文字色，QQ 用次要色（与模型选择器的名字/档位
+搭配一致）；完整 QQ 号放在选项的 `title` 悬停提示里，设置页的绑定表仍是「称呼：QQ-号」。
 
 接口语义（`lib/host.js`）：
 

@@ -2,8 +2,8 @@
 //
 // 纯原生 JS + React（DSH 平台自带），没有 npm、没有 CDN、没有构建步骤。
 // 挂载方式照 dsh-qq-bridge 的 client.js：window.__ModuleLoader__.load → slots.register。
-// 注册 settings.section（设置页，含表情库与收图图库两个设置内弹窗）与 conversation.input.left
-// （会话输入框左侧的收发渠道胶囊按钮）；两者都只读写宿主路由，不直接碰 QQ / 会话。
+// 注册 settings.section（设置页，含表情库与收图图库两个设置内弹窗）与 conversation.input.right
+// （模型选择器左侧的收发渠道胶囊按钮）；两者都只读写宿主路由，不直接碰 QQ / 会话。
 // 不注册主面板与侧边栏入口。
 
 window.__ModuleLoader__.load({
@@ -1129,7 +1129,7 @@ window.__ModuleLoader__.load({
       } catch { /* 注入失败只影响外观 */ }
     }
 
-    // ---------------- 会话输入框左侧：收发渠道胶囊按钮 + 菜单 ----------------
+    // ---------------- 模型选择器左侧：收发渠道胶囊按钮 + 菜单 ----------------
     // 「渠道」= 配置里的一条绑定（qq + 称呼 + 启用）：session 为空表示渠道保留、暂不绑定会话。
     // 这里只调 /bindings/assign；设置页的保存语义与界面都不经过这里。
 
@@ -1162,7 +1162,10 @@ window.__ModuleLoader__.load({
         if (seen.has(qq)) continue
         if (b.enabled === false && qq !== String(selected || '')) continue
         seen.add(qq)
-        list.push({ qq: qq, label: `${b.name || '主人'}：QQ-${qq}` })
+        // 胶囊/菜单只显示「称呼 QQ」：称呼用主文字色，QQ 用次要色（与模型选择器的亮暗搭配一致）。
+        // 具体号码放到每个选项的 title 上，悬停能看到，不占横向空间。
+        const name = String(b.name || '主人')
+        list.push({ qq: qq, name: name, label: `${name} QQ`, title: `QQ ${qq}` })
       }
       return list
     }
@@ -1335,7 +1338,8 @@ window.__ModuleLoader__.load({
       const choices = channelChoices(bindings, selected)
       // 选中值必须对得上某一项，否则菜单里没有任何高亮；对不上时按「不绑定」处理。
       const value = choices.some((item) => item.qq === selected) ? selected : ''
-      const currentLabel = (choices.find((item) => item.qq === value) || { label: '不绑定' }).label
+      const current = choices.find((item) => item.qq === value) || null
+      const currentLabel = current ? current.label : '不绑定'
       const items = [{ qq: '', label: '不绑定' }].concat(choices)
       return h('div', {
         className: 'fish-bind',
@@ -1354,7 +1358,10 @@ window.__ModuleLoader__.load({
           onKeyDown: onTriggerKeyDown,
         },
           h('span', { className: 'fish-bind-title' }, '收发渠道'),
-          h('span', { className: 'fish-bind-current' }, currentLabel),
+          h('span', { className: 'fish-bind-current' },
+            current
+              ? [h('span', { className: 'fish-bind-name' }, current.name), ' ', h('span', { className: 'fish-bind-qq' }, 'QQ')]
+              : '不绑定'),
           chevronIcon()),
         open
           ? h('div', {
@@ -1366,10 +1373,13 @@ window.__ModuleLoader__.load({
             role: 'option',
             'aria-selected': item.qq === value ? 'true' : 'false',
             className: 'fish-bind-item',
-            title: item.label,
+            title: item.qq ? item.title : item.label,
             onClick: () => choose(item.qq),
           },
-            h('span', { className: 'fish-bind-item-text' }, item.label),
+            h('span', { className: 'fish-bind-item-text' },
+              item.qq
+                ? [h('span', { className: 'fish-bind-name' }, item.name), ' ', h('span', { className: 'fish-bind-qq' }, 'QQ')]
+                : item.label),
             item.qq === value ? checkIcon() : null)))
           : null,
         note ? h('span', { className: 'fish-bind-note', role: 'status', title: note }, note) : null)
@@ -1413,6 +1423,9 @@ window.__ModuleLoader__.load({
       .fish-bind-trigger[disabled] { opacity: .55; cursor: default; }
       .fish-bind-title { flex: 0 0 auto; opacity: .62; }
       .fish-bind-current { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      /* 称呼亮、QQ 暗：与模型选择器的「名字 + 档位」搭配一致，具体号码只在 title 里给。 */
+      .fish-bind-name { color: var(--dsw-alias-label-primary, inherit); }
+      .fish-bind-qq { color: var(--dsw-alias-label-secondary, #888); }
       .fish-bind-chevron { flex: 0 0 auto; transition: transform .12s ease; }
       .fish-bind[data-open="1"] .fish-bind-chevron { transform: rotate(180deg); }
       .fish-bind-menu {
@@ -1979,14 +1992,15 @@ window.__ModuleLoader__.load({
         { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' },
         Section,
       ))
-      // 会话输入框左侧：收发渠道胶囊按钮。旧宿主没有这个槽位时只少一个入口，整个插件照常加载。
+      // 模型选择器左侧：收发渠道胶囊按钮。order 取大值排在这一簇末尾，紧挨模型选择器；
+      // 旧宿主没有这个槽位时只少一个入口，整个插件照常加载。
       try {
-        slots.inject('conversation.input.left', () => slots.register(
-          { name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => '收发渠道' },
+        slots.inject('conversation.input.right', () => slots.register(
+          { name: 'conversation.input.right', id: 'fish-bind', order: 200, label: () => '收发渠道' },
           BindChannel,
         ))
       } catch (error) {
-        try { console.warn('[dsh-fish-message] 注册会话输入框槽位失败', error) } catch { /* 忽略 */ }
+        try { console.warn('[dsh-fish-message] 注册模型选择器左侧槽位失败', error) } catch { /* 忽略 */ }
       }
     }
 
