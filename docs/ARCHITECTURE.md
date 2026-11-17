@@ -48,7 +48,7 @@ DSH 会话（模型照常开一轮）
 没装、抛错或超时都只跳过附注，不改变消息收发；两个底层库（收图图库、表情库）不受影响。
 
 ```text
-dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
+dsh-LocalAIService（可选） ── fish.service.tts / asr / visionDescribe
         ▲
         │ ctx.get('fish.service') 运行时探测
         │
