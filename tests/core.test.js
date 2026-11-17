@@ -317,6 +317,96 @@ test('出站：关掉「只发标记内」时整条发但剥标记', async () =>
   await bridge.stop()
 })
 
+/** 造一条 DSH 的 assistant/message：一轮一个模型步一条。 */
+function assistantStep(turn, step, content, id = `message-${turn}-${step}`) {
+  return { type: 'assistant/message', data: { turn, step, message: { id, content } } }
+}
+
+const turnEnd = (turn, kind = 'completed') => ({ type: 'turn/end', data: { turn, reason: { kind } } })
+
+test('出站：一轮两个模型步，中途步的 [QQ] 也发出去且顺序在前', async () => {
+  const { bridge, transport } = makeBridge()
+  await bridge.start({ syncNow: false })
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '先去查 [QQ]第一步的结论[/QQ] 然后继续' }]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '收尾完成，这一步没有要发的' }]))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await wait(() => transport.sent.length === 1), true)
+  assert.deepEqual(transport.sent[0].segments, [{ type: 'text', data: { text: '第一步的结论' } }])
+  await bridge.stop()
+})
+
+test('出站：一轮多个模型步各有一段 [QQ] 时按顺序全发', async () => {
+  const { bridge, transport } = makeBridge()
+  await bridge.start({ syncNow: false })
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]第一段[/QQ]' }]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[QQ]第二段[/QQ]' }]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 3, [{ type: 'text', text: '[QQ]第三段[/QQ]' }]))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await wait(() => transport.sent.length === 3), true)
+  assert.deepEqual(
+    transport.sent.map((x) => x.segments[0].data.text),
+    ['第一段', '第二段', '第三段'],
+  )
+  await bridge.stop()
+})
+
+test('出站：同一条 assistant/message 重复投递只发一遍', async () => {
+  const { bridge, transport } = makeBridge()
+  await bridge.start({ syncNow: false })
+  const event = assistantStep(1, 1, [{ type: 'text', text: '[QQ]只发这一遍[/QQ]' }])
+  bridge.onSessionEvent({ id: session }, event)
+  bridge.onSessionEvent({ id: session }, event)
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await wait(() => transport.sent.length === 1), true)
+  await sleep(60)
+  assert.equal(transport.sent.length, 1)
+  await bridge.stop()
+})
+
+test('出站：某步只写了 [QQ] 没写 [/QQ]，不会把下一步的内部文字粘进来', async () => {
+  const { bridge, transport } = makeBridge()
+  await bridge.start({ syncNow: false })
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]只发这句' }]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '这段是内部草稿，不外发' }]))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await wait(() => transport.sent.length === 1), true)
+  assert.deepEqual(transport.sent[0].segments, [{ type: 'text', data: { text: '只发这句' } }])
+  await bridge.stop()
+})
+
+test('出站：回合被中断时，已累积的 [QQ] 不发送', async () => {
+  const { bridge, transport } = makeBridge()
+  await bridge.start({ syncNow: false })
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]写到一半的话[/QQ]' }]))
+  bridge.onSessionEvent({ id: session }, {
+    type: 'assistant/message',
+    data: { turn: 1, step: 2, interrupted: true, message: { id: 'message-1-2', content: [{ type: 'text', text: '半句话' }] } },
+  })
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  await sleep(80)
+  assert.equal(transport.sent.length, 0)
+  await bridge.stop()
+})
+
+test('出站：同一张图跨模型步只发一次', async () => {
+  const dir = tempDir()
+  const image = join(dir, 'a.png')
+  writeFileSync(image, 'fake-png')
+  const { bridge, transport, delivery } = makeBridge({ dir })
+  delivery.attachmentPath = async () => image
+  await bridge.start({ syncNow: false })
+  const imageBlock = { type: 'image', attachment: { attachmentId: 'sha-image-a', mediaType: 'image/png', bytes: 9, width: 1, height: 1 } }
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [imageBlock]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[QQ]看图[/QQ]' }, imageBlock]))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await wait(() => transport.sent.length === 2), true)
+  await sleep(60)
+  assert.equal(transport.sent.length, 2, '文字一条、图片一条，图片不重复')
+  assert.equal(transport.sent[0].segments[0].data.text, '看图')
+  assert.equal(transport.sent[1].segments[0].type, 'image')
+  await bridge.stop()
+})
+
 test('语音发送：失败后自动重试，第三次成功', async () => {
   const dir = tempDir()
   const audio = join(dir, 'a.wav')

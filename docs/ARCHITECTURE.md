@@ -274,11 +274,14 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
 
 `host.js` 监听 `session/event`：
 
-- `assistant/message`：记这一轮最后一段 assistant 正文和图片块；
+- `assistant/message`：按产生顺序累积这一轮每个模型步的 assistant 正文和图片块
+  （同一步重复投递按消息 id 去重；图片按内容寻址的 `attachmentId` 去重）；
 - `turn/end` 且 `reason.kind === 'completed'`：如果这一轮属于绑定会话，调用
-  `bridge.deliverAssistantTurn`。
+  `bridge.deliverAssistantTurn`。各步正文分别解析后再按顺序发，避免某步未闭合的
+  `[QQ]` 把下一步的内部文字粘进块里。
 
-按「会话 key + turn」去重，同一轮不会发两次。被中断（`interrupted`）的轮不发送。
+按「会话 key + turn」去重，同一轮不会发两次。被中断（`interrupted`）的轮不发送，
+已累积的内容一起丢弃（半段话可能只写了一半，也可能是被叫停的方向）。
 
 ### 4.2 解析
 
