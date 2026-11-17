@@ -144,6 +144,8 @@ test('keepFiles=false：只留描述与尺寸，不存原图也不占空间', ()
   const entry = library.remember({ buffer: smallPng, ext: '.png', mime: 'image/png', desc: '一只猫' })
   assert.equal(entry.file, '')
   assert.equal(entry.path, '')
+  assert.equal(entry.width, 1, '不存原图也照样记尺寸')
+  assert.equal(entry.height, 1)
   assert.equal(library.stats().withFile, 0)
   assert.equal(library.stats().bytes, 0, '不存原图就不算占用')
   assert.equal(library.stats().withDesc, 1)
@@ -151,6 +153,37 @@ test('keepFiles=false：只留描述与尺寸，不存原图也不占空间', ()
   // 没有原图字节时，用描述也能入库（这类条目只用来提供文字）。
   const textOnly = library.remember({ sha256: shaOf(fakeImage('x')), desc: '只有文字' })
   assert.equal(textOnly.desc, '只有文字')
+})
+
+test('尺寸：入库时从字节头记录 PNG / GIF 像素尺寸', () => {
+  const { library } = makeLibrary()
+  const png = library.remember({ buffer: smallPng, ext: '.png' })
+  assert.equal(png.width, 1)
+  assert.equal(png.height, 1)
+  const gif = library.remember({ buffer: makeGif({ width: 3, height: 4 }), ext: '.gif' })
+  assert.equal(gif.width, 3)
+  assert.equal(gif.height, 4)
+})
+
+test('尺寸：旧条目 width 为 0 时，同一张图再次 remember 自动补齐并落索引', () => {
+  const { library, dir } = makeLibrary({ keepFiles: false })
+  // 模拟旧版入库：只有指纹与描述，没有字节，也就没有尺寸。
+  const legacy = library.remember({ sha256: shaOf(smallPng), desc: '旧条目' })
+  assert.equal(legacy.width, 0)
+  assert.equal(legacy.height, 0)
+
+  const filled = library.remember({ buffer: smallPng, ext: '.png' })
+  assert.equal(filled.width, 1, '同一 sha 再出现时补尺寸')
+  assert.equal(filled.height, 1)
+  const onDisk = JSON.parse(readFileSync(join(dir, 'index.json'), 'utf8'))
+  assert.equal(onDisk.items[0].width, 1, '补齐要随 changed 一起写进索引')
+})
+
+test('尺寸：只有 sha 没有字节时仍写 0（拿不到头就不猜）', () => {
+  const { library } = makeLibrary({ keepFiles: false })
+  const entry = library.remember({ sha256: shaOf(fakeImage('no-bytes')), desc: '只有文字' })
+  assert.equal(entry.width, 0)
+  assert.equal(entry.height, 0)
 })
 
 test('索引损坏：整份读不出来时留档并从空索引开始', () => {

@@ -134,6 +134,8 @@ test('第一次收到（本地识图开）：只登记、不识图，原图照�
   assert.equal(entry.misses, 1, '第一次见到记 misses')
   assert.equal(entry.hits, 0, '第一次见到不算命中')
   assert.ok(entry.file, '默认存原图，下次识图前也能回看')
+  assert.equal(entry.width, 1, '入站登记时从字节头记下像素尺寸')
+  assert.equal(entry.height, 1)
 })
 
 test('第一次收到（本地识图关）：只登记，正文直接看图、不再要求补描述', async () => {
