@@ -30,12 +30,14 @@ window.__ModuleLoader__.load({
     const imageUrl = (entry) => `${B}/stickers/file?path=${encodeURIComponent(entry?.file || '')}`
     // 收图图库按指纹出图：前端不传路径，后端自己按索引找文件。
     const cachedImageUrl = (entry) => `${B}/images/file?sha256=${encodeURIComponent(entry?.sha256 || '')}`
-    // 图库条目的描述来源：识图结果来自本地模型、API 路径、手动填写，或从表情库借来。
+    // 图库条目的描述来源：本地识图、待识别（第一次只登记，还没描述）、手动填写，或从表情库借来。
+    // api 是旧版本存下的值，只为读老索引保留。
     const descSourceText = (source) => ({
       local: '本地识图',
-      api: '模型',
+      deferred: '待识别',
       manual: '手动填写',
       sticker: '表情库',
+      api: '模型',
     })[source] || '未标注'
     const timeText = (value) => {
       const stamp = String(value || '')
@@ -928,8 +930,8 @@ window.__ModuleLoader__.load({
         askConfirm({
           title: '清空收图图库？',
           description: n > 0
-            ? '将删除图库里的 ' + n + ' 张图；同一张图再来会重新识图。此操作无法撤销。'
-            : '将清空收图图库；同一张图再来会重新识图。此操作无法撤销。',
+            ? '将删除图库里的 ' + n + ' 张图；同一张图再来会重新登记。此操作无法撤销。'
+            : '将清空收图图库；同一张图再来会重新登记。此操作无法撤销。',
           confirmLabel: '清空图库',
           run: async () => {
             setBusy(true)

@@ -224,7 +224,8 @@ test('VisionCache：库操作抛错时降级为不缓存，不让收消息失败
     logger: { debug() {}, info() {}, warn: (m) => warnings.push(String(m)) },
   })
   const result = await cache.resolve({ buffer: smallPng, path: 'x.png', localVision: false })
-  assert.equal(result.source, 'api')
+  assert.equal(result.source, 'deferred', '库坏了也按「第一次只登记」的策略返回，不伪装成识图')
   assert.equal(result.desc, '')
+  assert.match(result.note, /第一次见到/)
   assert.ok(warnings.some((line) => line.includes('图库操作失败')))
 })

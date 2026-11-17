@@ -1,5 +1,5 @@
-// 入站图片 + 图库：命中不再识图、缺描述会重新识图并提醒、识图失败不写库、总开关退回旧行为，
-// 以及「命中回执写明描述来自哪个库」和「表情库作为缺描述时的兜底来源」。
+// 入站图片 + 收图图库：第一次只登记不识别，第二次起才补描述；命中次数按真实复用累计。
+// 另覆盖命中缓存、借表情库描述、识图失败、旧条目兼容与总开关退回旧行为。
 //
 // 全部离线：假的本地 AI 服务 + 临时图库/表情库目录，真实走 Bridge.buildInbound。
 
@@ -64,7 +64,7 @@ function makeEnv({ config = {}, service = null, libraryOptions = {}, preload = n
     ...config,
   })
   const library = new ImageLibrary({ dir: join(dir, 'images'), logger, ...libraryOptions })
-  // 预置图库内容：用于「命中缓存」「命中但描述为空」两类用例。
+  // 预置图库内容：用于「命中缓存」「旧版留下的空描述条目」两类用例。
   if (preload) library.remember({ buffer, path: imagePath, ext: '.png', mime: 'image/png', ...preload })
 
   const ai = service ? new AiService({ getService: () => service, getConfig: () => ({}), logger }) : null
@@ -100,6 +100,12 @@ test('命中收图图库：直接用上次的描述，回执写明来自收图�
   assert.match(content.text, /首次识别于/)
   assert.equal(service.calls.vision.length, 0, '命中缓存不能再识图')
   assert.equal(env.library.lookup(env.sha256).hits, 1, '命中要记一次')
+
+  // 老条目再出现一次：仍然只用缓存，命中次数继续累加。
+  const again = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-cache-1b'))
+  assert.match(again.text, /第 2 次见到/)
+  assert.equal(env.library.lookup(env.sha256).hits, 2)
+  assert.equal(service.calls.vision.length, 0)
 })
 
 test('命中缓存：没装本地 AI 也能用描述（图库不依赖识图服务）', async () => {
@@ -109,75 +115,170 @@ test('命中缓存：没装本地 AI 也能用描述（图库不依赖识图服�
   assert.match(content.text, /一只戴着墨镜的狗/)
 })
 
-test('命中但描述为空：本地识图开着就重新识图，补写描述并提醒', async () => {
+test('第一次收到（本地识图开）：只登记、不识图，原图照旧附给会话', async () => {
+  const service = new fakeVisionService({ text: '不该被调用' })
+  const env = makeEnv({ config: { describeInboundImages: 'on' }, service })
+  const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-first-1'))
+
+  assert.equal(service.calls.vision.length, 0, '第一次见到不能识图')
+  assert.equal(content.images.length, 1, '没有描述就把原图交给会话')
+  assert.match(content.text, /\[图片\]/)
+  assert.match(content.text, /第一次见到/)
+  assert.match(content.text, /这次先不识别/)
+  assert.doesNotMatch(content.text, /fish_image_note/, '第一次不再要求补描述')
+
+  const entry = env.library.lookup(env.sha256)
+  assert.ok(entry, '第一次见到要登记，才能知道「第二次」')
+  assert.equal(entry.desc, '')
+  assert.equal(entry.descSource, 'deferred', '描述来源标成待识别')
+  assert.equal(entry.misses, 1, '第一次见到记 misses')
+  assert.equal(entry.hits, 0, '第一次见到不算命中')
+  assert.ok(entry.file, '默认存原图，下次识图前也能回看')
+})
+
+test('第一次收到（本地识图关）：只登记，正文直接看图、不再要求补描述', async () => {
+  const service = new fakeVisionService({ text: '不该被调用' })
+  const env = makeEnv({ config: { describeInboundImages: 'off' }, service })
+  const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-first-2'))
+
+  assert.equal(service.calls.vision.length, 0)
+  assert.equal(content.images.length, 1)
+  assert.match(content.text, /第一次见到/)
+  assert.match(content.text, /这次直接看图/)
+  assert.doesNotMatch(content.text, /fish_image_note/)
+
+  const entry = env.library.lookup(env.sha256)
+  assert.equal(entry.desc, '')
+  assert.equal(entry.misses, 1)
+  assert.equal(entry.hits, 0)
+})
+
+test('同一张图第二次（本地识图开）：识图一次、描述入库，第三次起走缓存', async () => {
+  const service = new fakeVisionService({ text: '一只橘猫趴在键盘上' })
+  const env = makeEnv({ config: { describeInboundImages: 'on' }, service })
+
+  const first = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-second-1'))
+  assert.equal(first.images.length, 1)
+  assert.equal(service.calls.vision.length, 0, '第一次不识图')
+
+  const second = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-second-2'))
+  assert.equal(service.calls.vision.length, 1, '第二次才识图')
+  assert.equal(second.images.length, 0, '有描述就不再附原图')
+  assert.match(second.text, /一只橘猫趴在键盘上/)
+  assert.match(second.text, /第 2 次见到/)
+  assert.match(second.text, /已自动补上描述/)
+
+  let entry = env.library.lookup(env.sha256)
+  assert.equal(entry.desc, '一只橘猫趴在键盘上', '识图结果写进收图图库')
+  assert.equal(entry.descSource, 'local')
+  assert.equal(entry.hits, 1, '第二次见到算一次复用命中')
+  assert.equal(entry.misses, 1)
+
+  const third = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-second-3'))
+  assert.equal(service.calls.vision.length, 1, '第三次直接命中缓存，不再识图')
+  assert.equal(third.images.length, 0)
+  assert.match(third.text, /来自收图图库/)
+  assert.match(third.text, /第 3 次见到/)
+
+  entry = env.library.lookup(env.sha256)
+  assert.equal(entry.hits, 2)
+  assert.equal(entry.misses, 1)
+})
+
+test('同一张图第二次（本地识图关）：不识别、记一次命中、原图照旧', async () => {
+  const service = new fakeVisionService({ text: '不该被调用' })
+  const env = makeEnv({ config: { describeInboundImages: 'off' }, service })
+
+  const first = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-off-hit-1'))
+  assert.equal(first.images.length, 1)
+  assert.equal(service.calls.vision.length, 0)
+
+  const second = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-off-hit-2'))
+  assert.equal(service.calls.vision.length, 0, '本地识图关着就不能调识图')
+  assert.equal(second.images.length, 1, '没有描述，原图照旧交给会话')
+  assert.match(second.text, /第 2 次见到/)
+  assert.match(second.text, /还没有描述/)
+  assert.match(second.text, /这次直接看图/)
+  assert.doesNotMatch(second.text, /fish_image_note/, '不再要求补描述')
+
+  const entry = env.library.lookup(env.sha256)
+  assert.equal(entry.desc, '')
+  assert.equal(entry.hits, 1, '第二次见到记命中')
+  assert.equal(entry.misses, 1, '首次的未命中保留')
+})
+
+test('计数不变式：第 N 次见到 = hits + misses，从 1 开始每次只 +1', async () => {
+  const env = makeEnv({ config: { describeInboundImages: 'off' }, service: new fakeVisionService() })
+  for (let n = 1; n <= 4; n += 1) {
+    const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage(`m-count-${n}`))
+    const entry = env.library.lookup(env.sha256)
+    assert.equal(entry.hits + entry.misses, n, `第 ${n} 次见到时计数和应为 ${n}`)
+    assert.equal(entry.misses, 1, '只有第一次见到记 misses')
+    assert.equal(entry.hits, Math.max(0, n - 1), '之后每次见到记 hits')
+    if (n === 1) assert.match(content.text, /第一次见到/)
+    else assert.match(content.text, new RegExp(`第 ${n} 次见到`))
+  }
+})
+
+test('图库里已有空描述条目（旧版遗留）：本地识图开着就补描述，记一次命中', async () => {
   const service = new fakeVisionService({ text: '一只橘猫趴在键盘上' })
   const env = makeEnv({ config: { describeInboundImages: 'on' }, service, preload: { desc: '' } })
-  const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-empty-1'))
+  // 模拟旧策略留下的状态：见过一次，但没有描述。
+  env.library.noteMiss(env.sha256)
 
-  assert.equal(service.calls.vision.length, 1, '没有描述就要重新识图')
+  const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-empty-1'))
+  assert.equal(service.calls.vision.length, 1, '已有条目缺描述，这次要补识别')
   assert.equal(content.images.length, 0)
   assert.match(content.text, /一只橘猫趴在键盘上/)
-  assert.match(content.text, /收图图库里这张图还没有描述，已补上/)
-  assert.equal(env.library.lookup(env.sha256).desc, '一只橘猫趴在键盘上', '识图结果补写进库')
-  assert.equal(env.library.lookup(env.sha256).misses, 1)
+  assert.match(content.text, /第 2 次见到/)
+  assert.match(content.text, /已自动补上描述/)
+
+  const entry = env.library.lookup(env.sha256)
+  assert.equal(entry.desc, '一只橘猫趴在键盘上', '识图结果补写进库')
+  assert.equal(entry.descSource, 'local')
+  assert.equal(entry.hits, 1)
+  assert.equal(entry.misses, 1)
 })
 
-test('命中但描述为空：本地识图关着就把原图交给模型，并提醒写回描述', async () => {
+test('图库里已有空描述条目：本地识图关着就把原图交给会话，不再要求补描述', async () => {
   const service = new fakeVisionService({ text: '不该被调用' })
   const env = makeEnv({ config: { describeInboundImages: 'off' }, service, preload: { desc: '' } })
+  env.library.noteMiss(env.sha256)
+
   const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-empty-2'))
-
-  assert.equal(service.calls.vision.length, 0, '本地识图关着不能再识图')
-  assert.equal(content.images.length, 1, '这次只能把原图交给模型')
+  assert.equal(service.calls.vision.length, 0, '本地识图关着不能识图')
+  assert.equal(content.images.length, 1, '这次只能把原图交给会话')
   assert.match(content.text, /\[图片\]/)
-  assert.match(content.text, /收图图库里这张图还没有描述/)
-  assert.match(content.text, /fish_image_note/)
-  assert.equal(env.library.lookup(env.sha256).desc, '', '模型没回填前不写描述')
-})
+  assert.match(content.text, /第 2 次见到/)
+  assert.match(content.text, /还没有描述/)
+  assert.match(content.text, /这次直接看图/)
+  assert.doesNotMatch(content.text, /fish_image_note/)
 
-test('未命中：本地识图成功后把「原图 + 描述」入库，正文标明首次识别', async () => {
-  const service = new fakeVisionService({ text: '一张写着晚安的表情包' })
-  const env = makeEnv({ config: { describeInboundImages: 'on' }, service })
-  const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-miss-1'))
-
-  assert.equal(content.images.length, 0)
-  assert.match(content.text, /一张写着晚安的表情包/)
-  assert.match(content.text, /已收入收图图库（首次识别）/)
   const entry = env.library.lookup(env.sha256)
-  assert.ok(entry, '识图成功要入库')
-  assert.equal(entry.desc, '一张写着晚安的表情包')
-  assert.ok(entry.file, '默认存原图')
-  assert.ok(entry.path, '条目带本机路径')
+  assert.equal(entry.desc, '', '没有识图就不写描述')
+  assert.equal(entry.hits, 1)
+  assert.equal(entry.misses, 1)
 })
 
-test('未命中 + 本地识图失败：退回原图，不写库（下次重试）', async () => {
+test('缺描述 + 本地识图失败：第二次退回原图，命中照记，下次再试', async () => {
   const service = new fakeVisionService({ fail: true })
   const env = makeEnv({ config: { describeInboundImages: 'on' }, service })
-  const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-fail-1'))
 
-  assert.equal(content.images.length, 1, '识图失败要退回原图')
-  assert.match(content.text, /本地识图没成功/)
-  assert.equal(env.library.stats().count, 0, '失败不能写库，也不能伪装成命中')
-  assert.equal(env.library.stats().hits, 0)
-})
+  const first = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-fail-1'))
+  assert.equal(first.images.length, 1, '第一次只登记，原图照旧')
+  assert.equal(service.calls.vision.length, 0)
 
-test('未命中 + 本地识图关着：只记「见过」，正文提醒用工具写回描述', async () => {
-  const env = makeEnv({ config: { describeInboundImages: 'off' }, service: new fakeVisionService() })
-  const first = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-api-1'))
+  const second = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-fail-2'))
+  assert.equal(service.calls.vision.length, 1)
+  assert.equal(second.images.length, 1, '识图失败要退回原图')
+  assert.match(second.text, /第 2 次见到/)
+  assert.match(second.text, /本地识图没成功/)
+  assert.match(second.text, /本地 AI 正忙/, '失败原因要写进正文')
 
-  assert.equal(first.images.length, 1, '本地识图关着就是把原图交给模型')
-  assert.match(first.text, /fish_image_note/)
   const entry = env.library.lookup(env.sha256)
-  assert.ok(entry, '要记进图库，才能知道「下次还是没描述」')
-  assert.equal(entry.desc, '', 'API 路径不写描述')
-  assert.ok(entry.file, '原图照样存一份，inbox 被清理后还能回看')
-  assert.equal(entry.misses, 1, '记录见过一次')
-
-  const second = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-api-2'))
-  assert.equal(second.images.length, 1)
-  assert.match(second.text, /收图图库里这张图还没有描述/, '第二次仍要提醒补描述')
-  assert.equal(env.library.lookup(env.sha256).desc, '', '模型没写回前一直是空描述')
-  assert.equal(env.library.lookup(env.sha256).misses, 2, '见过两次')
+  assert.equal(entry.desc, '', '失败不写描述')
+  assert.equal(entry.hits, 1, '这次也算见到一次，照样记命中')
+  assert.equal(entry.misses, 1)
 })
 
 test('总开关关掉：完全退回旧行为，不查库也不写库', async () => {
@@ -201,16 +302,22 @@ test('总开关关掉 + 本地识图也关：保持最老的行为（原图 + �
   const env = makeEnv({ config: { describeInboundImages: 'off', imageLibraryEnabled: false }, service: new fakeVisionService() })
   const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-off-2'))
   assert.equal(content.images.length, 1)
-  assert.doesNotMatch(content.text, /fish_image_note/)
+  assert.doesNotMatch(content.text, /fish_image_note|第一次见到|第 \d+ 次见到/)
   assert.equal(env.library.stats().count, 0, '关掉时什么都不写')
 })
 
-test('策略层：图库开关开着但没装本地 AI、也没缓存时，退回原图并记一次见过', async () => {
+test('策略层：图库开着但没装本地 AI、也没缓存时，第一次只登记并直接看图', async () => {
   const env = makeEnv({ config: { describeInboundImages: 'on' }, service: null })
   const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-noai-1'))
   assert.equal(content.images.length, 1)
-  assert.match(content.text, /fish_image_note/)
-  assert.equal(env.library.lookup(env.sha256).misses, 1)
+  assert.match(content.text, /第一次见到/)
+  assert.match(content.text, /这次直接看图/)
+  assert.doesNotMatch(content.text, /fish_image_note/)
+
+  const entry = env.library.lookup(env.sha256)
+  assert.equal(entry.desc, '')
+  assert.equal(entry.misses, 1)
+  assert.equal(entry.hits, 0)
 })
 
 /** 造一个真实表情库实例，并把这张图按「带描述的表情包」存进去。 */
@@ -225,18 +332,22 @@ test('收图图库命中但没有描述：采用表情库里的同图描述，�
   const service = new fakeVisionService({ text: '不该被调用' })
   const stickers = makeStickerStore('表情库里的描述：一只打哈欠的猫')
   const env = makeEnv({ config: { describeInboundImages: 'on' }, service, preload: { desc: '' }, stickers })
+  // 模拟第一次登记过后留下的条目：见过一次、没有描述。
+  env.library.noteMiss(env.sha256)
   const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-sticker-1'))
 
   assert.equal(content.images.length, 0, '拿到描述就不用再附原图')
   assert.match(content.text, /表情库里的描述：一只打哈欠的猫/)
   assert.match(content.text, /来自表情库/, '回执要说明描述来自表情库')
-  assert.match(content.text, /收图图库/, '同时说明已写回收图图库')
+  assert.match(content.text, /第 2 次见到/)
   assert.doesNotMatch(content.text, /不该被调用/)
   assert.equal(service.calls.vision.length, 0, '有表情库描述就不必再识图')
 
   const entry = env.library.lookup(env.sha256)
   assert.equal(entry.desc, '表情库里的描述：一只打哈欠的猫', '描述要写回收图图库，下次直接命中缓存')
   assert.equal(entry.descSource, 'sticker')
+  assert.equal(entry.hits, 1, '这次算一次复用命中')
+  assert.equal(entry.misses, 1)
   assert.ok(entry.file, '收图图库是缓存，原图要跟着存一份')
 })
 
@@ -248,19 +359,24 @@ test('收图图库未命中：表情库里有同图描述时直接采用，并�
 
   assert.equal(content.images.length, 0)
   assert.match(content.text, /来自表情库/)
+  assert.match(content.text, /第 1 次见到/)
   assert.match(content.text, /已收入收图图库/)
   assert.equal(service.calls.vision.length, 0)
 
   const entry = env.library.lookup(env.sha256)
   assert.ok(entry, '要收进收图图库')
   assert.equal(entry.desc, '表情库里的描述：一张写着晚安的图')
+  assert.equal(entry.descSource, 'sticker')
+  assert.equal(entry.hits, 1, '描述当场可用，这一次算命中')
+  assert.equal(entry.misses, 0)
   assert.ok(entry.file, '原图一起存')
 })
 
-test('表情库抛错：安静退回原行为（重新识图），不影响收消息', async () => {
+test('表情库抛错：安静退回原行为（再次见到缺描述就识图），不影响收消息', async () => {
   const broken = { bySha() { throw new Error('表情库索引坏了') } }
   const service = new fakeVisionService({ text: '这次是现场识别的结果' })
   const env = makeEnv({ config: { describeInboundImages: 'on' }, service, preload: { desc: '' }, stickers: broken })
+  env.library.noteMiss(env.sha256)
   const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-sticker-broken'))
 
   assert.equal(content.images.length, 0)
@@ -269,12 +385,13 @@ test('表情库抛错：安静退回原行为（重新识图），不影响收�
   assert.equal(env.library.lookup(env.sha256).desc, '这次是现场识别的结果')
 })
 
-test('表情库抛错 + 本地识图关着：照样把原图交给模型并提醒写回描述', async () => {
+test('表情库抛错 + 本地识图关着：照样把原图交给会话，不要求补描述', async () => {
   const broken = { bySha() { throw new Error('表情库坏了') } }
   const env = makeEnv({ config: { describeInboundImages: 'off' }, stickers: broken })
   const content = await env.bridge.buildInbound({ qq: QQ, name: '主人' }, imageMessage('m-sticker-broken-2'))
 
   assert.equal(content.images.length, 1)
-  assert.match(content.text, /这张图还没进收图图库/)
-  assert.match(content.text, /fish_image_note/)
+  assert.match(content.text, /第一次见到/)
+  assert.match(content.text, /这次直接看图/)
+  assert.doesNotMatch(content.text, /fish_image_note/)
 })
