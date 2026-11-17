@@ -1417,14 +1417,15 @@ window.__ModuleLoader__.load({
       }
       .fish-bind-trigger:hover {
         background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06));
-        color: var(--dsw-alias-label-primary, inherit);
       }
       .fish-bind-trigger[disabled] { opacity: .55; cursor: default; }
       .fish-bind-current { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-      /* 称呼亮、QQ 暗：与模型选择器的「名字 + 档位」搭配一致，具体号码只在 title 里给。 */
-      .fish-bind-name { color: var(--dsw-alias-label-primary, inherit); }
-      .fish-bind-qq { color: var(--dsw-alias-label-secondary, #888); }
-      .fish-bind-chevron { flex: 0 0 auto; transition: transform .12s ease; }
+      /* 与模型选择器同口径：称呼取 label-secondary（同模型名），QQ 取 label-caption
+         （同档位 High 与箭头），所以两者的明暗差和旁边那枚按钮完全一致。
+         具体号码只在 title 里给。 */
+      .fish-bind-name { color: var(--dsw-alias-label-secondary, inherit); }
+      .fish-bind-qq { color: var(--dsw-alias-label-caption, #888); }
+      .fish-bind-chevron { flex: 0 0 auto; color: var(--dsw-alias-label-caption, #888); transition: transform .12s ease; }
       .fish-bind[data-open="1"] .fish-bind-chevron { transform: rotate(180deg); }
       .fish-bind-menu {
         position: absolute;
@@ -1457,6 +1458,8 @@ window.__ModuleLoader__.load({
         cursor: pointer;
       }
       .fish-bind-item:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06)); }
+      /* 菜单项文字沿用菜单自己的 label-primary，只让「QQ」保持次要色。 */
+      .fish-bind-item .fish-bind-name { color: inherit; }
       .fish-bind-item[aria-selected="true"] { color: var(--dsw-alias-state-business-primary, #2f6fed); }
       .fish-bind-item-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       .fish-bind-check { flex: 0 0 auto; }

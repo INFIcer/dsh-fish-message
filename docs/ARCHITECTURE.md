@@ -759,8 +759,10 @@ props 带当前 `sessionId`，按会话显示和切换渠道；设置页的绑�
 | 写操作 | `POST /bindings/assign`，body `{ sessionId, qq }`；`qq` 为空串表示解除当前会话的绑定 |
 | 注册容错 | 槽位不存在或注册失败只少一个入口，设置页与收发照常 |
 
-按钮与菜单项只显示「称呼 QQ」：称呼用主文字色，QQ 用次要色（与模型选择器的名字/档位
-搭配一致）；完整 QQ 号放在选项的 `title` 悬停提示里，设置页的绑定表仍是「称呼：QQ-号」。
+按钮与菜单项只显示「称呼 QQ」：称呼用 `--dsw-alias-label-secondary`（与模型选择器的
+模型名同色），QQ 用 `--dsw-alias-label-caption`（与档位 High 和箭头同色），箭头也取 caption，
+因此明暗对比与旁边那枚模型选择器完全一致；完整 QQ 号放在选项的 `title` 悬停提示里，
+设置页的绑定表仍是「称呼：QQ-号」。
 
 接口语义（`lib/host.js`）：
 
