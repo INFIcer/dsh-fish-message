@@ -169,6 +169,9 @@ function makeBridge({ dir = tempDir(), config = {} } = {}) {
     bindings: [{ qq: QQ, session: session, name: '主人', enabled: true }],
     outboxTtlHours: 24,
     outboxDedupMinutes: 10,
+    // 测试不真等发送节奏。
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
     ...config,
   })
   const outbox = new Outbox({ homeDir: dir, getConfig: () => cfg, logger, store })

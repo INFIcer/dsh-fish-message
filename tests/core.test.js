@@ -155,6 +155,10 @@ function makeBridge({ dir = tempDir(), history = {}, config = {}, ai = null, for
     backfillWindowHours: 24,
     reorderBufferMs: 20,
     historyCount: 100,
+    // 这些用例盯的是队列/去重/补投本身：关掉编辑窗口与出站节奏，行为与旧版一致。
+    inboundEditWindowMs: 0,
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
     ...config,
   })
   const bridge = new Bridge({
@@ -178,6 +182,7 @@ function buildInboundBridge({ dir, service = null, voice, config = {} }) {
   const cfg = normalizeConfig({
     bindings: [{ qq: QQ, session: session, name: '主人', enabled: true }],
     reorderBufferMs: 0,
+    inboundEditWindowMs: 0,
     ...config,
   })
   return new Bridge({

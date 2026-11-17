@@ -25,6 +25,8 @@ function buildConfig() {
     reorderBufferMs: 0,
     maxImageMB: 10,
     maxVoiceMB: 20,
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
   }
 }
 

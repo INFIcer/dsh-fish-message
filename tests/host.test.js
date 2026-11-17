@@ -78,6 +78,10 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
     pollIntervalMs: 200,
     reorderBufferMs: 30,
     requestTimeoutMs: 3000,
+    // 宿主用例不真等发送节奏与编辑窗口。
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
+    inboundEditWindowMs: 0,
   })
   await wait(() => app.bridge.running, 2000)
 
@@ -255,6 +259,10 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
     pollIntervalMs: 200,
     reorderBufferMs: 30,
     requestTimeoutMs: 3000,
+    // 宿主用例不真等发送节奏与编辑窗口。
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
+    inboundEditWindowMs: 0,
   })
   await wait(() => app.bridge.running, 2000)
 

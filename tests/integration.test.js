@@ -44,6 +44,10 @@ function makeBridge({ dir, server, wsEnabled, autoTimers = false, historyCount =
     historyCount,
     requestTimeoutMs: 3000,
     backfillWindowHours: 24,
+    // 集成用例逐条断言投递与补发，关掉编辑窗口与出站节奏。
+    inboundEditWindowMs: 0,
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
   })
   store.setWatermark(QQ, { timestamp: 1, messageId: '' })
   const bridge = new Bridge({

@@ -1291,7 +1291,9 @@ window.__ModuleLoader__.load({
         row('优先实时接收', flag(config.wsEnabled, (v) => change('wsEnabled', v)),
           null,
           '开启后消息更及时；不可用时自动改为定时查询。'),
-        row('实时接收地址', input(config.wsUrl, (v) => change('wsUrl', v), '留空自动生成')))
+        row('实时接收地址', input(config.wsUrl, (v) => change('wsUrl', v), '留空自动生成（一般是 HTTP 地址）'),
+          null,
+          'QQ 服务的 WebSocket 服务端通常另开端口（例如 ws://127.0.0.1:3001）；要识别好友撤回，需要填这个地址并开启「优先实时接收」。'))
 
       const behaviorPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '消息处理'),
@@ -1301,7 +1303,15 @@ window.__ModuleLoader__.load({
         pauseForward ? h('div', { style: { ...S.hint, marginBottom: 6 } }, `待转发 ${forward.pending || 0} 条`) : null,
         row('仅发送 [QQ] 标记内的内容', flag(config.onlyInsideMarkers, (v) => change('onlyInsideMarkers', v)),
           null,
-          '开启时只发标记内的部分；关闭时整条发送，标记会被去掉。'))
+          '开启时只发标记内的部分；关闭时整条发送，标记会被去掉。'),
+        row('发送间隔（毫秒）', h('input', {
+          style: S.small, type: 'number', min: 0, max: 60000, value: config.outboxPerMessageDelayMs ?? 2000,
+          onChange: (e) => change('outboxPerMessageDelayMs', Number(e.target.value)),
+        }), '每条消息发出前固定等这么久，避免一下子刷屏；0 表示立即发送。'),
+        row('按字数追加间隔（毫秒）', h('input', {
+          style: S.small, type: 'number', min: 0, max: 5000, value: config.outboxPerCharDelayMs ?? 100,
+          onChange: (e) => change('outboxPerCharDelayMs', Number(e.target.value)),
+        }), '在固定间隔之上按字数再加：中文每字算 1，英文一个单词算 1，标点、空格算 0.2，图片、文件和语音文件不算字。'))
 
       // 默认文案都由宿主 /state 下发，前端不另写一份（原文只在 lib/config.js 一处）。
       const defaultImagePrompt = String((state.defaults && state.defaults.inboundImagePrompt) || '')
@@ -1509,6 +1519,10 @@ window.__ModuleLoader__.load({
           style: S.small, type: 'number', min: 0, max: 5000, value: config.reorderBufferMs ?? 1500,
           onChange: (e) => change('reorderBufferMs', Number(e.target.value)),
         }), '收到消息后先等这么久再按时间排序，避免先后颠倒。'),
+        row('编辑窗口（秒）', h('input', {
+          style: S.small, type: 'number', min: 0, max: 120, value: Math.round((config.inboundEditWindowMs ?? 15000) / 1000),
+          onChange: (e) => change('inboundEditWindowMs', Math.round(Number(e.target.value) * 1000)),
+        }), '这段时间里只要还有新消息就继续等，静默到点才把这一批合并成一条递进会话；期间撤回的消息不会送进会话。0 表示不合并、逐条递进。'),
         row('每次读取条数', h('input', {
           style: S.small, type: 'number', min: 10, max: 500, value: config.historyCount ?? 100,
           onChange: (e) => change('historyCount', Number(e.target.value)),

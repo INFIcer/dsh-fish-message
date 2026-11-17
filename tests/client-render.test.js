@@ -266,6 +266,9 @@ function fullState() {
       pollIntervalMs: 2000,
       historyIntervalMs: 60000,
       reorderBufferMs: 1500,
+      inboundEditWindowMs: 15000,
+      outboxPerMessageDelayMs: 2000,
+      outboxPerCharDelayMs: 100,
       historyCount: 100,
       maxImageMB: 10,
       maxVoiceMB: 20,
@@ -439,6 +442,10 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.match(plainText, /记忆服务：未检测到（需要安装并启用记忆插件）/)
   assert.match(plainText, /本地 AI：可用/)
   assert.match(plainText, /收图先查图库/)
+  // 入站编辑窗口与出站节奏两个新设置项要渲染出来。
+  assert.match(plainText, /编辑窗口（秒）/)
+  assert.match(plainText, /发送间隔（毫秒）/)
+  assert.match(plainText, /按字数追加间隔（毫秒）/)
 
   // 老版本 /state 没有 memory 字段：状态行退回 ai.online，不炸。
   const noMemory = fullState()

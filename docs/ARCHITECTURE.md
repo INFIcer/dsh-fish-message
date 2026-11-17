@@ -15,12 +15,12 @@ Transport 适配器（v1：napcat-onebot）
    │  start / stop / sendMessage / onEvent / fetchHistory
    ▼
 Bridge（lib/bridge.js）
-   ├─ 入站：过滤私聊 → 乱序缓冲 → 去重 → 水位 → 补投
+   ├─ 入站：过滤私聊 → 编辑窗口（合并批次 / 撤回）→ 去重 → 水位 → 补投
    ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（可选附情感/背景音/转写）
    ├─ 图片：image → inbox → 图库（按 sha256 命中描述就不附原图）→ 本地识图 / DSH 附件
    ├─ 记忆扩展：图片/语音 → memory.library 只读比对 → 正文附「记忆：…」（可选，默认关）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
-   ├─ 出站：session/event → [QQ] 解析 → 发送锁 → text / image / record / file
+   ├─ 出站：session/event → [QQ] 解析 → 发送锁 → 节奏等待 → text / image / record / file
    │    └─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
    └─ 可选能力：AiService → fish.service（TTS / ASR / 识图；没有就降级）
    │
@@ -60,11 +60,12 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 | 模块 | 职责 | 不做什么 |
 |---|---|---|
 | `lib/host.js` | DSH 生命周期、路由、session/event 监听、组装 | 不实现消息算法 |
-| `lib/bridge.js` | 队列、去重、水位、补投、出站解析调度 | 不直接碰 DSH API（通过 delivery） |
+| `lib/bridge.js` | 队列、编辑窗口、合并投递、撤回、去重、水位、补投、出站解析调度 | 不直接碰 DSH API（通过 delivery） |
 | `lib/transport/base.js` | 适配器接口定义 | 不实现协议 |
 | `lib/transport/napcat-onebot.js` | OneBot HTTP/WS、断线重连、历史 | 不做业务去重 |
 | `lib/format.js` | `[QQ]` 块、转义、显式指令 | 不发送 |
-| `lib/queue.js` | 每个聊天的乱序缓冲 | 不做持久化 |
+| `lib/queue.js` | 每个聊天的入站缓冲：乱序排序、编辑窗口、按 id 撤回删除 | 不做持久化，不合并正文 |
+| `lib/pacing.js` | 出站节奏：字数口径、等待时长、可注入的 sleep/now | 不发消息、不改顺序、不读网络 |
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
 | `lib/voice.js` | 入站语音 get_record / 落盘 / 读时长；图片落盘 | 不做 ASR / TTS / 转码 |
 | `lib/ai.js` | 可选本地 AI 门面：能力探测、参数校验、错误转人话 | 不实现 AI，不直连服务端口 |
@@ -88,6 +89,7 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 ### 3.1 事件来源
 
 - **WebSocket**：NapCat 推 `post_type=message`、`message_type=private`；
+  同一条连接也推 `post_type=notice`（好友撤回 `friend_recall`，见 3.3.1）；
 - **HTTP 轮询**：WS 不可用时，Bridge 每 `pollIntervalMs` 调 `fetchHistory`；
 - **定时补投**：即使 WS 连着，每 `historyIntervalMs` 也拉一次历史；
 - **WS 重连后**：立即补一次历史。
@@ -100,13 +102,59 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 - `user_id === 绑定 QQ`（过滤自己发出去的消息、过滤别人）；
 - 有 `message_id`。
 
-### 3.3 队列与排序
+### 3.3 队列、编辑窗口与合并投递
 
-`MessageQueue` 按聊天分组，收到消息后等 `reorderBufferMs`（默认 1.5 秒），
-然后按 `time → message_seq → message_id` 升序处理。最长等待 `maxWaitMs` 防止
-有人一直发导致永远不 flush。
+`MessageQueue` 按聊天分组，收到消息后先暂存、按 `time → message_seq → message_id`
+升序排好，等**最后一条消息的编辑窗口**过去后再交给上层。
+
+编辑窗口（`inboundEditWindowMs`，默认 15000 毫秒，范围 0~120000；0 = 关闭）：
+
+- **静默期的计时基准是消息自带的发送时间戳**（OneBot 的 `time`，秒），不是「拉到这
+  条消息的时刻」。离线补拉的历史可能已经很旧：按拉到时刻算，会把早该过期的消息当成
+  新消息压住窗口；按发送时间算，窗口已经过期的旧消息会立刻投递。
+- 每来一条新消息，静默期从「这一条的发送时间」重新往后算；乱序到达的旧消息不会把
+  窗口往回拉（基准只往前走）。时间戳缺失（0）时才退回到达时刻。
+- 窗口开着时**没有最长等待上限**：旧的 `maxWaitMs`（6 秒）会把 15 秒窗口截断。
+- 窗口关掉（0）时完全退回旧行为：等 `reorderBufferMs`（默认 1.5 秒）后投，并保留
+  `maxWaitMs`（默认 6 秒）防止有人一直发导致永远不 flush。
+
+窗口到点后，这一批消息再按**消息时间**切成若干组：相邻两条时间差 `< 窗口` 同组，
+`>= 窗口` 另起一组；每组合并成**一条**递进 DSH：
+
+```text
+A(10:00:00) → 撤回 A                  → 队列空，窗口到期什么也不投
+A(10:00:00) → B(10:00:01) → 撤回 A    → 只投 B
+
+离线 → 发 A、B（同一分钟）→ 发 C（十分钟后）→ 上线
+  → 历史里 A 已被撤回、不存在；B 与 C 的时间差 >= 窗口 → 分两批投
+  → 「B 的正文」「C 的正文」各一条，不丢消息
+```
+
+合并口径：
+
+- 正文按时间顺序用换行 `\n` 拼接（空正文不占行）；图片按顺序汇总进同一条消息的附件；
+- 合并只发生在「投递」这一层：每条消息的 `seen`、水位、统计（received/delivered）、
+  `recordEvent` 仍逐条处理；
+- 合并批次 `meta.messageId` 取**最后一条**（也是水位停在那一条），文档与测试都按这个口径；
+- 暂停转发时**按条**存进待转发队列（待转发队列按条限 4 张图，合并会把多图批次截掉），
+  恢复后逐条补投。
+
+投递失败时整组（连同后面还没投的组）重新入队，下一轮重试；重排队时至少再等一个
+窗口（`notBefore`），否则按旧发送时间算早已过期，会立刻重试、空转。
 
 同一 `message_id` 在队列里只留一份；已处理的 id 进入持久化 `seen` 集合。
+
+#### 3.3.1 撤回（仅 WebSocket 可见）
+
+- 事件：`post_type="notice"`、`notice_type="friend_recall"`；`user_id` 是对方 QQ，
+  `message_id` 是被撤回的那条，载荷里没有正文；
+- 只处理已绑定 peer；`group_recall` 等其它撤回本期不处理（v1 只有私聊）；
+- 还在队列里（编辑窗口内）→ 直接从待投队列删掉；删空就清定时器、不产生空批次；
+- 已经在投递中或已投递 → 撤不回来，只记日志；
+- 被撤回的消息从未投递，所以不进 `seen`、不推进水位；
+- **HTTP 历史接口拿不到撤回通知**（被撤回的消息直接从历史里消失），所以撤回识别
+  必须开 WebSocket；NapCat 侧要开「WS 正向服务器」（见 5）。WS 连不上时编辑窗口
+  逻辑照常按轮询数据工作，只是识别不了撤回。
 
 ### 3.4 去重与水位
 
@@ -139,7 +187,8 @@ dsh-fish-service（可选） ── fish.service.tts / asr / visionDescribe
 2. 第一次运行没有水位：设成「插件启动时间 - 60 秒」，避免灌几年历史；
 3. 每次同步拉历史；如果整页都比水位新，用最早一条的 `message_id` 继续向前翻页（最多 10 页），
    避免离线消息超过一页时漏掉；
-4. 在 `backfillWindowHours` 内的逐条投；
+4. 在 `backfillWindowHours` 内的走入站队列：按消息时间戳判断编辑窗口，早已过期的
+   立刻投；一次补多批时按「相邻时间差 >= 编辑窗口」分组，各组合并成一条投（见 3.3）；
 5. 超过窗口的只投一条摘要，包含条数、最早/最近时间；
 6. 摘要投失败只记日志（这些消息已经太旧，不阻塞新消息）。
 
@@ -311,6 +360,16 @@ extractOutbound(text, onlyInsideMarkers)
 
 语音发送按「本地路径 → `file:///` → `base64://`」重试，最多 3 次。
 
+**发送节奏**（`outboxPerMessageDelayMs` 默认 2000、`outboxPerCharDelayMs` 默认 100）：
+每个 QQ 消息段（= 一个聊天气泡）发送前等「固定延迟 + 字数 × 逐字延迟」。
+
+- 字数口径在 `lib/pacing.js`：中文/日文/韩文每字 1；英文等拼音文字连续一串算 1 个词；
+  连续数字串算 1；标点、空格、符号、emoji 各 0.2；图片、文件、语音文件段算 0；
+  语音文本（`record_text`）按文本算。字数按「十分之一个字」整数累计，避免浮点尾巴。
+- 等待发生在发送串行锁里（`Bridge.dispatch`）：顺序不变，也不阻塞收消息；
+  正常回复、补发、语音、图片都走这里，节奏一致。
+- 两个设置都给 0 就完全不等；`sleep` / `now` 可注入，测试不会真等。
+
 **任何 token 最终发送失败都不再丢弃**：`Bridge.sendOneItem` 把内部消息段写进持久化出站队列，
 同一轮后续 token 也按顺序入队（避免后发先至），并记日志/事件。
 只有「发送失败 **且** 队列写盘也失败」才会在会话里投错误提示（同一会话 60 秒最多一次）。
@@ -390,10 +449,16 @@ StickerStore（index.json + 文件）
 
 ### WebSocket
 
-- 启动时若 `wsEnabled`，连 `wsUrl`（默认从 HTTP 地址推导）；
-- 断开后指数退避：1s → 2s → 4s … 最多 30s，加 0–500ms 抖动；
-- 连上后立即 `sync('ws-connected')`；
-- WS 连接期间也会每 `historyIntervalMs` 拉一次历史兜底。
+- 启动时若 `wsEnabled`，连 `wsUrl`（留空时从 HTTP 地址推导）。NapCat 的「WS 正向
+  服务器」通常和 HTTP 端口分开（例如 HTTP `127.0.0.1:3000`、WS 正向服务器
+  `127.0.0.1:3001`），这时要把「实时接收地址」显式填成 `ws://127.0.0.1:3001`；
+- WS 只用来**消费事件**：`post_type=message` 与 notice 里的撤回；发消息、拉历史
+  等 API 调用仍走 HTTP，HTTP 轮询保持原样；
+- 断开后指数退避：1s → 2s → 4s … 最多 30s，加 0–500ms 抖动，连上后立即
+  `sync('ws-connected')`；
+- WS 连接期间也会每 `historyIntervalMs` 拉一次历史兜底；WS 事件与历史补投可能拿到
+  同一条消息，按 `message_id` 去重（`seen` + 队列内去重 + 处理中集合），不会重复投递；
+- 撤回识别依赖 WS：`wsEnabled=false` 时编辑窗口照常工作，只是识别不了撤回。
 
 ### HTTP 轮询
 
