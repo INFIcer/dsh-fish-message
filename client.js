@@ -1350,14 +1350,13 @@ window.__ModuleLoader__.load({
           type: 'button',
           className: 'fish-bind-trigger',
           title: `收发渠道：${currentLabel}。同一个渠道只能绑定一个会话。`,
-          'aria-label': '收发渠道',
+          'aria-label': `收发渠道：${currentLabel}`,
           'aria-haspopup': 'listbox',
           'aria-expanded': open ? 'true' : 'false',
           disabled: busy,
           onClick: toggle,
           onKeyDown: onTriggerKeyDown,
         },
-          h('span', { className: 'fish-bind-title' }, '收发渠道'),
           h('span', { className: 'fish-bind-current' },
             current
               ? [h('span', { className: 'fish-bind-name' }, current.name), ' ', h('span', { className: 'fish-bind-qq' }, 'QQ')]
@@ -1421,7 +1420,6 @@ window.__ModuleLoader__.load({
         color: var(--dsw-alias-label-primary, inherit);
       }
       .fish-bind-trigger[disabled] { opacity: .55; cursor: default; }
-      .fish-bind-title { flex: 0 0 auto; opacity: .62; }
       .fish-bind-current { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       /* 称呼亮、QQ 暗：与模型选择器的「名字 + 档位」搭配一致，具体号码只在 title 里给。 */
       .fish-bind-name { color: var(--dsw-alias-label-primary, inherit); }

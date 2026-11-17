@@ -560,7 +560,7 @@ function visibleText(node, result = []) {
   return result
 }
 
-/** 按钮上可见的文字：「收发渠道」+ 当前选中项。 */
+/** 按钮上可见的文字：当前选中项（称呼 + QQ），没有静态标题。 */
 function channelTriggerText(tree) {
   const trigger = channelTrigger(tree)
   if (!trigger) return ''
@@ -648,9 +648,8 @@ test('渠道按钮：胶囊显示当前会话绑定的渠道，只列启用的�
     const trigger = channelTrigger(tree)
     assert.ok(trigger, '有会话时要渲染胶囊按钮')
     const shown = channelTriggerText(tree)
-    assert.match(shown, /收发渠道/)
-    assert.doesNotMatch(shown, /QQ 收发渠道/, '可见标题不带 QQ')
-    assert.match(shown, /主人 QQ/, '按钮上显示当前绑定的渠道（称呼 + QQ，不带号码）')
+    assert.doesNotMatch(shown, /收发渠道/, '按钮上不再有「收发渠道」静态标题')
+    assert.equal(shown, '主人 QQ', '按钮上只显示当前绑定的渠道（称呼 + QQ，不带号码）')
     assert.doesNotMatch(shown, /10001/, '胶囊上不显示完整 QQ 号')
     const currentName = findAll(trigger, (node) => node.props && node.props.className === 'fish-bind-name')
       .map((node) => collectText(node.children).join(''))
@@ -658,7 +657,7 @@ test('渠道按钮：胶囊显示当前会话绑定的渠道，只列启用的�
       .map((node) => collectText(node.children).join(''))
     assert.deepEqual(currentName, ['主人'], '称呼用亮色（fish-bind-name）')
     assert.deepEqual(currentQq, ['QQ'], 'QQ 用次要色（fish-bind-qq）')
-    assert.equal(trigger.props['aria-label'], '收发渠道')
+    assert.equal(trigger.props['aria-label'], '收发渠道：主人 QQ')
     assert.equal(trigger.props['aria-haspopup'], 'listbox')
     assert.equal(trigger.props['aria-expanded'], 'false')
     assert.equal(channelMenu(tree), undefined, '默认不展开菜单')
