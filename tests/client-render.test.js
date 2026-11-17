@@ -470,7 +470,7 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.doesNotThrow(() => env.renderSection([emptyCopy]))
 })
 
-test('注册：设置分区 + 会话输入框渠道下拉，不再有主面板与侧边栏入口', async () => {
+test('注册：设置分区 + 会话输入框渠道按钮，不再有主面板与侧边栏入口', async () => {
   const env = await setupPlugin()
   assert.deepEqual(env.module.inject, ['slots'])
 
@@ -488,7 +488,7 @@ test('注册：设置分区 + 会话输入框渠道下拉，不再有主面板�
   assert.equal(inputLeft[0].mod.id, 'fish-bind')
   assert.equal(inputLeft[0].mod.order, 46)
   assert.equal(typeof inputLeft[0].mod.label, 'function')
-  assert.equal(inputLeft[0].mod.label(), 'QQ 收发渠道')
+  assert.equal(inputLeft[0].mod.label(), '收发渠道')
   assert.equal(typeof inputLeft[0].component, 'function')
 
   assert.equal(env.bySlot.get('main'), undefined, '不应再注册 main 主面板')
@@ -500,19 +500,22 @@ test('注册：设置分区 + 会话输入框渠道下拉，不再有主面板�
   assert.deepEqual(pkg.dsh.client.inject, ['slots'])
 })
 
-/** 输入框旁渠道下拉的假 fetch：只回 /state 与 /bindings/assign。 */
+/** 输入框旁渠道按钮的假 fetch：只回 /state 与 /bindings/assign；成功的绑定会更新后续 /state。 */
 function stubBindFetch({ bindings = [], onAssign } = {}) {
   const calls = []
   const original = globalThis.fetch
+  let state = bindings
   globalThis.fetch = async (url, options = {}) => {
     const address = String(url)
     calls.push({ url: address, options: options })
     if (address.endsWith('/state')) {
-      return { json: async () => ({ ok: true, bindings: bindings, sessions: [] }) }
+      return { json: async () => ({ ok: true, bindings: state, sessions: [] }) }
     }
     if (address.endsWith('/bindings/assign')) {
       const body = JSON.parse(options.body || '{}')
-      return { json: async () => (onAssign ? onAssign(body) : { ok: true, bindings: bindings }) }
+      const result = onAssign ? await onAssign(body) : { ok: true, bindings: state }
+      if (result && result.ok && Array.isArray(result.bindings)) state = result.bindings
+      return { json: async () => result }
     }
     return { json: async () => ({ ok: false, error: 'unexpected' }) }
   }
@@ -524,9 +527,35 @@ function stubBindFetch({ bindings = [], onAssign } = {}) {
 
 const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-/** 下拉是当前唯一一个 select。 */
-function channelSelect(tree) {
-  return findAll(tree, (node) => node.type === 'select')[0]
+/** 渠道胶囊按钮（输入框旁唯一带 fish-bind-trigger 的按钮）。 */
+function channelTrigger(tree) {
+  return findAll(tree, (node) => node.type === 'button' && node.props && node.props.className === 'fish-bind-trigger')[0]
+}
+
+/** 向上弹出的菜单；关着时为 undefined。 */
+function channelMenu(tree) {
+  return findAll(tree, (node) => node.props && node.props.role === 'listbox')[0]
+}
+
+/** 菜单里的选项（按渲染顺序：不绑定在最前）。 */
+function channelOptions(tree) {
+  const menu = channelMenu(tree)
+  return menu ? findAll(menu, (node) => node.props && node.props.role === 'option') : []
+}
+
+/** 按钮上可见的文字：「收发渠道」+ 当前选中项。 */
+function channelTriggerText(tree) {
+  const trigger = channelTrigger(tree)
+  if (!trigger) return ''
+  return findAll(trigger, (node) => node.type === 'span' && /fish-bind-(title|current)/.test(String((node.props || {}).className || '')))
+    .map((node) => collectText(node.children).join(''))
+    .join(' ')
+}
+
+/** 选项的可见文字（不看 aria/title 这类属性）。 */
+function channelOptionLabel(node) {
+  const text = findAll(node, (child) => child.props && child.props.className === 'fish-bind-item-text')[0]
+  return text ? collectText(text.children).join('') : ''
 }
 
 /** 挂上组件并等 /state 回来，返回渲染结果。 */
@@ -538,14 +567,58 @@ async function mountBindChannel(env, props) {
   return env.flush()
 }
 
-test('渠道下拉：没有会话上下文时返回 null，不渲染', async () => {
+/** 点触发按钮打开菜单，并等打开时那次 /state 校准回来。 */
+async function openChannelMenu(env) {
+  channelTrigger(env.flush()).props.onClick({})
+  env.flush()
+  await nextTick()
+  return env.flush()
+}
+
+/** 点菜单里可见文字等于 label 的那一项。 */
+function pickChannel(tree, label) {
+  const option = channelOptions(tree).find((node) => channelOptionLabel(node) === label)
+  assert.ok(option, '菜单里应该有「' + label + '」')
+  option.props.onClick({})
+}
+
+/** 最小 document 假体：只记录全局监听，用来验证点外部关闭与收起/卸载时解绑。 */
+function stubDocument() {
+  const listeners = new Map()
+  const original = globalThis.document
+  const add = (type, fn) => {
+    const list = listeners.get(type) || []
+    list.push(fn)
+    listeners.set(type, list)
+  }
+  globalThis.document = {
+    addEventListener(type, fn) { add(type, fn) },
+    removeEventListener(type, fn) {
+      const list = listeners.get(type) || []
+      const at = list.indexOf(fn)
+      if (at >= 0) list.splice(at, 1)
+    },
+  }
+  return {
+    fire(type, event) {
+      for (const fn of [...(listeners.get(type) || [])]) fn(event)
+    },
+    count(type) { return (listeners.get(type) || []).length },
+    restore() {
+      if (original === undefined) delete globalThis.document
+      else globalThis.document = original
+    },
+  }
+}
+
+test('渠道按钮：没有会话上下文时返回 null，不渲染', async () => {
   const env = await setupPlugin()
   assert.equal(typeof env.module.__test.BindChannel, 'function')
   assert.equal(env.renderComponent(env.module.__test.BindChannel, {}), null)
   assert.equal(env.renderComponent(env.module.__test.BindChannel, { sessionId: '' }), null)
 })
 
-test('渠道下拉：选中当前会话绑定的渠道，只列启用的渠道，已绑定的禁用渠道仍可见', async () => {
+test('渠道按钮：胶囊显示当前会话绑定的渠道，只列启用的渠道，已绑定的禁用渠道仍可见', async () => {
   const env = await setupPlugin()
   const bindings = [
     { qq: '10001', session: 'session-test-0001', name: '主人', enabled: false },
@@ -554,22 +627,116 @@ test('渠道下拉：选中当前会话绑定的渠道，只列启用的渠道�
   ]
   const stub = stubBindFetch({ bindings })
   try {
-    const tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
-    const select = channelSelect(tree)
-    assert.ok(select, '有会话时要渲染下拉')
-    assert.equal(select.props.value, '10001', '当前会话绑定的渠道要被选中')
-    const labels = findAll(select, (node) => node.type === 'option')
-      .map((node) => collectText(node.children).join(''))
-    assert.deepEqual(labels, ['不绑定', '主人：QQ-10001', '小号：QQ-10002'])
-    const states = stub.calls.filter((call) => call.url.endsWith('/state'))
-    assert.equal(states.length, 1, '挂载时只拉一次状态，不做轮询')
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    const trigger = channelTrigger(tree)
+    assert.ok(trigger, '有会话时要渲染胶囊按钮')
+    const shown = channelTriggerText(tree)
+    assert.match(shown, /收发渠道/)
+    assert.doesNotMatch(shown, /QQ 收发渠道/, '可见标题不带 QQ')
+    assert.match(shown, /主人：QQ-10001/, '按钮上显示当前绑定的渠道')
+    assert.equal(trigger.props['aria-label'], '收发渠道')
+    assert.equal(trigger.props['aria-haspopup'], 'listbox')
+    assert.equal(trigger.props['aria-expanded'], 'false')
+    assert.equal(channelMenu(tree), undefined, '默认不展开菜单')
+    assert.equal(stub.calls.filter((call) => call.url.endsWith('/state')).length, 1, '挂载时只拉一次状态，不做轮询')
+
+    tree = await openChannelMenu(env)
+    assert.equal(channelTrigger(tree).props['aria-expanded'], 'true', '展开后 aria-expanded 同步')
+    const menu = channelMenu(tree)
+    assert.ok(menu, '点按钮要展开菜单')
+    assert.equal(menu.props['aria-label'], '收发渠道')
+    const options = channelOptions(tree)
+    assert.deepEqual(options.map(channelOptionLabel), ['不绑定', '主人：QQ-10001', '小号：QQ-10002'])
+    // 选项文字保持「称呼：QQ-号」，与设置页一致。
+    assert.deepEqual(options.map((node) => node.props['aria-selected']), ['false', 'true', 'false'])
+    assert.equal(findAll(options[1], (node) => node.type === 'svg' && node.props.className === 'fish-bind-check').length, 1, '选中项右侧有对勾')
+    assert.equal(findAll(options[0], (node) => node.props.className === 'fish-bind-check').length, 0)
+    assert.equal(stub.calls.filter((call) => call.url.endsWith('/state')).length, 2, '打开菜单时再校准一次，不多拉')
   } finally {
     env.mount(() => null)
     stub.restore()
   }
 })
 
-test('渠道下拉：切换渠道提交 /bindings/assign，参数是会话 id 与目标 qq', async () => {
+test('渠道按钮：点外部、按 Esc 都能关闭菜单，收起后解绑全局监听', async () => {
+  const env = await setupPlugin()
+  const doc = stubDocument()
+  const stub = stubBindFetch({ bindings: [{ qq: '10001', session: 'session-test-0001', name: '主人', enabled: true }] })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    tree = await openChannelMenu(env)
+    assert.ok(channelMenu(tree))
+    assert.equal(doc.count('pointerdown'), 1, '展开时挂一份点外部的监听')
+    assert.equal(doc.count('mousedown'), 1)
+    assert.equal(doc.count('keydown'), 1)
+
+    // 点在组件外面：菜单关闭，监听一并解绑。
+    doc.fire('pointerdown', { target: { tagName: 'BODY' } })
+    tree = env.flush()
+    assert.equal(channelMenu(tree), undefined, '点外部要收起菜单')
+    assert.equal(channelTrigger(tree).props['aria-expanded'], 'false')
+    assert.equal(doc.count('pointerdown'), 0)
+    assert.equal(doc.count('keydown'), 0)
+
+    // Esc 同理：菜单开着时只关菜单，不再传给宿主输入框。
+    tree = await openChannelMenu(env)
+    assert.ok(channelMenu(tree))
+    let prevented = 0
+    doc.fire('keydown', { key: 'Escape', preventDefault() { prevented += 1 }, stopPropagation() {} })
+    tree = env.flush()
+    assert.equal(channelMenu(tree), undefined, 'Esc 要收起菜单')
+    assert.equal(prevented, 1)
+    assert.equal(doc.count('pointerdown'), 0)
+
+    // 展开状态下直接卸载：不能留下监听。
+    tree = await openChannelMenu(env)
+    assert.equal(doc.count('pointerdown'), 1)
+    env.mount(() => null)
+    assert.equal(doc.count('pointerdown'), 0, '卸载时解绑全局监听')
+    assert.equal(doc.count('keydown'), 0)
+  } finally {
+    env.mount(() => null)
+    doc.restore()
+    stub.restore()
+  }
+})
+
+test('渠道按钮：键盘 Enter / 空格打开菜单，其它按键不理会', async () => {
+  const env = await setupPlugin()
+  const stub = stubBindFetch({ bindings: [{ qq: '10001', session: 'session-test-0001', name: '主人', enabled: true }] })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    let prevented = 0
+    channelTrigger(tree).props.onKeyDown({ key: 'Enter', preventDefault() { prevented += 1 } })
+    tree = env.flush()
+    await nextTick()
+    tree = env.flush()
+    assert.ok(channelMenu(tree), 'Enter 要展开菜单')
+    assert.equal(prevented, 1, '挡掉按钮自己的默认激活，避免连开带关')
+
+    // 再点一次按钮收起；空格同样能打开。
+    channelTrigger(tree).props.onClick({})
+    tree = env.flush()
+    assert.equal(channelMenu(tree), undefined)
+    channelTrigger(tree).props.onKeyDown({ key: ' ', preventDefault() {} })
+    tree = env.flush()
+    await nextTick()
+    tree = env.flush()
+    assert.ok(channelMenu(tree), '空格要展开菜单')
+
+    // 普通按键不改变开合状态。
+    channelTrigger(tree).props.onClick({})
+    tree = env.flush()
+    channelTrigger(tree).props.onKeyDown({ key: 'a' })
+    tree = env.flush()
+    assert.equal(channelMenu(tree), undefined)
+  } finally {
+    env.mount(() => null)
+    stub.restore()
+  }
+})
+
+test('渠道按钮：点菜单项提交 /bindings/assign，菜单关闭并按返回状态校准', async () => {
   const env = await setupPlugin()
   const before = [
     { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
@@ -582,42 +749,51 @@ test('渠道下拉：切换渠道提交 /bindings/assign，参数是会话 id �
   const stub = stubBindFetch({ bindings: before, onAssign: () => ({ ok: true, bindings: after }) })
   try {
     let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
-    await channelSelect(tree).props.onChange({ target: { value: '10002' } })
+    tree = await openChannelMenu(env)
+    pickChannel(tree, '小号：QQ-10002')
+    tree = env.flush()
+    assert.equal(channelMenu(tree), undefined, '选中后菜单立即关闭')
+    await nextTick()
     tree = env.flush()
 
     const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
     assert.ok(call, '切换渠道要提交 /bindings/assign')
     assert.equal(call.options.method, 'POST')
     assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', qq: '10002' })
-    assert.equal(channelSelect(tree).props.value, '10002', '成功后按返回的状态校准选中项')
+    assert.match(channelTriggerText(tree), /小号：QQ-10002/, '成功后按返回的状态校准选中项')
   } finally {
     env.mount(() => null)
     stub.restore()
   }
 })
 
-test('渠道下拉：选「不绑定」提交空 qq，只解绑不删渠道', async () => {
+test('渠道按钮：选「不绑定」提交空 qq，只解绑不删渠道', async () => {
   const env = await setupPlugin()
   const before = [{ qq: '10001', session: 'session-test-0001', name: '主人', enabled: true }]
   const after = [{ qq: '10001', session: '', name: '主人', enabled: true }]
   const stub = stubBindFetch({ bindings: before, onAssign: () => ({ ok: true, bindings: after }) })
   try {
     let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
-    await channelSelect(tree).props.onChange({ target: { value: '' } })
+    tree = await openChannelMenu(env)
+    pickChannel(tree, '不绑定')
+    await nextTick()
     tree = env.flush()
 
     const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
     assert.ok(call)
     assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', qq: '' })
-    assert.equal(channelSelect(tree).props.value, '', '解绑后回落到「不绑定」')
-    assert.match(textOf(channelSelect(tree)), /主人：QQ-10001/, '渠道仍留在选项里')
+    assert.match(channelTriggerText(tree), /不绑定/, '解绑后回落到「不绑定」')
+    // 菜单里渠道仍在，只是回到未绑定。
+    tree = await openChannelMenu(env)
+    assert.deepEqual(channelOptions(tree).map(channelOptionLabel), ['不绑定', '主人：QQ-10001'])
+    assert.equal(channelOptions(tree)[0].props['aria-selected'], 'true')
   } finally {
     env.mount(() => null)
     stub.restore()
   }
 })
 
-test('渠道下拉：请求失败时退回原选中并提示原因，下拉不消失', async () => {
+test('渠道按钮：请求失败时退回原选中并提示原因，按钮不消失', async () => {
   const env = await setupPlugin()
   const bindings = [
     { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
@@ -629,19 +805,24 @@ test('渠道下拉：请求失败时退回原选中并提示原因，下拉不�
   })
   try {
     let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
-    await channelSelect(tree).props.onChange({ target: { value: '10002' } })
+    tree = await openChannelMenu(env)
+    pickChannel(tree, '小号：QQ-10002')
+    await nextTick()
     tree = env.flush()
 
-    const select = channelSelect(tree)
-    assert.ok(select, '失败后下拉不能消失')
-    assert.equal(select.props.value, '10001', '失败要退回原选中')
+    assert.ok(channelTrigger(tree), '失败后按钮不能消失')
+    assert.match(channelTriggerText(tree), /主人：QQ-10001/, '失败要退回原选中')
+    assert.equal(channelMenu(tree), undefined, '失败后菜单已收起，原因写在旁边')
     assert.match(textOf(tree), /没有 QQ 10002 的收发渠道，请先在设置页添加。/)
+    assert.equal(findAll(tree, (node) => node.props && node.props.role === 'status').length, 1, '错误用 status 播报')
 
     // 连不上宿主时给一句人话，不把网络报错直接甩给用户。
     globalThis.fetch = async () => { throw new Error('Failed to fetch') }
-    await select.props.onChange({ target: { value: '10002' } })
+    tree = await openChannelMenu(env)
+    pickChannel(tree, '小号：QQ-10002')
+    await nextTick()
     tree = env.flush()
-    assert.equal(channelSelect(tree).props.value, '10001')
+    assert.match(channelTriggerText(tree), /主人：QQ-10001/)
     assert.match(textOf(tree), /没能切换收发渠道，请稍后重试。/)
     assert.doesNotMatch(textOf(tree), /Failed to fetch/)
   } finally {
@@ -650,7 +831,38 @@ test('渠道下拉：请求失败时退回原选中并提示原因，下拉不�
   }
 })
 
-test('渠道下拉：同一实例切换会话后按新会话刷新选中', async () => {
+test('渠道按钮：提交期间禁用，完成后恢复', async () => {
+  const env = await setupPlugin()
+  const before = [
+    { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
+    { qq: '10002', session: '', name: '小号', enabled: true },
+  ]
+  const after = [
+    { qq: '10001', session: '', name: '主人', enabled: true },
+    { qq: '10002', session: 'session-test-0001', name: '小号', enabled: true },
+  ]
+  let release = null
+  const gate = new Promise((resolve) => { release = resolve })
+  const stub = stubBindFetch({ bindings: before, onAssign: () => gate.then(() => ({ ok: true, bindings: after })) })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    tree = await openChannelMenu(env)
+    pickChannel(tree, '小号：QQ-10002')
+    tree = env.flush()
+    assert.equal(channelTrigger(tree).props.disabled, true, '请求在跑时禁用按钮')
+
+    release()
+    await nextTick()
+    tree = env.flush()
+    assert.equal(channelTrigger(tree).props.disabled, false)
+    assert.match(channelTriggerText(tree), /小号：QQ-10002/)
+  } finally {
+    env.mount(() => null)
+    stub.restore()
+  }
+})
+
+test('渠道按钮：同一实例切换会话后按新会话刷新选中', async () => {
   const env = await setupPlugin()
   const bindings = [
     { qq: '10001', session: 'session-a', name: '主人', enabled: true },
@@ -659,12 +871,12 @@ test('渠道下拉：同一实例切换会话后按新会话刷新选中', async
   const stub = stubBindFetch({ bindings })
   try {
     let tree = await mountBindChannel(env, { sessionId: 'session-a' })
-    assert.equal(channelSelect(tree).props.value, '10001')
+    assert.match(channelTriggerText(tree), /主人：QQ-10001/)
 
     tree = env.setProps({ sessionId: 'session-b' })
     await nextTick()
     tree = env.flush()
-    assert.equal(channelSelect(tree).props.value, '10002', '会话变了要按新会话的绑定显示')
+    assert.match(channelTriggerText(tree), /小号：QQ-10002/, '会话变了要按新会话的绑定显示')
     assert.equal(stub.calls.filter((call) => call.url.endsWith('/state')).length, 2, '会话变化要重新拉一次状态')
   } finally {
     env.mount(() => null)

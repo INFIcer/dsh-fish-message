@@ -649,7 +649,7 @@ v1 不实现群聊。将来要加群：
 | slot | 注册内容 | 作用 |
 |---|---|---|
 | `settings.section` | `{ name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' }` | 设置页分区（含两个图库弹窗） |
-| `conversation.input.left` | `{ name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => 'QQ 收发渠道' }` | 会话输入框旁的渠道下拉（见 11） |
+| `conversation.input.left` | `{ name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => '收发渠道' }` | 会话输入框旁的渠道胶囊按钮（见 11） |
 
 客户端 `inject` 声明 `['slots']`（package.json 的 `dsh.client.inject` 同步），不依赖
 `layout.selectPanel`。设置页里「表情包」与「收图图库」两块相邻，各有「打开图库管理」；
@@ -692,16 +692,16 @@ v1 不实现群聊。将来要加群：
 - **旧入口已删**：「最近收到的图片」列表与「清空最近图片」按钮不再出现在客户端；
   `/stickers/recent` 与入站缓存清理仍保留给后端诊断/清理使用。
 
-## 11. 会话级绑定入口（输入框下拉）
+## 11. 会话级绑定入口（输入框胶囊按钮）
 
-绑定不再只能在设置页改。客户端在 `conversation.input.left` 槽位注册一个下拉框（与本地 AI
-插件的开关同一排），组件 props 带当前 `sessionId`，按会话显示和切换渠道；设置页的绑定
-编辑器保持原样，两条入口写同一份配置。
+绑定不再只能在设置页改。客户端在 `conversation.input.left` 槽位注册一枚胶囊按钮与自定义
+下拉菜单（与本地 AI 插件的开关同一排，颜色全走 `--dsw-alias-*` 变量），组件 props 带当前
+`sessionId`，按会话显示和切换渠道；设置页的绑定编辑器保持原样，两条入口写同一份配置。
 
 | 项 | 内容 |
 |---|---|
-| 槽位 | `conversation.input.left`：`{ id: 'fish-bind', order: 46, label: () => 'QQ 收发渠道' }` |
-| 数据 | `GET /state` 的 `bindings`；挂载、会话变化、下拉获得焦点时各拉一次，不做轮询 |
+| 槽位 | `conversation.input.left`：`{ id: 'fish-bind', order: 46, label: () => '收发渠道' }` |
+| 数据 | `GET /state` 的 `bindings`；挂载、会话变化、打开菜单时各拉一次，不做轮询 |
 | 写操作 | `POST /bindings/assign`，body `{ sessionId, qq }`；`qq` 为空串表示解除当前会话的绑定 |
 | 注册容错 | 槽位不存在或注册失败只少一个入口，设置页与收发照常 |
 

@@ -3,7 +3,7 @@
 // 纯原生 JS + React（DSH 平台自带），没有 npm、没有 CDN、没有构建步骤。
 // 挂载方式照 dsh-qq-bridge 的 client.js：window.__ModuleLoader__.load → slots.register。
 // 注册 settings.section（设置页，含表情库与收图图库两个设置内弹窗）与 conversation.input.left
-// （会话输入框左侧的收发渠道下拉）；两者都只读写宿主路由，不直接碰 QQ / 会话。
+// （会话输入框左侧的收发渠道胶囊按钮）；两者都只读写宿主路由，不直接碰 QQ / 会话。
 // 不注册主面板与侧边栏入口。
 
 window.__ModuleLoader__.load({
@@ -1129,7 +1129,7 @@ window.__ModuleLoader__.load({
       } catch { /* 注入失败只影响外观 */ }
     }
 
-    // ---------------- 会话输入框左侧：收发渠道下拉 ----------------
+    // ---------------- 会话输入框左侧：收发渠道胶囊按钮 + 菜单 ----------------
     // 「渠道」= 配置里的一条绑定（qq + 称呼 + 启用）：session 为空表示渠道保留、暂不绑定会话。
     // 这里只调 /bindings/assign；设置页的保存语义与界面都不经过这里。
 
@@ -1150,7 +1150,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 下拉选项：未绑定 + 已启用的渠道，按 qq 去重。
+     * 菜单选项：未绑定 + 已启用的渠道，按 qq 去重。
      * 当前会话绑着的渠道即使被禁用也要留下，否则选中项会凭空消失。
      */
     function channelChoices(bindings, selected) {
@@ -1174,10 +1174,48 @@ window.__ModuleLoader__.load({
       return '没能切换收发渠道，请稍后重试。'
     }
 
+    /** 菜单开合的小箭头：10px，颜色跟随文字，展开时整体旋转 180°。 */
+    function chevronIcon() {
+      return h('svg', {
+        className: 'fish-bind-chevron',
+        width: 10,
+        height: 10,
+        viewBox: '0 0 10 10',
+        'aria-hidden': 'true',
+        focusable: 'false',
+      }, h('path', {
+        d: 'M2 3.5 L5 6.5 L8 3.5',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.4,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }))
+    }
+
+    /** 当前选中项右侧的对勾。 */
+    function checkIcon() {
+      return h('svg', {
+        className: 'fish-bind-check',
+        width: 12,
+        height: 12,
+        viewBox: '0 0 12 12',
+        'aria-hidden': 'true',
+        focusable: 'false',
+      }, h('path', {
+        d: 'M2.5 6.5 L5 9 L9.5 3.5',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.6,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }))
+    }
+
     /**
-     * 会话级收发渠道下拉。
+     * 会话级收发渠道：一枚胶囊按钮 + 自定义下拉菜单。
      * 一条渠道只能绑一个会话：绑到别的会话等于把渠道移过去，原会话自动回到「不绑定」。
-     * 数据只来自 GET /state（挂载、会话切换、下拉获得焦点各拉一次），不轮询、不弹窗。
+     * 数据只来自 GET /state（挂载、会话切换、打开菜单各拉一次），不轮询、不弹窗。
      */
     function BindChannel(props) {
       const sessionId = String(props?.sessionId || '').trim()
@@ -1185,8 +1223,12 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = React.useState('')
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState('')
+      // 菜单开合只影响外观；打开时顺手校准一次状态。
+      const [open, setOpen] = React.useState(false)
       // 每次拉取领一个号：提交会作废之前发出的拉取，避免旧状态盖掉刚做的切换。
       const pullToken = React.useRef(0)
+      // 组件根节点：判断鼠标按下的位置在不在组件内，用来关闭菜单。
+      const rootRef = React.useRef(null)
 
       const applyState = (s) => {
         if (!s || !Array.isArray(s.bindings)) return false
@@ -1208,9 +1250,38 @@ window.__ModuleLoader__.load({
         return () => { pullToken.current += 1 }
       }, [sessionId])
 
+      // 菜单展开期间才挂全局监听：点外部或按 Esc 关闭，卸载/收起时一律解绑。
+      React.useEffect(() => {
+        if (!open) return undefined
+        if (typeof document === 'undefined') return undefined
+        const onPointerDown = (event) => {
+          const node = rootRef.current
+          const target = event && event.target
+          // 真实 DOM 才有 contains；测试与降级环境下没有节点时按「外部」处理。
+          if (node && target && typeof node.contains === 'function' && node.contains(target)) return
+          setOpen(false)
+        }
+        // 捕获阶段拦 Esc：菜单开着时只关菜单，不再传给宿主输入框。
+        const onKeyDown = (event) => {
+          if (!event || event.key !== 'Escape') return
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          if (typeof event.stopPropagation === 'function') event.stopPropagation()
+          setOpen(false)
+        }
+        // pointerdown 与 mousedown 各挂一份：老宿主可能不派发 pointer 事件。
+        document.addEventListener('pointerdown', onPointerDown)
+        document.addEventListener('mousedown', onPointerDown)
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => {
+          document.removeEventListener('pointerdown', onPointerDown)
+          document.removeEventListener('mousedown', onPointerDown)
+          document.removeEventListener('keydown', onKeyDown, true)
+        }
+      }, [open])
+
       if (!sessionId) return null
 
-      // 下拉获得焦点时再对一次：多开两个会话时，另一侧可能刚改过绑定。
+      // 打开菜单时再对一次：多开两个会话时，另一侧可能刚改过绑定。
       const refresh = async () => {
         if (busy) return
         const token = ++pullToken.current
@@ -1219,8 +1290,7 @@ window.__ModuleLoader__.load({
         applyState(s)
       }
 
-      const assign = async (event) => {
-        const next = String(event?.target?.value ?? '')
+      const assign = async (next) => {
         if (busy || next === selected) return
         const previous = selected
         // 先本地反映，再用返回的状态校准；失败就退回原选中并给一次轻提示。
@@ -1240,60 +1310,148 @@ window.__ModuleLoader__.load({
         setNote(assignErrorText(r))
       }
 
+      // 点按钮开合；打开的那一次才去校准状态，省掉每回聚焦都发请求。
+      const toggle = () => {
+        if (busy) return
+        const next = !open
+        setOpen(next)
+        if (next) refresh()
+      }
+
+      const choose = (qq) => {
+        setOpen(false)
+        assign(String(qq ?? ''))
+      }
+
+      // 原生按钮会自己把回车/空格转成 click；这里的 preventDefault 挡掉重复触发，
+      // 同时保证拿不到 click 的宿主也能用键盘打开。
+      const onTriggerKeyDown = (event) => {
+        const key = event && event.key
+        if (key !== 'Enter' && key !== ' ' && key !== 'Spacebar') return
+        if (typeof event.preventDefault === 'function') event.preventDefault()
+        toggle()
+      }
+
       const choices = channelChoices(bindings, selected)
-      // 选中值必须是某个 option，否则原生 select 会自己跳到第一项；对不上时按「不绑定」显示。
+      // 选中值必须对得上某一项，否则菜单里没有任何高亮；对不上时按「不绑定」处理。
       const value = choices.some((item) => item.qq === selected) ? selected : ''
-      return h('label', {
+      const currentLabel = (choices.find((item) => item.qq === value) || { label: '不绑定' }).label
+      const items = [{ qq: '', label: '不绑定' }].concat(choices)
+      return h('div', {
         className: 'fish-bind',
-        title: '选择这个会话收发的 QQ 渠道；同一个渠道只能绑定一个会话',
+        ref: rootRef,
+        'data-open': open ? '1' : '0',
       },
-        h('span', { className: 'fish-bind-label' }, 'QQ 收发渠道'),
-        h('select', {
-          className: 'fish-bind-select',
-          'aria-label': 'QQ 收发渠道',
-          value: value,
+        h('button', {
+          type: 'button',
+          className: 'fish-bind-trigger',
+          title: `收发渠道：${currentLabel}。同一个渠道只能绑定一个会话。`,
+          'aria-label': '收发渠道',
+          'aria-haspopup': 'listbox',
+          'aria-expanded': open ? 'true' : 'false',
           disabled: busy,
-          onFocus: refresh,
-          onChange: assign,
+          onClick: toggle,
+          onKeyDown: onTriggerKeyDown,
         },
-          h('option', { value: '' }, '不绑定'),
-          choices.map((item) => h('option', { key: item.qq, value: item.qq }, item.label))),
-        note ? h('span', { className: 'fish-bind-note', role: 'status' }, note) : null)
+          h('span', { className: 'fish-bind-title' }, '收发渠道'),
+          h('span', { className: 'fish-bind-current' }, currentLabel),
+          chevronIcon()),
+        open
+          ? h('div', {
+            className: 'fish-bind-menu',
+            role: 'listbox',
+            'aria-label': '收发渠道',
+          }, items.map((item) => h('div', {
+            key: item.qq || 'none',
+            role: 'option',
+            'aria-selected': item.qq === value ? 'true' : 'false',
+            className: 'fish-bind-item',
+            title: item.label,
+            onClick: () => choose(item.qq),
+          },
+            h('span', { className: 'fish-bind-item-text' }, item.label),
+            item.qq === value ? checkIcon() : null)))
+          : null,
+        note ? h('span', { className: 'fish-bind-note', role: 'status', title: note }, note) : null)
     }
 
-    // 原生 select 在浅色/深色下会白字白底：和设置页一样，统一按 DSH 变量配色。
+    // 输入框旁的胶囊按钮 + 向上弹出的菜单：颜色全走 DSH 变量，深浅色主题都不另配。
     const bindStyle = `
       .fish-bind {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        max-width: 230px;
+        font-size: 12px;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .fish-bind-trigger {
         display: inline-flex;
         align-items: center;
         gap: 4px;
         min-width: 0;
-        max-width: 250px;
-        font-size: 11.5px;
-        line-height: 1.2;
-        white-space: nowrap;
-      }
-      .fish-bind-label { opacity: .62; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-      .fish-bind select {
-        flex: 0 1 auto;
-        min-width: 72px;
-        max-width: 170px;
+        max-width: 100%;
         height: 24px;
-        padding: 0 4px;
-        border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.16));
+        margin: 0;
+        padding: 0 6px;
+        border: 0;
         border-radius: 6px;
-        background-color: var(--dsw-alias-bg-layer-1, #fff);
-        color: var(--dsw-alias-label-primary, #1f1f1f);
-        font-size: 11.5px;
+        background: transparent;
+        color: var(--dsw-alias-label-secondary, #666);
+        font: inherit;
+        font-size: 12px;
+        line-height: 1;
+        cursor: pointer;
       }
-      .fish-bind select option {
-        background-color: var(--dsw-alias-bg-layer-1, #fff);
-        color: var(--dsw-alias-label-primary, #1f1f1f);
+      .fish-bind-trigger:hover {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06));
+        color: var(--dsw-alias-label-primary, inherit);
       }
-      .fish-bind select:disabled { opacity: .55; }
+      .fish-bind-trigger[disabled] { opacity: .55; cursor: default; }
+      .fish-bind-title { flex: 0 0 auto; opacity: .62; }
+      .fish-bind-current { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .fish-bind-chevron { flex: 0 0 auto; transition: transform .12s ease; }
+      .fish-bind[data-open="1"] .fish-bind-chevron { transform: rotate(180deg); }
+      .fish-bind-menu {
+        position: absolute;
+        bottom: calc(100% + 6px);
+        left: 0;
+        z-index: 60;
+        box-sizing: border-box;
+        min-width: 180px;
+        max-width: 260px;
+        max-height: 260px;
+        overflow-y: auto;
+        padding: 4px;
+        border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.16));
+        border-radius: 10px;
+        background: var(--dsw-alias-bg-layer-1, #fff);
+        box-shadow: 0 10px 30px rgba(0,0,0,.18);
+      }
+      .fish-bind-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        height: 30px;
+        padding: 0 8px;
+        border-radius: 6px;
+        color: var(--dsw-alias-label-primary, #1f1f1f);
+        font-size: 12.5px;
+        line-height: 1;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .fish-bind-item:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06)); }
+      .fish-bind-item[aria-selected="true"] { color: var(--dsw-alias-state-business-primary, #2f6fed); }
+      .fish-bind-item-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .fish-bind-check { flex: 0 0 auto; }
       .fish-bind-note {
         color: var(--dsw-alias-state-danger, #c0392b);
-        max-width: 170px;
+        max-width: 130px;
         overflow: hidden;
         text-overflow: ellipsis;
       }
@@ -1821,10 +1979,10 @@ window.__ModuleLoader__.load({
         { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' },
         Section,
       ))
-      // 会话输入框左侧：收发渠道下拉。旧宿主没有这个槽位时只少一个入口，整个插件照常加载。
+      // 会话输入框左侧：收发渠道胶囊按钮。旧宿主没有这个槽位时只少一个入口，整个插件照常加载。
       try {
         slots.inject('conversation.input.left', () => slots.register(
-          { name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => 'QQ 收发渠道' },
+          { name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => '收发渠道' },
           BindChannel,
         ))
       } catch (error) {
