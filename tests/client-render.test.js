@@ -186,6 +186,12 @@ function makeRuntime() {
     React,
     mount,
     flush,
+    /** 换根 props 重新渲染（同一个组件实例，hooks 保留）：用来测「会话切换」这类 props 变化。 */
+    setProps(next) {
+      rootProps = { ...rootProps, ...(next || {}) }
+      pending = true
+      return flush()
+    },
     presetFor(name, values) { presets.set(name, values || []) },
     setEffects(enabled) { effectsEnabled = !!enabled },
     focusCount() { return focusCalls },
@@ -464,7 +470,7 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.doesNotThrow(() => env.renderSection([emptyCopy]))
 })
 
-test('注册：只注册 settings.section，不再有主面板与侧边栏入口', async () => {
+test('注册：设置分区 + 会话输入框渠道下拉，不再有主面板与侧边栏入口', async () => {
   const env = await setupPlugin()
   assert.deepEqual(env.module.inject, ['slots'])
 
@@ -476,13 +482,194 @@ test('注册：只注册 settings.section，不再有主面板与侧边栏入口
   assert.equal(settings[0].mod.label(), '鱼讯 QQ')
   assert.equal(typeof settings[0].component, 'function')
 
+  // 会话输入框左侧：与本地 AI 插件的开关同一排，每个会话一个收发渠道入口。
+  const inputLeft = env.bySlot.get('conversation.input.left') || []
+  assert.equal(inputLeft.length, 1)
+  assert.equal(inputLeft[0].mod.id, 'fish-bind')
+  assert.equal(inputLeft[0].mod.order, 46)
+  assert.equal(typeof inputLeft[0].mod.label, 'function')
+  assert.equal(inputLeft[0].mod.label(), 'QQ 收发渠道')
+  assert.equal(typeof inputLeft[0].component, 'function')
+
   assert.equal(env.bySlot.get('main'), undefined, '不应再注册 main 主面板')
   assert.equal(env.bySlot.get('sidebar.panellist'), undefined, '不应再注册侧边栏入口')
-  assert.deepEqual([...env.bySlot.keys()], ['settings.section'])
+  assert.deepEqual([...env.bySlot.keys()].sort(), ['conversation.input.left', 'settings.section'])
 
   // package.json 的客户端注入声明必须与代码一致。
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
   assert.deepEqual(pkg.dsh.client.inject, ['slots'])
+})
+
+/** 输入框旁渠道下拉的假 fetch：只回 /state 与 /bindings/assign。 */
+function stubBindFetch({ bindings = [], onAssign } = {}) {
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options = {}) => {
+    const address = String(url)
+    calls.push({ url: address, options: options })
+    if (address.endsWith('/state')) {
+      return { json: async () => ({ ok: true, bindings: bindings, sessions: [] }) }
+    }
+    if (address.endsWith('/bindings/assign')) {
+      const body = JSON.parse(options.body || '{}')
+      return { json: async () => (onAssign ? onAssign(body) : { ok: true, bindings: bindings }) }
+    }
+    return { json: async () => ({ ok: false, error: 'unexpected' }) }
+  }
+  return {
+    calls,
+    restore() { globalThis.fetch = original },
+  }
+}
+
+const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+/** 下拉是当前唯一一个 select。 */
+function channelSelect(tree) {
+  return findAll(tree, (node) => node.type === 'select')[0]
+}
+
+/** 挂上组件并等 /state 回来，返回渲染结果。 */
+async function mountBindChannel(env, props) {
+  const { BindChannel } = env.module.__test
+  env.setEffects(true)
+  env.mount(BindChannel, props)
+  await nextTick()
+  return env.flush()
+}
+
+test('渠道下拉：没有会话上下文时返回 null，不渲染', async () => {
+  const env = await setupPlugin()
+  assert.equal(typeof env.module.__test.BindChannel, 'function')
+  assert.equal(env.renderComponent(env.module.__test.BindChannel, {}), null)
+  assert.equal(env.renderComponent(env.module.__test.BindChannel, { sessionId: '' }), null)
+})
+
+test('渠道下拉：选中当前会话绑定的渠道，只列启用的渠道，已绑定的禁用渠道仍可见', async () => {
+  const env = await setupPlugin()
+  const bindings = [
+    { qq: '10001', session: 'session-test-0001', name: '主人', enabled: false },
+    { qq: '10002', session: '', name: '小号', enabled: true },
+    { qq: '10003', session: 'session-other', name: '别人', enabled: false },
+  ]
+  const stub = stubBindFetch({ bindings })
+  try {
+    const tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    const select = channelSelect(tree)
+    assert.ok(select, '有会话时要渲染下拉')
+    assert.equal(select.props.value, '10001', '当前会话绑定的渠道要被选中')
+    const labels = findAll(select, (node) => node.type === 'option')
+      .map((node) => collectText(node.children).join(''))
+    assert.deepEqual(labels, ['不绑定', '主人：QQ-10001', '小号：QQ-10002'])
+    const states = stub.calls.filter((call) => call.url.endsWith('/state'))
+    assert.equal(states.length, 1, '挂载时只拉一次状态，不做轮询')
+  } finally {
+    env.mount(() => null)
+    stub.restore()
+  }
+})
+
+test('渠道下拉：切换渠道提交 /bindings/assign，参数是会话 id 与目标 qq', async () => {
+  const env = await setupPlugin()
+  const before = [
+    { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
+    { qq: '10002', session: '', name: '小号', enabled: true },
+  ]
+  const after = [
+    { qq: '10001', session: '', name: '主人', enabled: true },
+    { qq: '10002', session: 'session-test-0001', name: '小号', enabled: true },
+  ]
+  const stub = stubBindFetch({ bindings: before, onAssign: () => ({ ok: true, bindings: after }) })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    await channelSelect(tree).props.onChange({ target: { value: '10002' } })
+    tree = env.flush()
+
+    const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
+    assert.ok(call, '切换渠道要提交 /bindings/assign')
+    assert.equal(call.options.method, 'POST')
+    assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', qq: '10002' })
+    assert.equal(channelSelect(tree).props.value, '10002', '成功后按返回的状态校准选中项')
+  } finally {
+    env.mount(() => null)
+    stub.restore()
+  }
+})
+
+test('渠道下拉：选「不绑定」提交空 qq，只解绑不删渠道', async () => {
+  const env = await setupPlugin()
+  const before = [{ qq: '10001', session: 'session-test-0001', name: '主人', enabled: true }]
+  const after = [{ qq: '10001', session: '', name: '主人', enabled: true }]
+  const stub = stubBindFetch({ bindings: before, onAssign: () => ({ ok: true, bindings: after }) })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    await channelSelect(tree).props.onChange({ target: { value: '' } })
+    tree = env.flush()
+
+    const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
+    assert.ok(call)
+    assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', qq: '' })
+    assert.equal(channelSelect(tree).props.value, '', '解绑后回落到「不绑定」')
+    assert.match(textOf(channelSelect(tree)), /主人：QQ-10001/, '渠道仍留在选项里')
+  } finally {
+    env.mount(() => null)
+    stub.restore()
+  }
+})
+
+test('渠道下拉：请求失败时退回原选中并提示原因，下拉不消失', async () => {
+  const env = await setupPlugin()
+  const bindings = [
+    { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
+    { qq: '10002', session: '', name: '小号', enabled: true },
+  ]
+  const stub = stubBindFetch({
+    bindings,
+    onAssign: () => ({ ok: false, error: '没有 QQ 10002 的收发渠道，请先在设置页添加。' }),
+  })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
+    await channelSelect(tree).props.onChange({ target: { value: '10002' } })
+    tree = env.flush()
+
+    const select = channelSelect(tree)
+    assert.ok(select, '失败后下拉不能消失')
+    assert.equal(select.props.value, '10001', '失败要退回原选中')
+    assert.match(textOf(tree), /没有 QQ 10002 的收发渠道，请先在设置页添加。/)
+
+    // 连不上宿主时给一句人话，不把网络报错直接甩给用户。
+    globalThis.fetch = async () => { throw new Error('Failed to fetch') }
+    await select.props.onChange({ target: { value: '10002' } })
+    tree = env.flush()
+    assert.equal(channelSelect(tree).props.value, '10001')
+    assert.match(textOf(tree), /没能切换收发渠道，请稍后重试。/)
+    assert.doesNotMatch(textOf(tree), /Failed to fetch/)
+  } finally {
+    env.mount(() => null)
+    stub.restore()
+  }
+})
+
+test('渠道下拉：同一实例切换会话后按新会话刷新选中', async () => {
+  const env = await setupPlugin()
+  const bindings = [
+    { qq: '10001', session: 'session-a', name: '主人', enabled: true },
+    { qq: '10002', session: 'session-b', name: '小号', enabled: true },
+  ]
+  const stub = stubBindFetch({ bindings })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-a' })
+    assert.equal(channelSelect(tree).props.value, '10001')
+
+    tree = env.setProps({ sessionId: 'session-b' })
+    await nextTick()
+    tree = env.flush()
+    assert.equal(channelSelect(tree).props.value, '10002', '会话变了要按新会话的绑定显示')
+    assert.equal(stub.calls.filter((call) => call.url.endsWith('/state')).length, 2, '会话变化要重新拉一次状态')
+  } finally {
+    env.mount(() => null)
+    stub.restore()
+  }
 })
 
 /** 找到弹窗面板（可按 aria-label 指定是哪个库）。 */

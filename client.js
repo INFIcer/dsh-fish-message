@@ -2,8 +2,9 @@
 //
 // 纯原生 JS + React（DSH 平台自带），没有 npm、没有 CDN、没有构建步骤。
 // 挂载方式照 dsh-qq-bridge 的 client.js：window.__ModuleLoader__.load → slots.register。
-// 只注册 settings.section；表情库与收图图库各有一个设置内弹窗，不注册主面板与侧边栏入口。
-// 这里只读写宿主路由，不直接碰 QQ / 会话。
+// 注册 settings.section（设置页，含表情库与收图图库两个设置内弹窗）与 conversation.input.left
+// （会话输入框左侧的收发渠道下拉）；两者都只读写宿主路由，不直接碰 QQ / 会话。
+// 不注册主面板与侧边栏入口。
 
 window.__ModuleLoader__.load({
   id: 'dsh-fish-message',
@@ -1126,6 +1127,187 @@ window.__ModuleLoader__.load({
       } catch { /* 注入失败只影响外观 */ }
     }
 
+    // ---------------- 会话输入框左侧：收发渠道下拉 ----------------
+    // 「渠道」= 配置里的一条绑定（qq + 称呼 + 启用）：session 为空表示渠道保留、暂不绑定会话。
+    // 这里只调 /bindings/assign；设置页的保存语义与界面都不经过这里。
+
+    /** 会话 id 的两种写法（带不带 session- 前缀）视为同一间会话。 */
+    const stripSessionPrefix = (id) => {
+      const s = String(id == null ? '' : id).trim()
+      return s.startsWith('session-') ? s.slice('session-'.length) : s
+    }
+
+    /** 当前会话绑着哪个渠道：返回 qq，没有绑定就返回空串。 */
+    function boundChannelQq(bindings, sessionId) {
+      const key = stripSessionPrefix(sessionId)
+      if (!key) return ''
+      for (const b of Array.isArray(bindings) ? bindings : []) {
+        if (b && b.qq && stripSessionPrefix(b.session) === key) return String(b.qq)
+      }
+      return ''
+    }
+
+    /**
+     * 下拉选项：未绑定 + 已启用的渠道，按 qq 去重。
+     * 当前会话绑着的渠道即使被禁用也要留下，否则选中项会凭空消失。
+     */
+    function channelChoices(bindings, selected) {
+      const list = []
+      const seen = new Set()
+      for (const b of Array.isArray(bindings) ? bindings : []) {
+        if (!b || !b.qq) continue
+        const qq = String(b.qq)
+        if (seen.has(qq)) continue
+        if (b.enabled === false && qq !== String(selected || '')) continue
+        seen.add(qq)
+        list.push({ qq: qq, label: `${b.name || '主人'}：QQ-${qq}` })
+      }
+      return list
+    }
+
+    /** 失败提示只说人话：宿主写好的中文提示直接透出，网络层报错换成一句可操作的提示。 */
+    function assignErrorText(result) {
+      const raw = String((result && result.error) || '').trim()
+      if (raw && /[\u4e00-\u9fa5]/.test(raw)) return raw
+      return '没能切换收发渠道，请稍后重试。'
+    }
+
+    /**
+     * 会话级收发渠道下拉。
+     * 一条渠道只能绑一个会话：绑到别的会话等于把渠道移过去，原会话自动回到「不绑定」。
+     * 数据只来自 GET /state（挂载、会话切换、下拉获得焦点各拉一次），不轮询、不弹窗。
+     */
+    function BindChannel(props) {
+      const sessionId = String(props?.sessionId || '').trim()
+      const [bindings, setBindings] = React.useState(null)
+      const [selected, setSelected] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [note, setNote] = React.useState('')
+      // 每次拉取领一个号：提交会作废之前发出的拉取，避免旧状态盖掉刚做的切换。
+      const pullToken = React.useRef(0)
+
+      const applyState = (s) => {
+        if (!s || !Array.isArray(s.bindings)) return false
+        setBindings(s.bindings)
+        setSelected(boundChannelQq(s.bindings, sessionId))
+        // 重新拉到状态说明页面还活着：上一次的失败提示不必一直挂着。
+        setNote('')
+        return true
+      }
+
+      // 挂载与会话切换：拉一次当前绑定，选中项跟着会话走。
+      React.useEffect(() => {
+        if (!sessionId) return undefined
+        const token = ++pullToken.current
+        get('/state').then((s) => {
+          if (token !== pullToken.current) return
+          applyState(s)
+        })
+        return () => { pullToken.current += 1 }
+      }, [sessionId])
+
+      if (!sessionId) return null
+
+      // 下拉获得焦点时再对一次：多开两个会话时，另一侧可能刚改过绑定。
+      const refresh = async () => {
+        if (busy) return
+        const token = ++pullToken.current
+        const s = await get('/state')
+        if (token !== pullToken.current) return
+        applyState(s)
+      }
+
+      const assign = async (event) => {
+        const next = String(event?.target?.value ?? '')
+        if (busy || next === selected) return
+        const previous = selected
+        // 先本地反映，再用返回的状态校准；失败就退回原选中并给一次轻提示。
+        pullToken.current += 1
+        setSelected(next)
+        setBusy(true)
+        setNote('')
+        const r = await post('/bindings/assign', { sessionId: sessionId, qq: next })
+        setBusy(false)
+        if (r && r.ok) {
+          const list = Array.isArray(r.bindings) ? r.bindings : null
+          if (list) setBindings(list)
+          setSelected(list ? boundChannelQq(list, sessionId) : next)
+          return
+        }
+        setSelected(previous)
+        setNote(assignErrorText(r))
+      }
+
+      const choices = channelChoices(bindings, selected)
+      // 选中值必须是某个 option，否则原生 select 会自己跳到第一项；对不上时按「不绑定」显示。
+      const value = choices.some((item) => item.qq === selected) ? selected : ''
+      return h('label', {
+        className: 'fish-bind',
+        title: '选择这个会话收发的 QQ 渠道；同一个渠道只能绑定一个会话',
+      },
+        h('span', { className: 'fish-bind-label' }, 'QQ 收发渠道'),
+        h('select', {
+          className: 'fish-bind-select',
+          'aria-label': 'QQ 收发渠道',
+          value: value,
+          disabled: busy,
+          onFocus: refresh,
+          onChange: assign,
+        },
+          h('option', { value: '' }, '不绑定'),
+          choices.map((item) => h('option', { key: item.qq, value: item.qq }, item.label))),
+        note ? h('span', { className: 'fish-bind-note', role: 'status' }, note) : null)
+    }
+
+    // 原生 select 在浅色/深色下会白字白底：和设置页一样，统一按 DSH 变量配色。
+    const bindStyle = `
+      .fish-bind {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+        max-width: 250px;
+        font-size: 11.5px;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .fish-bind-label { opacity: .62; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+      .fish-bind select {
+        flex: 0 1 auto;
+        min-width: 72px;
+        max-width: 170px;
+        height: 24px;
+        padding: 0 4px;
+        border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.16));
+        border-radius: 6px;
+        background-color: var(--dsw-alias-bg-layer-1, #fff);
+        color: var(--dsw-alias-label-primary, #1f1f1f);
+        font-size: 11.5px;
+      }
+      .fish-bind select option {
+        background-color: var(--dsw-alias-bg-layer-1, #fff);
+        color: var(--dsw-alias-label-primary, #1f1f1f);
+      }
+      .fish-bind select:disabled { opacity: .55; }
+      .fish-bind-note {
+        color: var(--dsw-alias-state-danger, #c0392b);
+        max-width: 170px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    `
+
+    function injectBindStyle() {
+      try {
+        if (typeof document === 'undefined') return
+        if (document.querySelector('style[data-fish-message="bind"]')) return
+        const node = document.createElement('style')
+        node.dataset.fishMessage = 'bind'
+        node.textContent = bindStyle
+        document.head.appendChild(node)
+      } catch { /* 注入失败只影响外观 */ }
+    }
+
     function Section() {
       const [state, setState] = React.useState(null)
       const [dirty, setDirty] = React.useState(false)
@@ -1629,19 +1811,30 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       injectWidgetStyle()
+      injectBindStyle()
       const slots = ctx.get('slots')
       if (slots === undefined) return
-      // 只注册设置分区；两个图库弹窗都在设置页之内，不占主面板与侧边栏。
+      // 设置分区与图库弹窗都在设置页之内，不占主面板与侧边栏。
       slots.inject('settings.section', () => slots.register(
         { name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' },
         Section,
       ))
+      // 会话输入框左侧：收发渠道下拉。旧宿主没有这个槽位时只少一个入口，整个插件照常加载。
+      try {
+        slots.inject('conversation.input.left', () => slots.register(
+          { name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => 'QQ 收发渠道' },
+          BindChannel,
+        ))
+      } catch (error) {
+        try { console.warn('[dsh-fish-message] 注册会话输入框槽位失败', error) } catch { /* 忽略 */ }
+      }
     }
 
     exports.apply = apply
     exports.inject = inject
     // 测试用：模板、两个变体与共享组件的内部面；生产代码只经设置页按钮使用。
     exports.__test = {
+      BindChannel,
       GalleryModal,
       StickerGalleryModal,
       ImageGalleryModal,

@@ -635,11 +635,12 @@ v1 不实现群聊。将来要加群：
 
 ## 10. 图库弹窗（客户端：一份模板 + 两个变体）
 
-图库管理不是独立主面板。`client.js` 只注册一个 slot：
+图库管理不是独立主面板。`client.js` 注册两个 slot：
 
 | slot | 注册内容 | 作用 |
 |---|---|---|
-| `settings.section` | `{ name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' }` | 设置页分区 |
+| `settings.section` | `{ name: 'settings.section', id: 'fish-message', order: 56, label: () => '鱼讯 QQ' }` | 设置页分区（含两个图库弹窗） |
+| `conversation.input.left` | `{ name: 'conversation.input.left', id: 'fish-bind', order: 46, label: () => 'QQ 收发渠道' }` | 会话输入框旁的渠道下拉（见 11） |
 
 客户端 `inject` 声明 `['slots']`（package.json 的 `dsh.client.inject` 同步），不依赖
 `layout.selectPanel`。设置页里「表情包」与「收图图库」两块相邻，各有「打开图库管理」；
@@ -681,3 +682,35 @@ v1 不实现群聊。将来要加群：
   `/stickers/save`，同图已在表情库时只合并描述；删缓存条目不碰表情库，反之亦然。
 - **旧入口已删**：「最近收到的图片」列表与「清空最近图片」按钮不再出现在客户端；
   `/stickers/recent` 与入站缓存清理仍保留给后端诊断/清理使用。
+
+## 11. 会话级绑定入口（输入框下拉）
+
+绑定不再只能在设置页改。客户端在 `conversation.input.left` 槽位注册一个下拉框（与本地 AI
+插件的开关同一排），组件 props 带当前 `sessionId`，按会话显示和切换渠道；设置页的绑定
+编辑器保持原样，两条入口写同一份配置。
+
+| 项 | 内容 |
+|---|---|
+| 槽位 | `conversation.input.left`：`{ id: 'fish-bind', order: 46, label: () => 'QQ 收发渠道' }` |
+| 数据 | `GET /state` 的 `bindings`；挂载、会话变化、下拉获得焦点时各拉一次，不做轮询 |
+| 写操作 | `POST /bindings/assign`，body `{ sessionId, qq }`；`qq` 为空串表示解除当前会话的绑定 |
+| 注册容错 | 槽位不存在或注册失败只少一个入口，设置页与收发照常 |
+
+接口语义（`lib/host.js`）：
+
+- `qq` 非空：把该 `qq` 的渠道 `session` 改成 `sessionId`；当前会话原先绑着的其它渠道
+  置 `session=''`（渠道保留，不删除）。`qq` 必须已存在于 `bindings`、`sessionId` 非空，
+  否则返回 400。
+- `qq` 为空串：只把当前会话对应的渠道置为未绑定，渠道本身保留。
+- 保存沿用 `/save` 的链路：`configStore.save` → `config = save` → `bridge.updateConfig()`
+  → `bridge.ensureBaselines({ at: Date.now() })` → `resetGuard()`。连接参数不变，不重启传输层。
+- 返回 `{ ok, message, ...status() }`；客户端先本地反映选中项，再用返回的 `bindings` 校准。
+
+`session=''` 的渠道是「保留但未绑定」：
+
+- `normalizeBindings` 允许空 session，仍按 `qq` 去重；非空 session 之间仍按会话去重
+  （一间会话只能绑一个渠道）。
+- `Bridge.rebuildIndexes` 不把空 session 放进 `bySession`（避免 `''` 变成能被任一会话命中
+  的键）；`byPeer` 仍保留，照常按 QQ 收消息、推进水位。
+- 未绑定渠道的消息不投递，但会标记已读并推进水位；重新绑定时不会补投未绑定期间的消息。
+- `GuardMonitor.setBindings` 忽略空 session，不占防失联监控名额。

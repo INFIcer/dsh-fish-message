@@ -184,6 +184,130 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   await server.stop()
 })
 
+test('会话级绑定：/bindings/assign 转移、换渠道、解绑与参数校验', async () => {
+  const server = await new MockOneBotServer().start()
+  const dir = mkdtempSync(join(tmpdir(), 'fish-bind-'))
+  process.env.DSH_HOME = dir
+
+  const sessionA = 'session-bind-a'
+  const sessionB = 'session-bind-b'
+  const sessions = [{ id: sessionA, title: '会话 A' }, { id: sessionB, title: '会话 B' }]
+  const routes = new Map()
+  const ctx = {
+    effect(cb) {
+      const d = cb()
+      return typeof d === 'function' ? d : () => {}
+    },
+    on() { return () => {} },
+    tools: { register() { return () => {} } },
+    get(service) {
+      if (service === 'sessions') return { list: () => sessions, flush: async () => {} }
+      if (service === 'sessionTitle') {
+        return { get: (s) => ({ title: (sessions.find((x) => x.id === s.id) || {}).title || '' }) }
+      }
+      if (service === 'workspaceRegistry') return { archivedSessionIds: [] }
+      if (service === 'attachments') return { admitPromptContent: async (c) => c, imageHostPath: () => '' }
+      return undefined
+    },
+    agents: {
+      get: (id) => (id === sessionA || id === sessionB ? { session: { id }, id } : undefined),
+    },
+    webServer: {
+      register({ path, handler }) {
+        routes.set(path, handler)
+        return () => routes.delete(path)
+      },
+    },
+  }
+
+  const host = await import('../lib/host.js?bind-assign-test')
+  const app = host.apply(ctx, {
+    napcatBaseUrl: server.baseUrl,
+    wsUrl: server.wsUrl,
+    wsEnabled: false,
+    bindings: [
+      { qq: '10001', session: sessionA, name: '主人', enabled: true },
+      { qq: '10002', session: sessionB, name: '小号', enabled: true },
+    ],
+    pollIntervalMs: 200,
+    reorderBufferMs: 30,
+    requestTimeoutMs: 3000,
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
+    inboundEditWindowMs: 0,
+  })
+  await wait(() => app.bridge.running, 2000)
+
+  const assign = async (body) => {
+    const request = {
+      method: 'POST',
+      url: '/dsh-fish-message/bindings/assign',
+      on(event, fn) {
+        if (event === 'data') fn(JSON.stringify(body))
+        if (event === 'end') fn()
+      },
+    }
+    const response = fakeResponse()
+    await routes.get('/dsh-fish-message/bindings/assign')(request, response)
+    return { status: response.statusCode, body: JSON.parse(response.body) }
+  }
+  const sessionOf = (body, qq) => (body.bindings.find((b) => b.qq === qq) || {}).session
+
+  // 转移：把 10002（原本绑 B）绑到 A。A 原来的 10001 回到「未绑定」，B 空出来；
+  // 渠道一条都不能少（设置页里还要能再绑）。
+  let result = await assign({ sessionId: sessionA, qq: '10002' })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.ok, true)
+  assert.equal(result.body.bindings.length, 2)
+  assert.equal(sessionOf(result.body, '10002'), sessionA)
+  assert.equal(sessionOf(result.body, '10001'), '')
+  assert.equal(app.bridge.bySession.has(''), false, '空 session 不能进 bySession')
+  assert.equal(app.bridge.bySession.get('bind-a').qq, '10002')
+  assert.equal(app.bridge.bySession.has('bind-b'), false, 'B 已经没有渠道')
+  assert.equal(app.guard.isBinding(sessionA), true)
+  assert.equal(app.guard.isBinding(sessionB), false)
+
+  // 同一会话换渠道：10001 绑回 A，10002 变未绑定但仍在配置里。
+  result = await assign({ sessionId: sessionA, qq: '10001' })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.bindings.length, 2)
+  assert.equal(sessionOf(result.body, '10001'), sessionA)
+  assert.equal(sessionOf(result.body, '10002'), '')
+  assert.equal(app.bridge.bySession.get('bind-a').qq, '10001')
+
+  // 解绑：qq 传空串只清 session，渠道保留。
+  result = await assign({ sessionId: sessionA, qq: '' })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.bindings.length, 2, '解绑不能删除渠道')
+  assert.equal(result.body.bindings.every((b) => b.session === ''), true)
+  assert.equal(app.guard.isBinding(sessionA), false)
+  assert.equal(app.bridge.bySession.size, 0, '全部解绑后没有会话索引')
+  assert.equal(app.bridge.byPeer.size, 2, '渠道本身还在，照常按 QQ 收消息')
+
+  // 落盘：重新读配置，两条未绑定会话的渠道都在。
+  const disk = app.configStore.load({})
+  assert.equal(disk.bindings.length, 2)
+  assert.equal(disk.bindings.every((b) => b.session === ''), true)
+
+  // 参数校验：没有会话 id、QQ 不存在都拒绝，配置不动。
+  result = await assign({ qq: '10001' })
+  assert.equal(result.status, 400)
+  assert.match(result.body.error, /会话/)
+  result = await assign({ sessionId: sessionA, qq: '99999' })
+  assert.equal(result.status, 400)
+  assert.match(result.body.error, /99999/)
+  assert.equal(app.configStore.load({}).bindings.every((b) => b.session === ''), true, '失败不能改配置')
+
+  // 只接受 POST。
+  const wrongMethod = fakeResponse()
+  await routes.get('/dsh-fish-message/bindings/assign')({ method: 'GET', url: '/dsh-fish-message/bindings/assign' }, wrongMethod)
+  assert.equal(wrongMethod.statusCode, 405)
+
+  await app.stop()
+  await sleep(20)
+  await server.stop()
+})
+
 test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async () => {
   const server = await new MockOneBotServer().start()
   const dir = mkdtempSync(join(tmpdir(), 'fish-guard-'))

@@ -266,6 +266,33 @@ test('水位落盘：重建 Bridge 后不重投', async () => {
   await secondApp.bridge.stop()
 })
 
+test('未绑定会话的渠道：不进 bySession，消息不投递，但水位照样推进', async () => {
+  const now = Math.floor(Date.now() / 1000)
+  const { bridge, delivery, store } = makeBridge({
+    history: { '10002': [makeMessage('u1', '未绑定时的消息', now - 10, '10002')] },
+    config: {
+      bindings: [
+        { qq: QQ, session: session, name: '主人', enabled: true },
+        { qq: '10002', session: '', name: '小号', enabled: true },
+      ],
+    },
+  })
+  await bridge.start({ syncNow: false })
+  assert.equal(bridge.bySession.has(''), false, "空 session 不能占据 bySession 的 '' 键")
+  assert.equal(bridge.bySession.size, 1)
+  assert.equal(bridge.byPeer.size, 2, '渠道本身仍然按 QQ 收消息')
+
+  await bridge.sync('test')
+  assert.equal(delivery.got.length, 0, '没有会话就不投递')
+  assert.equal(store.hasSeen('u1'), true, '消息仍标记已读，重新绑定时不补投')
+  const watermark = store.getWatermark('10002')
+  assert.ok(watermark && watermark.timestamp >= now - 10, '水位照常推进')
+
+  await bridge.sync('again')
+  assert.equal(delivery.got.length, 0, '第二次同步也不能补投')
+  await bridge.stop()
+})
+
 test('超过补投窗口：只投一条摘要，消息本身不投', async () => {
   const now = Math.floor(Date.now() / 1000)
   const { bridge, delivery } = makeBridge({
@@ -523,6 +550,36 @@ test('配置：派生 WS 地址、旧桥字段迁移、范围钳制', () => {
   assert.equal(clamp.pollIntervalMs, 500)
   assert.equal(clamp.historyCount, 500)
   assert.equal(clamp.logLevel, 'info')
+})
+
+test('配置：渠道可以不绑定会话，空 session 只按 qq 去重', () => {
+  const cfg = normalizeConfig({
+    bindings: [
+      { qq: '10001', session: '', name: '主人' },
+      { qq: '10001', session: 'session-a' },
+      { qq: '10002', session: 'session-a' },
+      { qq: '10003', session: '' },
+      { qq: '10004', session: 'session-b' },
+      { qq: '10005', session: 'session-b' },
+      { qq: '', session: '' },
+    ],
+  })
+  assert.deepEqual(cfg.bindings.map((b) => [b.qq, b.session, b.enabled]), [
+    ['10001', '', true],
+    ['10002', 'session-a', true],
+    ['10003', '', true],
+    ['10004', 'session-b', true],
+  ])
+
+  // 保存后读回：空 session 的渠道保留，不会被当成坏配置丢掉。
+  const dir = tempDir()
+  const saved = new ConfigStore({ homeDir: dir }).save({ bindings: [{ qq: QQ, session: '', name: '主人', enabled: true }] })
+  assert.equal(saved.bindings.length, 1)
+  assert.equal(saved.bindings[0].session, '')
+  const read = new ConfigStore({ homeDir: dir }).load({})
+  assert.equal(read.bindings.length, 1)
+  assert.equal(read.bindings[0].session, '')
+  assert.equal(publicConfig(read).bindings[0].session, '')
 })
 
 // ---------------- 可选本地 AI：语音/识图能力与降级 ----------------
@@ -1259,6 +1316,19 @@ test('防失联监控：只盯启用的绑定会话', () => {
   monitor.setBindings([{ qq: QQ, session: session, name: '主人', enabled: false }], new Map([[session, '测试会话']]))
   assert.equal(monitor.isBinding(session), false)
   assert.equal(monitor.snapshot().bound, 0)
+})
+
+test('防失联监控：未绑定会话的渠道不占监控名额', () => {
+  const clock = { now: 1_000_000 }
+  const monitor = new GuardMonitor({ now: () => clock.now, getConfig: () => ({ guardStuckSeconds: 600 }) })
+  monitor.setBindings([
+    { qq: QQ, session: session, name: '主人', enabled: true },
+    { qq: '10002', session: '', name: '小号', enabled: true },
+  ], new Map([['test-0001', '测试会话']]))
+  assert.equal(monitor.snapshot().bound, 1, '只有绑定了会话的渠道进监控')
+  assert.equal(monitor.isBinding(''), false)
+  assert.equal(monitor.isBinding(session), true)
+  assert.deepEqual(monitor.snapshot().alerts, [])
 })
 
 test('防失联工具守卫：挡住会等人的工具（提问/干等），不挡插件装卸', () => {
