@@ -355,6 +355,45 @@ test('出站：一轮多个模型步各有一段 [QQ] 时按顺序全发', async
   await bridge.stop()
 })
 
+test('出站：一步里写三个 [QQ] 块 → 三条独立消息，顺序与块序一致', async () => {
+  const { bridge, transport } = makeBridge()
+  await bridge.start({ syncNow: false })
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]第一块[/QQ][QQ]第二块[/QQ][QQ]第三块[/QQ]' }]))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await wait(() => transport.sent.length === 3), true)
+  assert.deepEqual(
+    transport.sent.map((x) => x.segments[0].data.text),
+    ['第一块', '第二块', '第三块'],
+  )
+  await bridge.stop()
+})
+
+test('出站：块外文字不发、空块忽略，只发非空块', async () => {
+  const { bridge, transport } = makeBridge()
+  await bridge.start({ syncNow: false })
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '草稿 [QQ]第一块[/QQ] [QQ]   [/QQ] 中间 [QQ]第二块[/QQ] 尾巴' }]))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await wait(() => transport.sent.length === 2), true)
+  await sleep(60)
+  assert.deepEqual(transport.sent.map((x) => x.segments[0].data.text), ['第一块', '第二块'])
+  await bridge.stop()
+})
+
+test('出站：块内文字与 [图片] 按出现顺序发，下一块另起消息', async () => {
+  const dir = tempDir()
+  const image = join(dir, 'block.png')
+  writeFileSync(image, 'fake-png')
+  const { bridge, transport } = makeBridge({ dir })
+  await bridge.start({ syncNow: false })
+  await bridge.deliverAssistantTurn(session, `[QQ]看图 [图片:${image}] 好看[/QQ][QQ]第二块[/QQ]`)
+  assert.equal(transport.sent.length, 4)
+  assert.deepEqual(transport.sent.map((x) => x.segments[0].type), ['text', 'image', 'text', 'text'])
+  assert.equal(transport.sent[0].segments[0].data.text, '看图')
+  assert.equal(transport.sent[2].segments[0].data.text, '好看')
+  assert.equal(transport.sent[3].segments[0].data.text, '第二块')
+  await bridge.stop()
+})
+
 test('出站：同一条 assistant/message 重复投递只发一遍', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })

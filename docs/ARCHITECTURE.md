@@ -327,7 +327,8 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
   （同一步重复投递按消息 id 去重；图片按内容寻址的 `attachmentId` 去重）；
 - `turn/end` 且 `reason.kind === 'completed'`：如果这一轮属于绑定会话，调用
   `bridge.deliverAssistantTurn`。各步正文分别解析后再按顺序发，避免某步未闭合的
-  `[QQ]` 把下一步的内部文字粘进块里。
+  `[QQ]` 把下一步的内部文字粘进块里；一步里的多个 `[QQ]` 块也各自独立，
+  一块 = 一条（组）消息，不会被拼成一段。
 
 按「会话 key + turn」去重，同一轮不会发两次。被中断（`interrupted`）的轮不发送，
 已累积的内容一起丢弃（半段话可能只写了一半，也可能是被叫停的方向）。
@@ -335,10 +336,13 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
 ### 4.2 解析
 
 ```text
-extractOutbound(text, onlyInsideMarkers)
-  ├─ parseQQBlock：转义扫描 → 块内反转义 → 多块拼接 / 未闭合容错
-  └─ parseDirectives：text / tts / image / voiceFile / file / sticker 有序 token
+extractOutboundBlocks(text, onlyInsideMarkers)
+  ├─ parseQQBlock：转义扫描 → 块内反转义 → 按出现顺序逐块返回 / 未闭合容错
+  └─ 每块单独 parseDirectives：text / tts / image / voiceFile / file / sticker 有序 token
 ```
+
+块与块之间不合并文字、也不共享指令解析：一块就是一条（组）消息，块序就是发送顺序。
+关掉「只发块内」时整条正文算一块。assistant 图片附件不属于任何块，各自单独成组追加在最后。
 
 `[语音]文字[/语音]` 解析成 `tts` token。发送时由 `lib/split-voice-text.js` 按 200 字
 一句切成多段，原文逐段调 `fish.service.tts` 合成（朗读化由服务端统一负责）；每段的
@@ -358,6 +362,9 @@ extractOutbound(text, onlyInsideMarkers)
 | `file` | `file` 段（NapCat 支持时） |
 | `sticker` | 发送时查 `StickerStore` → 本地图片 → `image` 段；带 `stickerId` 供成功计数 |
 
+发送按「块顺序 → 块内 token 顺序」逐条进行；每个 token 是一条独立 QQ 消息（一个块里有
+文字 + 图片时就是多条，顺序不变）。
+
 语音发送按「本地路径 → `file:///` → `base64://`」重试，最多 3 次。
 
 **发送节奏**（`outboxPerMessageDelayMs` 默认 2000、`outboxPerCharDelayMs` 默认 100）：
@@ -368,10 +375,13 @@ extractOutbound(text, onlyInsideMarkers)
   语音文本（`record_text`）按文本算。字数按「十分之一个字」整数累计，避免浮点尾巴。
 - 等待发生在发送串行锁里（`Bridge.dispatch`）：顺序不变，也不阻塞收消息；
   正常回复、补发、语音、图片都走这里，节奏一致。
+- 等待按「段」计：多个 `[QQ]` 块 = 多条消息 = 多次等待，各自按自己块内的字数算，
+  不会按合并后的整段字数只等一次。
 - 两个设置都给 0 就完全不等；`sleep` / `now` 可注入，测试不会真等。
 
 **任何 token 最终发送失败都不再丢弃**：`Bridge.sendOneItem` 把内部消息段写进持久化出站队列，
-同一轮后续 token 也按顺序入队（避免后发先至），并记日志/事件。
+同一轮后续 token 也按顺序入队（避免后发先至），并记日志/事件。入队只包含**还没发出去的**
+段落：`Bridge.dispatch` 在错误上记下已送达的段数，已经发出去的气泡不会在补发时重发。
 只有「发送失败 **且** 队列写盘也失败」才会在会话里投错误提示（同一会话 60 秒最多一次）。
 
 ### 4.4 持久化出站队列

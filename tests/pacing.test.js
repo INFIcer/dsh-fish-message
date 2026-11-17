@@ -186,6 +186,16 @@ test('Bridge：正常回复按字数逐条等待，发送顺序不变', async ()
   await bridge.stop()
 })
 
+test('Bridge：一步里多个块各自按自己的字数等待', async () => {
+  const { bridge, transport, sleeps } = makeBridge()
+  await bridge.start({ syncNow: false })
+  // 你好 = 2 字 → 20 + 20；第一段话 = 4 字 → 20 + 40；短 = 1 字 → 20 + 10。
+  await bridge.deliverAssistantTurn(session, '[QQ]你好[/QQ][QQ]第一段话[/QQ][QQ]短[/QQ]')
+  assert.deepEqual(sleeps, [40, 60, 30], '每块单独等一次，不按合并后的整段字数等')
+  assert.deepEqual(transport.sent.map((x) => x.segments[0].data.text), ['你好', '第一段话', '短'])
+  await bridge.stop()
+})
+
 test('Bridge：图片与语音文件段只等固定延迟，不等字数', async () => {
   const { bridge, transport, sleeps, dir } = makeBridge()
   await bridge.start({ syncNow: false })

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseQQBlock, extractOutbound, parseDirectives, unescape } from '../lib/format.js'
+import { parseQQBlock, extractOutboundBlocks, parseDirectives, unescape } from '../lib/format.js'
 
 test('合法块：只发块内', () => {
   const r = parseQQBlock('这句留本地。\n[QQ]你好，主人[/QQ]\n这句也留本地。', true)
@@ -8,10 +8,53 @@ test('合法块：只发块内', () => {
   assert.equal(r.text, '你好，主人')
 })
 
-test('多个块：按出现顺序用换行拼接', () => {
+test('多个块：切块结果按出现顺序，预览用换行拼接', () => {
   const r = parseQQBlock('[QQ]第一句[/QQ] 中间的废话 [QQ]第二句[/QQ]', true)
   assert.equal(r.send, true)
-  assert.equal(r.text, '第一句\n第二句')
+  assert.deepEqual(r.blocks, ['第一句', '第二句'])
+  assert.deepEqual(r.rawBlocks, ['第一句', '第二句'])
+  assert.equal(r.text, '第一句\n第二句', 'text 只是展示预览')
+})
+
+test('多个块：每块单独解析，块与块之间不粘文字', () => {
+  const r = extractOutboundBlocks('[QQ]第一句[/QQ] 中间的废话 [QQ]第二句[/QQ]', true)
+  assert.equal(r.send, true)
+  assert.equal(r.blocks.length, 2)
+  assert.deepEqual(r.blocks.map((b) => b.tokens), [
+    [{ type: 'text', text: '第一句' }],
+    [{ type: 'text', text: '第二句' }],
+  ])
+})
+
+test('空块忽略：只把非空块当消息', () => {
+  const r = extractOutboundBlocks('[QQ]   [/QQ][QQ]第二块[/QQ][QQ][/QQ]', true)
+  assert.equal(r.send, true)
+  assert.equal(r.blocks.length, 1)
+  assert.deepEqual(r.blocks[0].tokens, [{ type: 'text', text: '第二块' }])
+})
+
+test('块内指令不跨块：上一块的 [图片] 不会带进下一块', () => {
+  const r = extractOutboundBlocks('[QQ]看图 [图片:C:\\a.png][/QQ][QQ]第二块[/QQ]', true)
+  assert.deepEqual(r.blocks.map((b) => b.tokens.map((t) => t.type)), [['text', 'image'], ['text']])
+})
+
+test('未闭合 [QQ] 之后全算，但只到这一块结尾', () => {
+  const r = extractOutboundBlocks('块外 [QQ]第一块[/QQ] 也块外 [QQ]没闭合', true)
+  assert.equal(r.blocks.length, 2)
+  assert.deepEqual(r.blocks[1].tokens, [{ type: 'text', text: '没闭合' }])
+})
+
+test('转义 \\[QQ] 不开块：整条没有可发内容', () => {
+  const r = extractOutboundBlocks('\\[QQ]不是块\\[/QQ]', true)
+  assert.equal(r.send, false)
+  assert.equal(r.blocks.length, 0)
+})
+
+test('关掉只发块内：整条是一块，标记剥掉', () => {
+  const r = extractOutboundBlocks('前 [QQ]中[/QQ] 后', false)
+  assert.equal(r.send, true)
+  assert.equal(r.blocks.length, 1)
+  assert.deepEqual(r.blocks[0].tokens, [{ type: 'text', text: '前 中 后' }])
 })
 
 test('只写开头没写结尾：开头之后全算', () => {
@@ -98,15 +141,15 @@ test('显式指令：直接发已有音频', () => {
 })
 
 test('出站总入口：只发块内的指令，[语音] 块标成 tts', () => {
-  const r = extractOutbound('本地的解释 [QQ][语音]晚安[/语音][/QQ] 块外', true)
+  const r = extractOutboundBlocks('本地的解释 [QQ][语音]晚安[/语音][/QQ] 块外', true)
   assert.equal(r.send, true)
   assert.equal(r.qqText, '[语音]晚安[/语音]')
-  assert.deepEqual(r.tokens, [{ type: 'tts', text: '晚安' }])
+  assert.deepEqual(r.blocks[0].tokens, [{ type: 'tts', text: '晚安' }])
   assert.equal(r.tts, true)
 })
 
 test('出站总入口：块内为空不发', () => {
-  const r = extractOutbound('只有解释', true)
+  const r = extractOutboundBlocks('只有解释', true)
   assert.equal(r.send, false)
 })
 
@@ -136,9 +179,9 @@ test('表情指令：一次多个，与其它指令按出现顺序混排', () =>
 })
 
 test('表情指令：不存在也只是 token，解析不存在由发送层报错，不静默吞掉', () => {
-  const r = extractOutbound('[QQ]看这个 [表情:完全没有这个表情][/QQ]', true)
+  const r = extractOutboundBlocks('[QQ]看这个 [表情:完全没有这个表情][/QQ]', true)
   assert.equal(r.send, true)
-  assert.deepEqual(r.tokens, [
+  assert.deepEqual(r.blocks[0].tokens, [
     { type: 'text', text: '看这个' },
     { type: 'sticker', name: '完全没有这个表情' },
   ])
@@ -150,16 +193,16 @@ test('表情指令：空名字不生成 token', () => {
 })
 
 test('转义表情指令：\\[表情:名字] 只当字面量', () => {
-  const r = extractOutbound('[QQ]写法示例：\\[表情:名字]、\\[表情:#标签]、\\[表情:id][/QQ]', true)
+  const r = extractOutboundBlocks('[QQ]写法示例：\\[表情:名字]、\\[表情:#标签]、\\[表情:id][/QQ]', true)
   assert.equal(r.send, true)
-  assert.equal(r.tokens.length, 1)
-  assert.equal(r.tokens[0].type, 'text')
-  assert.equal(r.tokens[0].text, '写法示例：[表情:名字]、[表情:#标签]、[表情:id]')
+  assert.equal(r.blocks[0].tokens.length, 1)
+  assert.equal(r.blocks[0].tokens[0].type, 'text')
+  assert.equal(r.blocks[0].tokens[0].text, '写法示例：[表情:名字]、[表情:#标签]、[表情:id]')
 })
 
 test('未转义的表情指令仍然生效', () => {
-  const r = extractOutbound('[QQ]来一个 [表情:dschan_thumbs-up] 吧[/QQ]', true)
-  assert.deepEqual(r.tokens, [
+  const r = extractOutboundBlocks('[QQ]来一个 [表情:dschan_thumbs-up] 吧[/QQ]', true)
+  assert.deepEqual(r.blocks[0].tokens, [
     { type: 'text', text: '来一个' },
     { type: 'sticker', name: 'dschan_thumbs-up' },
     { type: 'text', text: '吧' },

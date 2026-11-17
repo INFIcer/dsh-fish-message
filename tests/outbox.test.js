@@ -245,6 +245,50 @@ test('Bridge：恢复在线但还没补发时，新消息也排队，不插到�
   await bridge.stop()
 })
 
+test('Bridge：一轮多块发送中途失败，只入队还没发出去的块', async () => {
+  const { bridge, transport, outbox } = makeBridge()
+  transport.fail = false
+  await bridge.start({ syncNow: false })
+  const original = transport.sendMessage.bind(transport)
+  let calls = 0
+  transport.sendMessage = async (peer, segments) => {
+    calls += 1
+    if (calls === 2) throw new Error('模拟第二条失败')
+    return original(peer, segments)
+  }
+
+  await bridge.deliverAssistantTurn(session, '[QQ]块一[/QQ][QQ]块二[/QQ][QQ]块三[/QQ]')
+  assert.deepEqual(transport.sent.map((x) => x.segments[0].data.text), ['块一'], '第一块已经发出去')
+  assert.deepEqual(outbox.list({ limit: 10 }).map((x) => x.segments[0].data.text), ['块二', '块三'], '只入队剩余块')
+
+  await bridge.flushOutbox('test-mid-turn', { force: true })
+  assert.deepEqual(transport.sent.map((x) => x.segments[0].data.text), ['块一', '块二', '块三'], '补发不重发第一块')
+  assert.equal(outbox.pending(), 0)
+  await bridge.stop()
+})
+
+test('Bridge：一组多段发送中途失败，只入队还没发出的段', async () => {
+  const { bridge, transport, outbox } = makeBridge()
+  transport.fail = false
+  await bridge.start({ syncNow: false })
+  const original = transport.sendMessage.bind(transport)
+  let calls = 0
+  transport.sendMessage = async (peer, segments) => {
+    calls += 1
+    if (calls === 2) throw new Error('模拟第二段失败')
+    return original(peer, segments)
+  }
+
+  const result = await bridge.sendOutbound(QQ, [
+    { type: 'text', data: { text: '第一段' } },
+    { type: 'text', data: { text: '第二段' } },
+  ], { reason: 'test-partial' })
+  assert.equal(result.queued, true)
+  assert.deepEqual(outbox.list().map((x) => x.segments[0].data.text), ['第二段'], '已发出的第一段不重复入队')
+  assert.equal(outbox.pending(), 1)
+  await bridge.stop()
+})
+
 test('Bridge：没装本地 AI 时 [语音]文本[/语音] 只提示，不进补发队列', async () => {
   const { bridge, transport, outbox } = makeBridge()
   await bridge.start({ syncNow: false })
