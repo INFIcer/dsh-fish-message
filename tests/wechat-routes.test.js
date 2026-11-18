@@ -312,3 +312,102 @@ test('微信接口：开关变化走重启，绑定与测试发送按通道', as
     await env.stop()
   }
 })
+
+test('保存绑定：同一间会话的多条都保留，同对端第二条丢掉并带中文原因', async () => {
+  const env = await boot({ bindings: [] })
+  try {
+    const before = await call(env.routes, STATE, { method: 'GET' })
+    const base = before.body.config
+    // 同一间会话挂 QQ + 微信 + 第二个 QQ：三条都该落盘。
+    const saved = await call(env.routes, SAVE, {
+      body: {
+        config: {
+          ...base,
+          bindings: [
+            { channel: 'qq', qq: QQ, session: 'session-wx-a', name: '主人' },
+            { channel: 'wechat', qq: WX, session: 'session-wx-a', name: '微信' },
+            { channel: 'qq', qq: '10002', session: 'session-wx-a', name: '小号' },
+          ],
+        },
+      },
+    })
+    assert.equal(saved.status, 200)
+    assert.equal(saved.body.ok, true)
+    assert.deepEqual(saved.body.dropped, [])
+    assert.deepEqual(env.app.configStore.load({}).bindings.map((b) => [b.channel, b.qq, b.session]), [
+      ['qq', QQ, 'session-wx-a'],
+      ['wechat', WX, 'session-wx-a'],
+      ['qq', '10002', 'session-wx-a'],
+    ])
+
+    // 同一个对端再出现一条：只留第一条，第二条在 dropped 里说明原因。
+    const dup = await call(env.routes, SAVE, {
+      body: {
+        config: {
+          ...saved.body.config,
+          bindings: [
+            ...saved.body.config.bindings,
+            { channel: 'qq', qq: QQ, session: 'session-wx-b' },
+            { channel: 'wechat', peer: '', session: '' },
+            { channel: 'wx', peer: WX, session: '' },
+          ],
+        },
+      },
+    })
+    assert.equal(dup.status, 200)
+    assert.deepEqual(dup.body.dropped, [
+      { channel: 'qq', peer: QQ, reason: '这个对端已经有一条渠道了' },
+      { channel: 'wechat', peer: '', reason: '对端没填' },
+      { channel: 'wx', peer: WX, reason: '通道只能填 qq 或 wechat' },
+    ])
+    assert.equal(env.app.configStore.load({}).bindings.length, 3, '被丢掉的条目不会落盘')
+  } finally {
+    await env.stop()
+  }
+})
+
+test('会话绑定接口：一次写回多条，取消勾选只解绑这一条', async () => {
+  const env = await boot({
+    bindings: [
+      { channel: 'qq', qq: QQ, session: '', name: '主人' },
+      { channel: 'wechat', qq: WX, session: '', name: '微信' },
+    ],
+  })
+  try {
+    // 多选一次提交两条：这间会话同时挂 QQ + 微信。
+    const both = await call(env.routes, ASSIGN, {
+      body: {
+        sessionId: 'session-wx-a',
+        bindings: [
+          { channel: 'qq', peer: QQ },
+          { channel: 'wechat', peer: WX },
+        ],
+      },
+    })
+    assert.equal(both.status, 200)
+    assert.equal(both.body.ok, true)
+    const sessionOf = (body, peer) => (body.bindings.find((b) => b.qq === peer) || {}).session
+    assert.equal(sessionOf(both.body, QQ), 'session-wx-a')
+    assert.equal(sessionOf(both.body, WX), 'session-wx-a')
+    assert.match(both.body.message, /2 条渠道/)
+
+    // 取消 QQ 的勾：只把它解绑，微信仍在这间会话。
+    const one = await call(env.routes, ASSIGN, {
+      body: { sessionId: 'session-wx-a', bindings: [{ channel: 'wechat', peer: WX }] },
+    })
+    assert.equal(one.status, 200)
+    assert.equal(sessionOf(one.body, QQ), '')
+    assert.equal(sessionOf(one.body, WX), 'session-wx-a')
+    assert.equal(env.app.configStore.load({}).bindings.length, 2, '解绑不删渠道')
+
+    // 渠道不存在：400，且不改配置。
+    const missing = await call(env.routes, ASSIGN, {
+      body: { sessionId: 'session-wx-a', bindings: [{ channel: 'qq', peer: '99999' }] },
+    })
+    assert.equal(missing.status, 400)
+    assert.match(missing.body.error, /99999/)
+    assert.equal(env.app.configStore.load({}).bindings.find((b) => b.qq === WX).session, 'session-wx-a')
+  } finally {
+    await env.stop()
+  }
+})

@@ -650,15 +650,15 @@ test('渠道按钮：胶囊显示当前会话绑定的渠道，只列启用的�
     assert.ok(trigger, '有会话时要渲染胶囊按钮')
     const shown = channelTriggerText(tree)
     assert.doesNotMatch(shown, /收发渠道/, '按钮上不再有「收发渠道」静态标题')
-    assert.equal(shown, '主人 QQ', '按钮上只显示当前绑定的渠道（称呼 + QQ，不带号码）')
-    assert.doesNotMatch(shown, /10001/, '胶囊上不显示完整 QQ 号')
+    assert.equal(shown, '主人 QQ', '只有一条绑定时显示称呼 + 通道')
+    assert.doesNotMatch(shown, /10001/, '胶囊上不显示完整号码')
     const currentName = findAll(trigger, (node) => node.props && node.props.className === 'fish-bind-name')
       .map((node) => collectText(node.children).join(''))
     const currentChannel = findAll(trigger, (node) => node.props && node.props.className === 'fish-bind-channel')
       .map((node) => collectText(node.children).join(''))
     assert.deepEqual(currentName, ['主人'], '称呼用亮色（fish-bind-name）')
     assert.deepEqual(currentChannel, ['QQ'], '通道用次要色（fish-bind-channel）')
-    assert.equal(trigger.props['aria-label'], '收发渠道：主人 QQ')
+    assert.equal(trigger.props['aria-label'], '收发渠道：主人 QQ。')
     assert.equal(trigger.props['aria-haspopup'], 'listbox')
     assert.equal(trigger.props['aria-expanded'], 'false')
     assert.equal(channelMenu(tree), undefined, '默认不展开菜单')
@@ -669,13 +669,17 @@ test('渠道按钮：胶囊显示当前会话绑定的渠道，只列启用的�
     const menu = channelMenu(tree)
     assert.ok(menu, '点按钮要展开菜单')
     assert.equal(menu.props['aria-label'], '收发渠道')
+    assert.equal(menu.props['aria-multiselectable'], 'true', '菜单是多选')
     const options = channelOptions(tree)
-    assert.deepEqual(options.map(channelOptionLabel), ['不绑定', '主人 QQ', '小号 QQ'])
-    // 具体号码放在每个选项的 title 上；设置页仍用「称呼：QQ-号」。
-    assert.deepEqual(options.map((node) => node.props.title), ['不绑定', 'QQ 10001', 'QQ 10002'])
-    assert.deepEqual(options.map((node) => node.props['aria-selected']), ['false', 'true', 'false'])
-    assert.equal(findAll(options[1], (node) => node.type === 'svg' && node.props.className === 'fish-bind-check').length, 1, '选中项右侧有对勾')
-    assert.equal(findAll(options[0], (node) => node.props.className === 'fish-bind-check').length, 0)
+    // 顺序按配置：已绑在这间会话的禁用渠道也要留着（否则勾选项会凭空消失）；最后是动作项。
+    assert.deepEqual(options.map(channelOptionLabel), ['主人 QQ', '小号 QQ', '全部解绑'])
+    assert.deepEqual(
+      options.map((node) => node.props.title),
+      ['QQ 10001', 'QQ 10002', '只解除这间会话的绑定，渠道仍保留在设置页'],
+    )
+    assert.deepEqual(options.map((node) => node.props['aria-selected']), ['true', 'false', 'false'])
+    assert.equal(findAll(options[0], (node) => node.type === 'svg' && node.props.className === 'fish-bind-check').length, 1, '勾选项右侧有对勾')
+    assert.equal(findAll(options[1], (node) => node.props.className === 'fish-bind-check').length, 0)
     assert.equal(stub.calls.filter((call) => call.url.endsWith('/state')).length, 2, '打开菜单时再校准一次，不多拉')
   } finally {
     env.mount(() => null)
@@ -761,14 +765,14 @@ test('渠道按钮：键盘 Enter / 空格打开菜单，其它按键不理会',
   }
 })
 
-test('渠道按钮：点菜单项提交 /bindings/assign，菜单关闭并按返回状态校准', async () => {
+test('渠道按钮：勾选一条即提交整组绑定，菜单保持展开可继续勾', async () => {
   const env = await setupPlugin()
   const before = [
     { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
     { qq: '10002', session: '', name: '小号', enabled: true },
   ]
   const after = [
-    { qq: '10001', session: '', name: '主人', enabled: true },
+    { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
     { qq: '10002', session: 'session-test-0001', name: '小号', enabled: true },
   ]
   const stub = stubBindFetch({ bindings: before, onAssign: () => ({ ok: true, bindings: after }) })
@@ -777,48 +781,80 @@ test('渠道按钮：点菜单项提交 /bindings/assign，菜单关闭并按返
     tree = await openChannelMenu(env)
     pickChannel(tree, '小号 QQ')
     tree = env.flush()
-    assert.equal(channelMenu(tree), undefined, '选中后菜单立即关闭')
     await nextTick()
     tree = env.flush()
 
     const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
-    assert.ok(call, '切换渠道要提交 /bindings/assign')
+    assert.ok(call, '勾选渠道要提交 /bindings/assign')
     assert.equal(call.options.method, 'POST')
-    assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', qq: '10002' })
-    assert.match(channelTriggerText(tree), /小号 QQ/, '成功后按返回的状态校准选中项')
+    assert.deepEqual(JSON.parse(call.options.body), {
+      sessionId: 'session-test-0001',
+      bindings: [
+        { channel: 'qq', peer: '10001' },
+        { channel: 'qq', peer: '10002' },
+      ],
+    })
+    assert.ok(channelMenu(tree), '多选要能连着勾，勾一条不关菜单')
+    assert.equal(channelTriggerText(tree), '2 条渠道', '多条时胶囊只报数量')
+    assert.deepEqual(channelOptions(tree).map((node) => node.props['aria-selected']), ['true', 'true', 'false'])
   } finally {
     env.mount(() => null)
     stub.restore()
   }
 })
 
-test('渠道按钮：选「不绑定」提交空 qq，只解绑不删渠道', async () => {
+test('渠道按钮：取消勾选只解绑、不删渠道；「全部解绑」一次清空本会话', async () => {
   const env = await setupPlugin()
   const before = [{ qq: '10001', session: 'session-test-0001', name: '主人', enabled: true }]
-  const after = [{ qq: '10001', session: '', name: '主人', enabled: true }]
-  const stub = stubBindFetch({ bindings: before, onAssign: () => ({ ok: true, bindings: after }) })
+  let current = before.map((binding) => ({ ...binding }))
+  // 假后端按集合语义改绑定：列出的挂到本会话，本会话里没列出的回未绑定。
+  const stub = stubBindFetch({
+    bindings: before,
+    onAssign: (body) => {
+      const wanted = new Set((body.bindings || []).map((item) => item.channel + ':' + item.peer))
+      current = current.map((binding) => {
+        const key = (binding.channel || 'qq') + ':' + (binding.peer || binding.qq)
+        if (wanted.has(key)) return { ...binding, session: body.sessionId }
+        if (binding.session === body.sessionId) return { ...binding, session: '' }
+        return binding
+      })
+      return { ok: true, bindings: current }
+    },
+  })
   try {
     let tree = await mountBindChannel(env, { sessionId: 'session-test-0001' })
     tree = await openChannelMenu(env)
-    pickChannel(tree, '不绑定')
+    pickChannel(tree, '主人 QQ')
     await nextTick()
     tree = env.flush()
 
-    const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
+    let call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
     assert.ok(call)
-    assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', qq: '' })
+    assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', bindings: [] })
     assert.match(channelTriggerText(tree), /不绑定/, '解绑后回落到「不绑定」')
-    // 菜单里渠道仍在，只是回到未绑定。
-    tree = await openChannelMenu(env)
-    assert.deepEqual(channelOptions(tree).map(channelOptionLabel), ['不绑定', '主人 QQ'])
-    assert.equal(channelOptions(tree)[0].props['aria-selected'], 'true')
+    // 菜单里渠道仍在，只是回到未勾选；没有勾选项时不显示「全部解绑」。
+    assert.deepEqual(channelOptions(tree).map(channelOptionLabel), ['主人 QQ'])
+    assert.equal(channelOptions(tree)[0].props['aria-selected'], 'false')
+
+    // 勾回来，再点「全部解绑」：只清本会话的绑定，渠道仍在设置页。
+    pickChannel(tree, '主人 QQ')
+    await nextTick()
+    tree = env.flush()
+    assert.match(channelTriggerText(tree), /主人 QQ/)
+    tree = env.flush()
+    pickChannel(tree, '全部解绑')
+    await nextTick()
+    tree = env.flush()
+    call = stub.calls.filter((item) => item.url.endsWith('/bindings/assign')).pop()
+    assert.deepEqual(JSON.parse(call.options.body), { sessionId: 'session-test-0001', bindings: [] })
+    assert.match(channelTriggerText(tree), /不绑定/)
   } finally {
     env.mount(() => null)
     stub.restore()
   }
 })
 
-test('渠道按钮：请求失败时退回原选中并提示原因，按钮不消失', async () => {
+test('渠道按钮：请求失败时退回原勾选并提示原因，菜单不消失', async () => {
   const env = await setupPlugin()
   const bindings = [
     { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
@@ -836,15 +872,14 @@ test('渠道按钮：请求失败时退回原选中并提示原因，按钮不�
     tree = env.flush()
 
     assert.ok(channelTrigger(tree), '失败后按钮不能消失')
-    assert.match(channelTriggerText(tree), /主人 QQ/, '失败要退回原选中')
-    assert.equal(channelMenu(tree), undefined, '失败后菜单已收起，原因写在旁边')
+    assert.match(channelTriggerText(tree), /主人 QQ/, '失败要退回原勾选')
+    assert.ok(channelMenu(tree), '失败后菜单仍开着，方便重试')
     assert.match(textOf(tree), /没有 QQ 10002 的收发渠道，请先在设置页添加。/)
     assert.equal(findAll(tree, (node) => node.props && node.props.role === 'status').length, 1, '错误用 status 播报')
 
     // 连不上宿主时给一句人话，不把网络报错直接甩给用户。
     globalThis.fetch = async () => { throw new Error('Failed to fetch') }
-    tree = await openChannelMenu(env)
-    pickChannel(tree, '小号 QQ')
+    pickChannel(env.flush(), '小号 QQ')
     await nextTick()
     tree = env.flush()
     assert.match(channelTriggerText(tree), /主人 QQ/)
@@ -863,7 +898,7 @@ test('渠道按钮：提交期间禁用，完成后恢复', async () => {
     { qq: '10002', session: '', name: '小号', enabled: true },
   ]
   const after = [
-    { qq: '10001', session: '', name: '主人', enabled: true },
+    { qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
     { qq: '10002', session: 'session-test-0001', name: '小号', enabled: true },
   ]
   let release = null
@@ -880,7 +915,7 @@ test('渠道按钮：提交期间禁用，完成后恢复', async () => {
     await nextTick()
     tree = env.flush()
     assert.equal(channelTrigger(tree).props.disabled, false)
-    assert.match(channelTriggerText(tree), /小号 QQ/)
+    assert.equal(channelTriggerText(tree), '2 条渠道')
   } finally {
     env.mount(() => null)
     stub.restore()
@@ -1312,6 +1347,13 @@ function channelOptionTexts(select) {
     .map((child) => visibleText(child.children).join(''))
 }
 
+/** 绑定行里的会话下拉：第一个选项是「（选择会话）」即未绑定。 */
+function sessionSelects(tree) {
+  return findAll(tree, (node) => node.type === 'select'
+    && (node.children || []).some((child) => child && child.props && child.props.value === ''
+      && visibleText(child.children).join('') === '（选择会话）'))
+}
+
 /** 某个 placeholder 的输入框（绑定行里的对端输入）。 */
 function inputsWithPlaceholder(tree, placeholder) {
   return findAll(tree, (node) => node.type === 'input' && node.props && node.props.placeholder === placeholder)
@@ -1403,6 +1445,98 @@ test('设置页：保存设置时 wechatEnabled 随 config 一起提交', async 
     assert.ok(save, '应该调用 /save')
     assert.equal(save.options.method, 'POST')
     assert.equal(JSON.parse(save.options.body).config.wechatEnabled, true)
+  } finally {
+    env.mount(() => null)
+    globalThis.fetch = original
+  }
+})
+
+test('设置页：新增渠道默认不占会话，同一会话的两条绑定都渲染出来、可单独删除', async () => {
+  const env = await setupPlugin()
+  const state = fullState()
+  state.config.wechatEnabled = true
+  state.wechat = { enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} }
+  state.config.bindings = [
+    { channel: 'qq', qq: '10001', session: 'session-test-0001', name: '主人', enabled: true },
+    { channel: 'wechat', peer: WX, qq: WX, session: 'session-test-0001', name: '小号', enabled: true },
+  ]
+  let tree = env.renderSection([state])
+
+  // 列表按行展示同会话的多条绑定，不是合并成一条。
+  assert.equal(sessionSelects(tree).length, 2, '两条绑定各占一行')
+  assert.deepEqual(sessionSelects(tree).map((node) => node.props.value), ['session-test-0001', 'session-test-0001'])
+  assert.equal(findButton(tree, '删除').length, 2, '每条都能单独删除')
+
+  // 新增的渠道不默认抢占会话：会话留空，绑哪间交给「收发渠道」选择器。
+  findButton(tree, '添加微信渠道')[0].props.onClick({})
+  tree = env.flush()
+  assert.equal(sessionSelects(tree).length, 3)
+  assert.equal(sessionSelects(tree)[2].props.value, '', '新增渠道的会话是空串')
+  assert.equal(channelSelects(tree)[2].props.value, 'wechat')
+
+  // 单独解绑一条：把它的会话改回「（选择会话）」，另一条不受影响。
+  sessionSelects(tree)[0].props.onChange({ target: { value: '' } })
+  tree = env.flush()
+  assert.deepEqual(sessionSelects(tree).map((node) => node.props.value), ['', 'session-test-0001', ''])
+})
+
+test('设置页：对端没填时本地拦下，不发 /save 并指出哪一条', async () => {
+  const env = await setupPlugin()
+  const state = fullState()
+  state.config.wechatEnabled = true
+  state.wechat = { enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} }
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return { json: async () => state }
+  }
+  try {
+    let tree = env.renderSection([state])
+    findButton(tree, '添加微信渠道')[0].props.onClick({})
+    tree = env.flush()
+    findButton(tree, '保存设置')[0].props.onClick({})
+    await nextTick()
+    tree = env.flush()
+
+    assert.equal(calls.some((url) => url.endsWith('/save')), false, '有问题的绑定不能提交')
+    assert.match(textOf(tree), /有 1 条渠道没保存/)
+    assert.match(textOf(tree), /第 2 条渠道（微信）的对端没填/)
+  } finally {
+    env.mount(() => null)
+    globalThis.fetch = original
+  }
+})
+
+test('设置页：保存后把后端丢掉的原因逐条说出来，不静默消失', async () => {
+  const env = await setupPlugin()
+  const state = fullState()
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const address = String(url)
+    calls.push(address)
+    if (address.endsWith('/save')) {
+      return {
+        json: async () => ({
+          ok: true,
+          dropped: [{ channel: 'wechat', peer: WX, reason: '这个对端已经有一条渠道了' }],
+        }),
+      }
+    }
+    return { json: async () => state }
+  }
+  try {
+    const tree = env.renderSection([state])
+    findButton(tree, '保存设置')[0].props.onClick({})
+    await nextTick()
+    const after = env.flush()
+
+    assert.equal(calls.some((url) => url.endsWith('/save')), true, '正常绑定照常提交')
+    const text = textOf(after)
+    assert.match(text, /设置已保存，但有 1 条渠道没保存/)
+    assert.match(text, /这个对端已经有一条渠道了（微信 o9cq/)
+    assert.match(text, /没保存/)
   } finally {
     env.mount(() => null)
     globalThis.fetch = original
@@ -1711,16 +1845,28 @@ test('渠道按钮：微信渠道显示「微信」前缀，提交 /bindings/ass
     { channel: 'wechat', peer: WX, qq: WX, session: '', name: '小号', enabled: true },
     { channel: 'qq', qq: '10001', session: 'session-test-0002', name: '主人', enabled: true },
   ]
-  const stub = stubBindFetch({ bindings })
+  // 假的 /bindings/assign：按提交的整组把两条都挂到当前会话。
+  const stub = stubBindFetch({
+    bindings,
+    onAssign: (body) => ({
+      ok: true,
+      bindings: bindings.map((binding) => {
+        const peer = binding.peer || binding.qq
+        const channel = binding.channel || 'qq'
+        const picked = (body.bindings || []).some((item) => item.channel === channel && item.peer === peer)
+        return { ...binding, session: picked ? body.sessionId : '' }
+      }),
+    }),
+  })
   try {
     let tree = await mountBindChannel(env, { sessionId: 'session-test-0002' })
     assert.equal(channelTriggerText(tree), '主人 QQ')
 
     tree = await openChannelMenu(env)
-    assert.deepEqual(channelOptions(tree).map(channelOptionLabel), ['不绑定', '小号 微信', '主人 QQ'])
+    assert.deepEqual(channelOptions(tree).map(channelOptionLabel), ['小号 微信', '主人 QQ', '全部解绑'])
     assert.deepEqual(
       channelOptions(tree).map((node) => node.props.title),
-      ['不绑定', '微信 ' + WX, 'QQ 10001'],
+      ['微信 ' + WX, 'QQ 10001', '只解除这间会话的绑定，渠道仍保留在设置页'],
       '完整账号放 title，微信的字母与 @ 不删',
     )
 
@@ -1729,12 +1875,15 @@ test('渠道按钮：微信渠道显示「微信」前缀，提交 /bindings/ass
     await nextTick()
     tree = env.flush()
     const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
-    assert.ok(call, '切换微信渠道要提交 /bindings/assign')
+    assert.ok(call, '勾选微信渠道要提交 /bindings/assign')
     assert.deepEqual(JSON.parse(call.options.body), {
       sessionId: 'session-test-0002',
-      qq: WX,
-      channel: 'wechat',
+      bindings: [
+        { channel: 'wechat', peer: WX },
+        { channel: 'qq', peer: '10001' },
+      ],
     })
+    assert.equal(channelTriggerText(tree), '2 条渠道')
   } finally {
     env.mount(() => null)
     stub.restore()

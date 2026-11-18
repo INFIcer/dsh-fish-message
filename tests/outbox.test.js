@@ -10,6 +10,8 @@ import { Logger } from '../lib/logger.js'
 import { normalizeConfig } from '../lib/config.js'
 
 const QQ = '10001'
+/** 模拟「本轮回复由 QQ 渠道的入站触发」：出站只认本轮来源。 */
+const QQ_SOURCE = { channel: 'qq', peer: QQ }
 const session = 'session-outbox-test'
 
 function tempDir() {
@@ -257,7 +259,7 @@ test('Bridge：一轮多块发送中途失败，只入队还没发出去的块',
     return original(peer, segments)
   }
 
-  await bridge.deliverAssistantTurn(session, '[QQ]块一[/QQ][QQ]块二[/QQ][QQ]块三[/QQ]')
+  await bridge.deliverAssistantTurn(session, '[MSG]块一[/MSG][MSG]块二[/MSG][MSG]块三[/MSG]', [], QQ_SOURCE)
   assert.deepEqual(transport.sent.map((x) => x.segments[0].data.text), ['块一'], '第一块已经发出去')
   assert.deepEqual(outbox.list({ limit: 10 }).map((x) => x.segments[0].data.text), ['块二', '块三'], '只入队剩余块')
 
@@ -292,7 +294,7 @@ test('Bridge：一组多段发送中途失败，只入队还没发出的段', as
 test('Bridge：没装本地 AI 时 [语音]文本[/语音] 只提示，不进补发队列', async () => {
   const { bridge, transport, outbox } = makeBridge()
   await bridge.start({ syncNow: false })
-  const result = await bridge.deliverAssistantTurn(session, '块外 [QQ][语音]晚安，主人[/语音][/QQ] 块外')
+  const result = await bridge.deliverAssistantTurn(session, '块外 [MSG][语音]晚安，主人[/语音][/MSG] 块外', [], QQ_SOURCE)
   assert.equal(result.code, 'service_not_installed')
   assert.match(result.hint, /本地 AI 插件没装或没启动/)
   assert.equal(outbox.pending(), 0, '没有合成结果，也没有可补发的语音文本')
@@ -326,7 +328,7 @@ test('Bridge：示例占位符 [语音:路径] 不发、不入队，提示明确
   const { bridge, transport, outbox, store } = makeBridge()
   await bridge.start({ syncNow: false })
 
-  const result = await bridge.deliverAssistantTurn(session, '[QQ][语音:路径][/QQ]')
+  const result = await bridge.deliverAssistantTurn(session, '[MSG][语音:路径][/MSG]', [], QQ_SOURCE)
   assert.equal(result.ok, true)
   assert.equal(outbox.pending(), 0, '占位符不能进补发队列')
   assert.equal(transport.sent.length, 0, '占位符不能真的发出去')

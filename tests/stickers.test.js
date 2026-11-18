@@ -28,6 +28,9 @@ import { createFishMessageApi } from '../lib/service.js'
 import { buildStickerToolDefinitions } from '../lib/tools.js'
 import { Bridge } from '../lib/bridge.js'
 
+/** 模拟「本轮回复由 QQ 渠道的入站触发」：出站只认本轮来源。 */
+const QQ_SOURCE = { channel: 'qq', peer: '10001' }
+
 function makeStore(config = {}, extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fish-sticker-'))
   const store = new StickerStore({
@@ -557,7 +560,7 @@ test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时只记错�
   })
   bridge.running = true
 
-  await bridge.deliverAssistantTurn('session-b', '[QQ]看 [表情:晚安][/QQ]')
+  await bridge.deliverAssistantTurn('session-b', '[MSG]看 [表情:晚安][/MSG]', [], QQ_SOURCE)
   assert.equal(emitted.length, 2, '文字和表情各发一次')
   assert.equal(emitted[0].qq, '10001')
   assert.equal(emitted[0].segments[0].type, 'text')
@@ -565,7 +568,7 @@ test('Bridge：出站 [表情:…] 发图片段并 bump；找不到时只记错�
   assert.match(emitted[1].segments[0].data.file, /^base64:\/\//)
   assert.equal(store.get(entry.id).used_count, 1)
 
-  await bridge.deliverAssistantTurn('session-b', '[QQ][表情:没有这个表情][/QQ]')
+  await bridge.deliverAssistantTurn('session-b', '[MSG][表情:没有这个表情][/MSG]', [], QQ_SOURCE)
   assert.equal(emitted.length, 2, '找不到时不应该发任何东西')
   assert.equal(notify.length, 0, '找不到表情时不再往会话里塞提示')
   assert.match(errorRecord.join('\n'), /找不到表情/)

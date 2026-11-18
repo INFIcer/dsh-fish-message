@@ -11,6 +11,8 @@ import { NapCatOneBotTransport } from '../lib/transport/napcat-onebot.js'
 import { MockOneBotServer, message, wait, sleep } from './mock-onebot.js'
 
 const QQ = '10001'
+/** 模拟「本轮回复由 QQ 渠道的入站触发」：出站只认本轮来源。 */
+const QQ_SOURCE = { channel: 'qq', peer: QQ }
 const session = 'session-integration-1'
 
 class fakeDeliver {
@@ -81,7 +83,7 @@ test('mock OneBot：HTTP 补投按时间排序、去重、可重发文字', asyn
   assert.equal(connect.online, true)
   assert.equal(connect.mode, 'http')
   assert.ok(connect.lastOkAt > 0)
-  await bridge.deliverAssistantTurn(session, '块外 [QQ]发到 QQ 的字[/QQ] 块外')
+  await bridge.deliverAssistantTurn(session, '块外 [MSG]发到 QQ 的字[/MSG] 块外', [], QQ_SOURCE)
   assert.equal(server.sent.length, 1)
   assert.deepEqual(server.sent[0].message, [{ type: 'text', data: { text: '发到 QQ 的字' } }])
   assert.equal(String(server.sent[0].user_id), QQ)

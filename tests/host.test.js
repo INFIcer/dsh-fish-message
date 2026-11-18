@@ -100,8 +100,8 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(status.defaults.inboundImagePrompt, defaultImagePrompt)
   assert.equal(status.config.inboundImagePrompt, '')
   // 两条提醒的默认文案由宿主下发，设置页占位文字直接用它。
-  assert.match(status.defaults.guardStuckPrompt, /通过 QQ 与用户对话/)
-  assert.match(status.defaults.guardQqPrompt, /没有 QQ 出站/)
+  assert.match(status.defaults.guardStuckPrompt, /通过消息渠道与用户对话/)
+  assert.match(status.defaults.guardQqPrompt, /没有消息发出/)
   // 暂停转发：状态里有待转发队列，默认没在暂停。
   assert.equal(typeof status.forwardFile, 'string')
   assert.equal(status.bridge.forward.paused, false)
@@ -168,11 +168,13 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(sticker.total, 0)
   assert.equal(sticker.stats.count, 0)
 
+  // 这一轮由 QQ 渠道的入站触发：桥只给本轮有来源的回合出站。
+  app.bridge.noteInboundSource(session, 'qq', QQ)
   const send = listen.get('session/event')
   assert.equal(typeof send, 'function')
   send({ id: session }, {
     type: 'assistant/message',
-    data: { turn: 1, message: { content: [{ type: 'text', text: '块外 [QQ]宿主入口测试[/QQ] 块外' }] } },
+    data: { turn: 1, message: { content: [{ type: 'text', text: '块外 [MSG]宿主入口测试[/MSG] 块外' }] } },
   })
   send({ id: session }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
   const emitted = await wait(() => server.sent.length > 0, 2000)
@@ -184,7 +186,7 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   await server.stop()
 })
 
-test('会话级绑定：/bindings/assign 转移、换渠道、解绑与参数校验', async () => {
+test('会话级绑定：/bindings/assign 同一会话挂多条、集合写回、解绑与参数校验', async () => {
   const server = await new MockOneBotServer().start()
   const dir = mkdtempSync(join(tmpdir(), 'fish-bind-'))
   process.env.DSH_HOME = dir
@@ -253,49 +255,62 @@ test('会话级绑定：/bindings/assign 转移、换渠道、解绑与参数校
   }
   const sessionOf = (body, qq) => (body.bindings.find((b) => b.qq === qq) || {}).session
 
-  // 转移：把 10002（原本绑 B）绑到 A。A 原来的 10001 回到「未绑定」，B 空出来；
-  // 渠道一条都不能少（设置页里还要能再绑）。
+  // 单条调用：把 10002（原本绑 B）绑到 A。A 现在同时挂 10001 和 10002 —— 同一间会话可以多条；
+  // B 空出来，渠道一条都不能少（设置页里还要能再绑）。
   let result = await assign({ sessionId: sessionA, qq: '10002' })
   assert.equal(result.status, 200)
   assert.equal(result.body.ok, true)
   assert.equal(result.body.bindings.length, 2)
   assert.equal(sessionOf(result.body, '10002'), sessionA)
-  assert.equal(sessionOf(result.body, '10001'), '')
-  assert.equal(app.bridge.bySession.has(''), false, '空 session 不能进 bySession')
-  assert.equal(app.bridge.bySession.get('bind-a').qq, '10002')
+  assert.equal(sessionOf(result.body, '10001'), sessionA, '同一间会话的其它绑定不能被挤掉')
+  assert.deepEqual(app.bridge.bySession.get('bind-a').map((b) => b.qq).sort(), ['10001', '10002'])
   assert.equal(app.bridge.bySession.has('bind-b'), false, 'B 已经没有渠道')
   assert.equal(app.guard.isBinding(sessionA), true)
   assert.equal(app.guard.isBinding(sessionB), false)
 
-  // 同一会话换渠道：10001 绑回 A，10002 变未绑定但仍在配置里。
-  result = await assign({ sessionId: sessionA, qq: '10001' })
+  // 多选集合语义：这间会话只留 10001，10002 回到未绑定（渠道保留）。
+  result = await assign({ sessionId: sessionA, bindings: [{ channel: 'qq', peer: '10001' }] })
   assert.equal(result.status, 200)
-  assert.equal(result.body.bindings.length, 2)
   assert.equal(sessionOf(result.body, '10001'), sessionA)
   assert.equal(sessionOf(result.body, '10002'), '')
-  assert.equal(app.bridge.bySession.get('bind-a').qq, '10001')
+  assert.equal(app.bridge.bySession.get('bind-a').length, 1)
 
-  // 解绑：qq 传空串只清 session，渠道保留。
-  result = await assign({ sessionId: sessionA, qq: '' })
+  // 一次写回多条：集合里有两条就挂两条。
+  result = await assign({
+    sessionId: sessionA,
+    bindings: [{ channel: 'qq', peer: '10001' }, { channel: 'qq', peer: '10002' }],
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.bindings.filter((b) => b.session === sessionA).length, 2)
+  assert.equal(app.bridge.bySession.get('bind-a').length, 2)
+
+  // 解绑：空集合只清 session，渠道保留。
+  result = await assign({ sessionId: sessionA, bindings: [] })
   assert.equal(result.status, 200)
   assert.equal(result.body.bindings.length, 2, '解绑不能删除渠道')
   assert.equal(result.body.bindings.every((b) => b.session === ''), true)
   assert.equal(app.guard.isBinding(sessionA), false)
   assert.equal(app.bridge.bySession.size, 0, '全部解绑后没有会话索引')
-  assert.equal(app.bridge.byPeer.size, 2, '渠道本身还在，照常按 QQ 收消息')
+  assert.equal(app.bridge.byPeer.size, 2, '渠道本身还在，照常按对端收消息')
 
   // 落盘：重新读配置，两条未绑定会话的渠道都在。
   const disk = app.configStore.load({})
   assert.equal(disk.bindings.length, 2)
   assert.equal(disk.bindings.every((b) => b.session === ''), true)
 
-  // 参数校验：没有会话 id、QQ 不存在都拒绝，配置不动。
+  // 参数校验：没有会话 id、渠道不存在、通道写错、对端为空都拒绝，配置不动。
   result = await assign({ qq: '10001' })
   assert.equal(result.status, 400)
   assert.match(result.body.error, /会话/)
   result = await assign({ sessionId: sessionA, qq: '99999' })
   assert.equal(result.status, 400)
   assert.match(result.body.error, /99999/)
+  result = await assign({ sessionId: sessionA, bindings: [{ channel: 'wx', peer: '10001' }] })
+  assert.equal(result.status, 400)
+  assert.match(result.body.error, /qq 或 wechat/)
+  result = await assign({ sessionId: sessionA, bindings: [{ channel: 'qq', peer: '' }] })
+  assert.equal(result.status, 400)
+  assert.match(result.body.error, /不能为空/)
   assert.equal(app.configStore.load({}).bindings.every((b) => b.session === ''), true, '失败不能改配置')
 
   // 只接受 POST。
@@ -416,7 +431,7 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   monitorStatus.lastProgressAt = monitorStatus.statusSince
   await sleep(160)
   assert.ok(injections.length >= 1, '卡住时要把提醒注入会话')
-  assert.match(injections[0].content[0].text, /通过 QQ 与用户对话/)
+  assert.match(injections[0].content[0].text, /通过消息渠道与用户对话/)
   assert.equal(injections[0].role, 'user')
 
   // 宿主正忙时注入会被拒：提醒先排队，一有空就立刻重试，而不是等下个心跳。

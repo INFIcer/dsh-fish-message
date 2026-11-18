@@ -29,6 +29,8 @@ async function wait(condition, ms = 1000, interval = 20) {
 
 const tempDir = () => mkdtempSync(join(tmpdir(), 'fish-message-test-'))
 const QQ = '10001'
+/** 模拟「本轮回复由 QQ 渠道的入站触发」：出站只认本轮来源。 */
+const QQ_SOURCE = { channel: 'qq', peer: QQ }
 const session = 'session-test-0001'
 
 function makeMessage(id, text, time, qq = QQ) {
@@ -331,10 +333,10 @@ test('保存设置后 stop → start：队列能重新接收', async () => {
   await bridge.stop()
 })
 
-test('出站：只发 [QQ] 块内，块外不发', async () => {
+test('出站：只发 [MSG] 块内，块外不发', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  await bridge.deliverAssistantTurn(session, '这段只留本地。 [QQ]你好，手机[/QQ] 这段也不发。')
+  await bridge.deliverAssistantTurn(session, '这段只留本地。 [MSG]你好，手机[/MSG] 这段也不发。', [], QQ_SOURCE)
   assert.equal(transport.sent.length, 1)
   assert.deepEqual(transport.sent[0].segments, [{ type: 'text', data: { text: '你好，手机' } }])
   await bridge.stop()
@@ -343,7 +345,7 @@ test('出站：只发 [QQ] 块内，块外不发', async () => {
 test('出站：关掉「只发标记内」时整条发但剥标记', async () => {
   const { bridge, transport } = makeBridge({ config: { onlyInsideMarkers: false } })
   await bridge.start({ syncNow: false })
-  await bridge.deliverAssistantTurn(session, '前 [QQ]中[/QQ] 后')
+  await bridge.deliverAssistantTurn(session, '前 [MSG]中[/MSG] 后', [], QQ_SOURCE)
   assert.equal(transport.sent.length, 1)
   assert.equal(transport.sent[0].segments[0].data.text, '前 中 后')
   await bridge.stop()
@@ -356,10 +358,11 @@ function assistantStep(turn, step, content, id = `message-${turn}-${step}`) {
 
 const turnEnd = (turn, kind = 'completed') => ({ type: 'turn/end', data: { turn, reason: { kind } } })
 
-test('出站：一轮两个模型步，中途步的 [QQ] 也发出去且顺序在前', async () => {
+test('出站：一轮两个模型步，中途步的 [MSG] 也发出去且顺序在前', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '先去查 [QQ]第一步的结论[/QQ] 然后继续' }]))
+  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '先去查 [MSG]第一步的结论[/MSG] 然后继续' }]))
   bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '收尾完成，这一步没有要发的' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 1), true)
@@ -367,12 +370,13 @@ test('出站：一轮两个模型步，中途步的 [QQ] 也发出去且顺序�
   await bridge.stop()
 })
 
-test('出站：一轮多个模型步各有一段 [QQ] 时按顺序全发', async () => {
+test('出站：一轮多个模型步各有一段 [MSG] 时按顺序全发', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]第一段[/QQ]' }]))
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[QQ]第二段[/QQ]' }]))
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 3, [{ type: 'text', text: '[QQ]第三段[/QQ]' }]))
+  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[MSG]第一段[/MSG]' }]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[MSG]第二段[/MSG]' }]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 3, [{ type: 'text', text: '[MSG]第三段[/MSG]' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 3), true)
   assert.deepEqual(
@@ -382,10 +386,11 @@ test('出站：一轮多个模型步各有一段 [QQ] 时按顺序全发', async
   await bridge.stop()
 })
 
-test('出站：一步里写三个 [QQ] 块 → 三条独立消息，顺序与块序一致', async () => {
+test('出站：一步里写三个 [MSG] 块 → 三条独立消息，顺序与块序一致', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]第一块[/QQ][QQ]第二块[/QQ][QQ]第三块[/QQ]' }]))
+  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[MSG]第一块[/MSG][MSG]第二块[/MSG][MSG]第三块[/MSG]' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 3), true)
   assert.deepEqual(
@@ -398,7 +403,8 @@ test('出站：一步里写三个 [QQ] 块 → 三条独立消息，顺序与块
 test('出站：块外文字不发、空块忽略，只发非空块', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '草稿 [QQ]第一块[/QQ] [QQ]   [/QQ] 中间 [QQ]第二块[/QQ] 尾巴' }]))
+  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '草稿 [MSG]第一块[/MSG] [MSG]   [/MSG] 中间 [MSG]第二块[/MSG] 尾巴' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 2), true)
   await sleep(60)
@@ -412,7 +418,7 @@ test('出站：块内文字与 [图片] 按出现顺序发，下一块另起消�
   writeFileSync(image, 'fake-png')
   const { bridge, transport } = makeBridge({ dir })
   await bridge.start({ syncNow: false })
-  await bridge.deliverAssistantTurn(session, `[QQ]看图 [图片:${image}] 好看[/QQ][QQ]第二块[/QQ]`)
+  await bridge.deliverAssistantTurn(session, `[MSG]看图 [图片:${image}] 好看[/MSG][MSG]第二块[/MSG]`, [], QQ_SOURCE)
   assert.equal(transport.sent.length, 4)
   assert.deepEqual(transport.sent.map((x) => x.segments[0].type), ['text', 'image', 'text', 'text'])
   assert.equal(transport.sent[0].segments[0].data.text, '看图')
@@ -424,7 +430,8 @@ test('出站：块内文字与 [图片] 按出现顺序发，下一块另起消�
 test('出站：同一条 assistant/message 重复投递只发一遍', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  const event = assistantStep(1, 1, [{ type: 'text', text: '[QQ]只发这一遍[/QQ]' }])
+  bridge.noteInboundSource(session, 'qq', QQ)
+  const event = assistantStep(1, 1, [{ type: 'text', text: '[MSG]只发这一遍[/MSG]' }])
   bridge.onSessionEvent({ id: session }, event)
   bridge.onSessionEvent({ id: session }, event)
   bridge.onSessionEvent({ id: session }, turnEnd(1))
@@ -434,10 +441,11 @@ test('出站：同一条 assistant/message 重复投递只发一遍', async () =
   await bridge.stop()
 })
 
-test('出站：某步只写了 [QQ] 没写 [/QQ]，不会把下一步的内部文字粘进来', async () => {
+test('出站：某步只写了 [MSG] 没写 [/MSG]，不会把下一步的内部文字粘进来', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]只发这句' }]))
+  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[MSG]只发这句' }]))
   bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '这段是内部草稿，不外发' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 1), true)
@@ -445,10 +453,10 @@ test('出站：某步只写了 [QQ] 没写 [/QQ]，不会把下一步的内部�
   await bridge.stop()
 })
 
-test('出站：回合被中断时，已累积的 [QQ] 不发送', async () => {
+test('出站：回合被中断时，已累积的 [MSG] 不发送', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[QQ]写到一半的话[/QQ]' }]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[MSG]写到一半的话[/MSG]' }]))
   bridge.onSessionEvent({ id: session }, {
     type: 'assistant/message',
     data: { turn: 1, step: 2, interrupted: true, message: { id: 'message-1-2', content: [{ type: 'text', text: '半句话' }] } },
@@ -466,9 +474,10 @@ test('出站：同一张图跨模型步只发一次', async () => {
   const { bridge, transport, delivery } = makeBridge({ dir })
   delivery.attachmentPath = async () => image
   await bridge.start({ syncNow: false })
+  bridge.noteInboundSource(session, 'qq', QQ)
   const imageBlock = { type: 'image', attachment: { attachmentId: 'sha-image-a', mediaType: 'image/png', bytes: 9, width: 1, height: 1 } }
   bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [imageBlock]))
-  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[QQ]看图[/QQ]' }, imageBlock]))
+  bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[MSG]看图[/MSG]' }, imageBlock]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 2), true)
   await sleep(60)
@@ -552,7 +561,7 @@ test('配置：派生 WS 地址、旧桥字段迁移、范围钳制', () => {
   assert.equal(clamp.logLevel, 'info')
 })
 
-test('配置：渠道可以不绑定会话，空 session 只按 qq 去重', () => {
+test('配置：渠道可以不绑定会话，同对端去重、同会话可多条', () => {
   const cfg = normalizeConfig({
     bindings: [
       { qq: '10001', session: '', name: '主人' },
@@ -564,11 +573,13 @@ test('配置：渠道可以不绑定会话，空 session 只按 qq 去重', () =
       { qq: '', session: '' },
     ],
   })
+  // 同一对端重复只留第一条；同一间会话挂多条是正常用法，不再按会话去重。
   assert.deepEqual(cfg.bindings.map((b) => [b.qq, b.session, b.enabled]), [
     ['10001', '', true],
     ['10002', 'session-a', true],
     ['10003', '', true],
     ['10004', 'session-b', true],
+    ['10005', 'session-b', true],
   ])
 
   // 保存后读回：空 session 的渠道保留，不会被当成坏配置丢掉。
@@ -639,7 +650,7 @@ test('入站语音：只落盘并递「语音：路径」，不联网、不转�
 
 test('出站 [语音]文本[/语音]：没装本地 AI 时只提示，不发任何消息', async () => {
   const { bridge, transport } = makeBridge()
-  const result = await bridge.deliverAssistantTurn(session, '[QQ][语音]晚安，主人[/语音][/QQ]')
+  const result = await bridge.deliverAssistantTurn(session, '[MSG][语音]晚安，主人[/语音][/MSG]', [], QQ_SOURCE)
   assert.equal(transport.sent.length, 0, '不能合成、也不能发任何消息')
   assert.equal(result.ok, false)
   assert.equal(result.code, 'service_not_installed')
@@ -650,7 +661,7 @@ test('出站 [语音]文本[/语音]：没装本地 AI 时只提示，不发任�
 
 test('出站 [语音]文本[/语音] 与文字混排：文字照发，语音只提示', async () => {
   const { bridge, transport, delivery } = makeBridge()
-  const result = await bridge.deliverAssistantTurn(session, '[QQ]先听这个 [语音]晚安[/语音][/QQ]')
+  const result = await bridge.deliverAssistantTurn(session, '[MSG]先听这个 [语音]晚安[/语音][/MSG]', [], QQ_SOURCE)
   assert.equal(transport.sent.length, 1)
   assert.deepEqual(transport.sent[0].segments, [{ type: 'text', data: { text: '先听这个' } }])
   assert.equal(result.code, 'service_not_installed')
@@ -665,7 +676,7 @@ test('出站 [语音]文本[/语音]：本地 AI 正常时按配置音色/语速
   const service = new fakeService()
   service.output = audio
   const { bridge, transport } = makeBridge({ dir, ai: buildAi(service) })
-  const result = await bridge.deliverAssistantTurn(session, '[QQ][语音]晚安，主人[/语音][/QQ]')
+  const result = await bridge.deliverAssistantTurn(session, '[MSG][语音]晚安，主人[/语音][/MSG]', [], QQ_SOURCE)
   assert.equal(result.ok, true)
   assert.equal(transport.sent.length, 1)
   assert.equal(transport.sent[0].segments[0].type, 'record')
@@ -685,7 +696,7 @@ test('出站 [语音]文本[/语音]：长文本合成多段后按顺序发多�
   }
   const sentence = '一'.repeat(98) + '。'
   const { bridge, transport } = makeBridge({ dir, ai: buildAi(service) })
-  const result = await bridge.deliverAssistantTurn(session, '[QQ][语音]' + sentence.repeat(3) + '[/语音][/QQ]')
+  const result = await bridge.deliverAssistantTurn(session, '[MSG][语音]' + sentence.repeat(3) + '[/语音][/MSG]', [], QQ_SOURCE)
   assert.equal(result.ok, true)
   assert.equal(service.calls.tts.length, 2)
   assert.equal(transport.sent.length, 2, '两段语音应各发一条，且保持顺序')
@@ -697,7 +708,7 @@ test('出站 [语音]文本[/语音]：长文本合成多段后按顺序发多�
 test('出站语音：服务在但 tts 能力关时降级提示，不抛错', async () => {
   const service = new fakeService({ ttsOk: false, caps: { tts: { available: false, reason: 'model_missing' } } })
   const { bridge, transport } = makeBridge({ ai: buildAi(service) })
-  const result = await bridge.deliverAssistantTurn(session, '[QQ][语音]晚安[/语音][/QQ]')
+  const result = await bridge.deliverAssistantTurn(session, '[MSG][语音]晚安[/语音][/MSG]', [], QQ_SOURCE)
   assert.equal(transport.sent.length, 0)
   assert.equal(result.ok, false)
   assert.equal(result.code, 'model_missing')
@@ -915,7 +926,7 @@ test('出站 [语音:路径]：照常发已有音频文件，不合成', async (
   const audio = join(dir, 'a.wav')
   writeFileSync(audio, makeWav(0.2))
   const { bridge, transport } = makeBridge({ dir })
-  const result = await bridge.deliverAssistantTurn(session, `[QQ][语音:${audio}][/QQ]`)
+  const result = await bridge.deliverAssistantTurn(session, `[MSG][语音:${audio}][/MSG]`, [], QQ_SOURCE)
   assert.equal(result.ok, true)
   assert.equal(transport.sent.length, 1)
   assert.equal(transport.sent[0].segments[0].type, 'record')
@@ -1337,7 +1348,7 @@ test('防失联工具守卫：挡住会等人的工具（提问/干等），不�
     const result = guard({ name: name })
     assert.equal(typeof result, 'string')
     assert.match(result, /不能用/)
-    assert.match(result, /QQ/)
+    assert.match(result, /聊天软件|渠道/)
   }
   assert.match(guard({ name: 'ask_user_question' }), /ask_user_question/)
   assert.match(guard({ name: 'wait_agent' }), /wait_agent/)
@@ -1346,14 +1357,15 @@ test('防失联工具守卫：挡住会等人的工具（提问/干等），不�
   assert.equal(guard({ name: 'web_search' }), undefined)
   assert.equal(guard(null), undefined)
   assert.equal(guard({}), undefined)
-  // 提示词只留代码管不到的约定：回复走 [QQ] 块、拍板发 QQ、长任务派子代理。
+  // 提示词只留代码管不到的约定：回复走 [MSG] 块、拍板发 QQ、长任务派子代理。
   assert.match(guardRules, /子代理/)
-  assert.match(guardRules, /\[QQ\]/)
+  assert.match(guardRules, /\[MSG\][\s\S]*\[\/MSG\]/)
+  assert.doesNotMatch(guardRules, /QQ/, '提示词里不再出现 QQ 这个说法')
   assert.match(guardRules, /用户/)
   assert.doesNotMatch(guardRules, /主人/, '用通用称呼，不带个人设定')
   assert.ok(guardRules.split('\n').length <= 4, '短提示：最多 4 句')
   // 下面这些由机制保证，提示词里不再重复（同一条规矩只留一处出处）：
-  // 拒用工具 → 工具守卫；审批 → 策略 never；[QQ] 出站 → 桥只投递块内内容。
+  // 拒用工具 → 工具守卫；审批 → 策略 never；[MSG] 出站 → 桥只投递块内内容。
   assert.doesNotMatch(guardRules, /ask_user_question|wait_agent/)
   assert.doesNotMatch(guardRules, /send_message/)
   assert.doesNotMatch(guardRules, /重启|dsh_restart|杀进程|进程/, '重启/杀进程是独立插件的职责，鱼讯的提示词不越界')
@@ -1439,7 +1451,7 @@ test('防失联：turn/end 之后才发 QQ（桥的投递晚一步）不算这�
     [],
     'turn/end 那一刻不判定，只记下待判定',
   )
-  // 桥正是在 turn/end 之后才把 [QQ] 投出去的：1 秒后出站事件才到。
+  // 桥正是在 turn/end 之后才把 [MSG] 投出去的：1 秒后出站事件才到。
   clock.now += 1000
   monitor.noteQqOutbound(QQ)
   assert.deepEqual(pastGrace(clock, monitor), [], '出站已经记账，宽限过后不该提醒')
@@ -1474,7 +1486,7 @@ test('防失联：连续 3 个正常发 QQ 的回合，永不误提醒', () => {
     monitor.handleEvent(session, { type: 'turn/start', data: { turn } })
     monitor.handleEvent(session, { type: 'assistant/message', data: { turn, step: 1 } })
     assert.deepEqual(monitor.handleEvent(session, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } }), [])
-    // 桥在 turn/end 之后才投递 [QQ]：1 秒后出站。
+    // 桥在 turn/end 之后才投递 [MSG]：1 秒后出站。
     clock.now += 1000
     monitor.noteQqOutbound(QQ)
     assert.deepEqual(pastGrace(clock, monitor), [], `第 ${turn} 个正常回合不该提醒`)

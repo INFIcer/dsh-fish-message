@@ -91,7 +91,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 ```text
 这句留本地。
 
-[QQ]【验收 1】DSH → QQ 文字通了。[/QQ]
+[MSG]【验收 1】DSH → QQ 文字通了。[/MSG]
 ```
 
 期望：
@@ -148,7 +148,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 在 DSH 会话里发：
 
 ```text
-[QQ][语音]【验收 3】这是 DSH 发出来的语音。[/语音][/QQ]
+[MSG][语音]【验收 3】这是 DSH 发出来的语音。[/语音][/MSG]
 ```
 
 期望：
@@ -171,7 +171,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 先在会话里拿到一个存在的 wav 路径，再发：
 
 ```text
-[QQ][语音:D:\audio\a.wav][/QQ]
+[MSG][语音:D:\audio\a.wav][/MSG]
 ```
 
 - QQ 收到语音条；
@@ -179,24 +179,24 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 ---
 
-## 6. 转义发送字面量 `[/QQ]`
+## 6. 转义发送字面量 `[/MSG]`
 
 在 DSH 会话里发：
 
 ```text
-[QQ]【验收 4】字面量 A 和 B 都该原样出现。[/QQ]
+[MSG]【验收 4】字面量 A 和 B 都该原样出现。[/MSG]
 ```
 
-把上面块里的 `A` 换成 `\[\/QQ]`，`B` 换成 `\[QQ]`（两个 token 都放在块内，
+把上面块里的 `A` 换成 `\[\/MSG]`，`B` 换成 `\[MSG]`（两个 token 都放在块内，
 不要加空格；参见 `docs/FORMAT.md` 第 4.3 节）。
 
 期望 QQ 收到：
 
 ```text
-【验收 4】字面量 [/QQ] 和 [QQ] 都该原样出现。
+【验收 4】字面量 [/MSG] 和 [MSG] 都该原样出现。
 ```
 
-如果 QQ 只收到前半句，说明 `[/QQ]` 没转义，块提前结束了。
+如果 QQ 只收到前半句，说明 `[/MSG]` 没转义，块提前结束了。
 
 ---
 
@@ -243,7 +243,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 DSH → QQ：
 
 ```text
-[QQ]【验收 5】[图片:C:\pics\test.png][/QQ]
+[MSG]【验收 5】[图片:C:\pics\test.png][/MSG]
 ```
 
 QQ → DSH：主人发一张图，期望会话收到图片附件；纯文本模型至少能在文字里看到本地路径。
@@ -307,8 +307,8 @@ Get-Content "$env:USERPROFILE\.dsh\fish-message-config.json" -Raw
 2. 点「打开图库管理」→ 设置页之上打开「表情库」弹窗；搜索框、刷新、上传、打开表情库文件夹、删除未使用、清理重复都在弹窗的工具条/列表里；
 3. 点「打开表情库文件夹」→ 资源管理器打开当前配置的库目录（默认 `C:\Users\Administrator\.dsh\fish-message-stickers\`）；把该目录临时改名后再点一次，应先建回目录再打开；
 4. 上传一张 GIF + 一张 PNG（多选）→ 网格出现两张，GIF 预览会动；再传同一张应只合并标签、不新增；
-5. 拿到某条表情的文件名，在 DSH 里发 `[QQ][表情:文件名][/QQ]` → QQ 收到动图，管理页该条「已使用 N 次」+1；
-6. 发 `[QQ][表情:根本没有这个][/QQ]` → 当前 DSH 会话收到「找不到表情」提示，日志有记录；
+5. 拿到某条表情的文件名，在 DSH 里发 `[MSG][表情:文件名][/MSG]` → QQ 收到动图，管理页该条「已使用 N 次」+1；
+6. 发 `[MSG][表情:根本没有这个][/MSG]` → 当前 DSH 会话收到「找不到表情」提示，日志有记录；
 7. 取图防穿越：`GET /dsh-fish-message/stickers/file?path=../../secret.png` 应返回 403；
 8. 清理：「删除未使用」只删 `used_count=0` 的条目；「清理重复」后同 sha 只留一条；
 9. 同一张图连发两次 → 收图图库只多一条、缓存目录只留一个 `qq-image-<sha 前 16 位>.<扩展名>`，入表情库也只一条。
@@ -380,7 +380,7 @@ notepad "$profileDir\package.json"
 - 主人 QQ → DSH 语音：会话应收到一行「语音：路径，N 秒」；分析可用时同一行再带情感、背景音、转写；
 - DSH → QQ `[语音]文字[/语音]` → 本地 AI 正常时收到语音条；停掉后只收到提示；
 - DSH → QQ `[语音:路径]` → 收到语音条；
-- DSH → QQ 字面量 `[/QQ]`；
+- DSH → QQ 字面量 `[/MSG]`；
 - 停 NapCat → 主人发 2 条 → 启动 NapCat → 补投；
 - 可选：图片双向、`[文件:…]`、入站识图三态（继承时看插件的开关）；
 - 可选：在「图片识别提示词」填自定义内容后发图，描述应符合提示词要求；清空/恢复默认后回到默认文案。

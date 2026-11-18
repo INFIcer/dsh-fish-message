@@ -15,6 +15,8 @@ import { normalizeConfig } from '../lib/config.js'
 import { InflightQueue } from '../lib/inflight.js'
 
 const QQ = '10001'
+/** 模拟「本轮回复由 QQ 渠道的入站触发」：出站只认本轮来源。 */
+const QQ_SOURCE = { channel: 'qq', peer: QQ }
 const session = 'session-inflight'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -93,9 +95,9 @@ test('待发记录：一个段正在等待节奏时重启，新实例补发一�
   const first = makeBridge({ dir, sleep: async () => { await gate } })
   await first.bridge.start({ syncNow: false })
   // 首条按新口径不等，所以先发一条「上一条」，第二条才会进等待。
-  await first.bridge.deliverAssistantTurn(session, '[QQ]先发一条[/QQ]')
+  await first.bridge.deliverAssistantTurn(session, '[MSG]先发一条[/MSG]', [], QQ_SOURCE)
 
-  const pending = first.bridge.deliverAssistantTurn(session, '[QQ]等待中被重启[/QQ]')
+  const pending = first.bridge.deliverAssistantTurn(session, '[MSG]等待中被重启[/MSG]', [], QQ_SOURCE)
   assert.equal(await waitFor(() => first.bridge.inflight.pending() === 1), true, '进入等待前应先落盘')
   assert.equal(first.transport.sent.length, 1, '等待期间只有热身那条发出去了')
   const disk = inflightDisk(dir)
@@ -140,7 +142,7 @@ test('待发记录：已经发送成功并删掉记录，重启后不再发', as
   const dir = tempDir()
   const first = makeBridge({ dir })
   await first.bridge.start({ syncNow: false })
-  await first.bridge.deliverAssistantTurn(session, '[QQ]已经发出去了[/QQ]')
+  await first.bridge.deliverAssistantTurn(session, '[MSG]已经发出去了[/MSG]', [], QQ_SOURCE)
   assert.equal(first.transport.sent.length, 1)
   assert.equal(first.bridge.inflight.pending(), 0, '正常发送后不留记录')
   await first.bridge.stop()
@@ -160,9 +162,9 @@ test('待发记录：一轮多段在等待中崩溃，重启后按原顺序补�
   const first = makeBridge({ dir, sleep: async () => { await gate } })
   await first.bridge.start({ syncNow: false })
   // 首块按新口径不等，先发一条「上一条」，下面的块一才会进等待。
-  await first.bridge.deliverAssistantTurn(session, '[QQ]先发一条[/QQ]')
+  await first.bridge.deliverAssistantTurn(session, '[MSG]先发一条[/MSG]', [], QQ_SOURCE)
 
-  const pending = first.bridge.deliverAssistantTurn(session, '[QQ]块一[/QQ][QQ]块二[/QQ][QQ]块三[/QQ]')
+  const pending = first.bridge.deliverAssistantTurn(session, '[MSG]块一[/MSG][MSG]块二[/MSG][MSG]块三[/MSG]', [], QQ_SOURCE)
   assert.equal(await waitFor(() => first.bridge.inflight.pending() === 1), true)
   const record = first.bridge.inflight.list()[0]
   assert.equal(record.segments[0].data.text, '块一', '当前块已经解析好，单独记在 segments 里')
@@ -242,7 +244,7 @@ test('待发记录：语音合成多段时，只补发还没发出的语音条',
     },
   })
   await first.bridge.start({ syncNow: false })
-  const pending = first.bridge.deliverAssistantTurn(session, '[QQ][语音]晚安[/语音][/QQ]')
+  const pending = first.bridge.deliverAssistantTurn(session, '[MSG][语音]晚安[/语音][/MSG]', [], QQ_SOURCE)
   assert.equal(
     await waitFor(() => first.transport.sent.length === 1 && first.bridge.inflight.pending() === 1),
     true,
@@ -268,7 +270,7 @@ test('待发记录：两个延迟都设 0 时不新增持久化动作，行为�
   const dir = tempDir()
   const first = makeBridge({ dir, config: { outboxPerMessageDelayMs: 0, outboxPerCharDelayMs: 0 } })
   await first.bridge.start({ syncNow: false })
-  await first.bridge.deliverAssistantTurn(session, '[QQ]立即发送[/QQ]')
+  await first.bridge.deliverAssistantTurn(session, '[MSG]立即发送[/MSG]', [], QQ_SOURCE)
   assert.equal(first.transport.sent.length, 1)
   assert.equal(existsSync(join(dir, 'fish-message-inflight.json')), false, '不等就不写待发记录')
   await first.bridge.stop()

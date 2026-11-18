@@ -19,7 +19,7 @@ Bridge（lib/bridge.js）
    ├─ 图片：image → inbox → 图库（按 sha256 命中描述就不附原图）→ 本地识图 / DSH 附件
    ├─ 记忆扩展：图片/语音 → memory.library 只读比对 → 正文附「记忆：…」（可选，默认关）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
-   ├─ 出站：session/event → [QQ] 解析 → 发送锁 → 待发记录落盘 → 节奏等待 → text / image / record / file
+   ├─ 出站：session/event → [MSG] 解析 → 发送锁 → 待发记录落盘 → 节奏等待 → text / image / record / file
    │    ├─ 成功 → 删除待发记录
    │    ├─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
    │    └─ 进程在等待中退出 → Inflight（fish-message-inflight.json）→ 启动时回放
@@ -66,7 +66,7 @@ dsh-LocalAIService（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/bridge.js` | 队列、编辑窗口、合并投递、撤回、去重、水位、补投、出站解析调度 | 不直接碰 DSH API（通过 delivery） |
 | `lib/transport/base.js` | 适配器接口定义 | 不实现协议 |
 | `lib/transport/napcat-onebot.js` | OneBot HTTP/WS、断线重连、历史 | 不做业务去重 |
-| `lib/format.js` | `[QQ]` 块、转义、显式指令 | 不发送 |
+| `lib/format.js` | `[MSG]` 块、转义、显式指令 | 不发送 |
 | `lib/queue.js` | 每个聊天的入站缓冲：乱序排序、编辑窗口、按 id 撤回删除 | 不做持久化，不合并正文 |
 | `lib/pacing.js` | 出站节奏：字数口径、最小间隔、可注入的 sleep/now | 不发消息、不改顺序、不读网络 |
 | `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
@@ -376,11 +376,26 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
   （同一步重复投递按消息 id 去重；图片按内容寻址的 `attachmentId` 去重）；
 - `turn/end` 且 `reason.kind === 'completed'`：如果这一轮属于绑定会话，调用
   `bridge.deliverAssistantTurn`。各步正文分别解析后再按顺序发，避免某步未闭合的
-  `[QQ]` 把下一步的内部文字粘进块里；一步里的多个 `[QQ]` 块也各自独立，
+  `[MSG]` 把下一步的内部文字粘进块里；一步里的多个 `[MSG]` 块也各自独立，
   一块 = 一条（组）消息，不会被拼成一段。
 
 按「会话 key + turn」去重，同一轮不会发两次。被中断（`interrupted`）的轮不发送，
 已累积的内容一起丢弃（半段话可能只写了一半，也可能是被叫停的方向）。
+
+一间会话可以挂多条绑定，但一轮回复只发一条：`deliverAssistantTurn` 用
+`pickSessionBinding` 选唯一目标，而目标必须由**本轮入站来源**决定。
+
+来源的认领顺序（`Bridge.noteInboundSource` / `claimTurnSource`）：
+
+1. 入站消息投递成功时，把 `(channel, peer)` 放进该会话的待认领队列；
+2. 下一个回合第一次出现 `assistant/message` 时认领一条，按「会话 key + turn」记下；
+   同一轮的所有模型步共用这一条（`turnSeen` 保证只认领一次）；
+3. `turn/end` 出站时只认这条来源对应的绑定；
+4. **没有来源 = 这一轮的输入不是渠道消息**（网页端直接输入、定时提醒、子代理唤醒），
+   整轮跳过、不进 Outbox，只记一行日志「本轮输入不来自渠道，跳过发送」。
+
+来源只存在内存里、按回合隔离：这样上一轮的渠道绝不会被本轮的网页端输入复用；代价是
+进程重启时没发完的那一轮会丢（重启后那一轮本来也不存在）。**绝不广播、也不退回默认渠道**。
 
 ### 4.2 解析
 
@@ -431,7 +446,7 @@ extractOutboundBlocks(text, onlyInsideMarkers)
   正常回复、补发、语音、图片都走这里，节奏一致。
 - 进等待前先把「还没发出去的这条消息」写进待发记录（见 4.4.1），`dueAt` 就是这条的
   最早可发时刻（距上一条已隔够时就是当时），发送成功后立刻删。
-- 等待按「段」计：多个 `[QQ]` 块 = 多条消息 = 分开算间隔，各自按自己块内的字数算，
+- 等待按「段」计：多个 `[MSG]` 块 = 多条消息 = 分开算间隔，各自按自己块内的字数算，
   不会按合并后的整段字数只等一次。
 - 两个设置都给 0 就完全不等，也不写待发记录（行为与旧版一致）；
   `sleep` / `now` 可注入，测试不会真等。
@@ -504,7 +519,7 @@ extractOutboundBlocks(text, onlyInsideMarkers)
 
 | 形状 | 谁写 | 回放时 |
 |---|---|---|
-| `tokens: [...]` | `deliverAssistantTurn`：一轮里还没解析的 `[QQ]` token | 按原顺序逐个解析、发送；每完成一个就把记录缩到剩余 token |
+| `tokens: [...]` | `deliverAssistantTurn`：一轮里还没解析的 `[MSG]` token | 按原顺序逐个解析、发送；每完成一个就把记录缩到剩余 token |
 | `segments: [...]` | `sendOutbound` 直发：已经解析好的消息段 | 按 dueAt 等到点，发完后删除；失败仍转 Outbox |
 
 一轮里当前 token 的 `segments` 可以与后半轮 token 的 `tokens` 同时存在：先补当前消息
@@ -627,7 +642,7 @@ v1 不实现群聊。将来要加群：
 
 - v1 只调 `send_private_msg`，没有群发逻辑；
 - 只处理绑定列表里的 QQ 号；陌生人私聊不会进 DSH；
-- 出站默认只发 `[QQ]` 块内，块外解释/路径/思考留在本地；
+- 出站默认只发 `[MSG]` 块内，块外解释/路径/思考留在本地；
 - 令牌只存在配置文件和内存，不写日志；设置页显示 `***已设置***`；
 - 状态/日志/HTTP 路由由 DSH 的本地 Web 服务提供，默认只在 `127.0.0.1` 访问；
 - 表情取图路由只接受 `stickerDir` 内的路径（`..`、绝对路径越界一律 403）、只允许图片扩展名；
@@ -794,37 +809,44 @@ v1 不实现群聊。将来要加群：
 ## 11. 会话级绑定入口（模型选择器左侧胶囊按钮）
 
 绑定不再只能在设置页改。客户端在 `conversation.input.right` 槽位注册一枚胶囊按钮与自定义
-下拉菜单（order 200 排在该簇末尾，紧挨模型选择器；颜色全走 `--dsw-alias-*` 变量），组件
-props 带当前 `sessionId`，按会话显示和切换渠道；设置页的绑定编辑器保持原样，两条入口写
+多选菜单（order 200 排在该簇末尾，紧挨模型选择器；颜色全走 `--dsw-alias-*` 变量），组件
+props 带当前 `sessionId`，按会话显示和勾选渠道；设置页的绑定编辑器保持原样，两条入口写
 同一份配置。按钮高度与字号对齐模型选择器触发器那一排，窗口变窄时允许压缩。
 
 | 项 | 内容 |
 |---|---|
 | 槽位 | `conversation.input.right`：`{ id: 'fish-bind', order: 200, label: () => '收发渠道' }` |
 | 数据 | `GET /state` 的 `bindings`；挂载、会话变化、打开菜单时各拉一次，不做轮询 |
-| 写操作 | `POST /bindings/assign`，body `{ sessionId, qq }`；`qq` 为空串表示解除当前会话的绑定 |
+| 写操作 | `POST /bindings/assign`，body `{ sessionId, bindings: [{ channel, peer }] }`；数组为空表示清空这间会话的绑定 |
+| 兼容 | 旧的单条形状 `{ sessionId, qq, channel? }` 仍收：只绑一条，`qq` 为空串表示清空 |
 | 注册容错 | 槽位不存在或注册失败只少一个入口，设置页与收发照常 |
 
-按钮与菜单项只显示「称呼 QQ」：称呼用 `--dsw-alias-label-secondary`（与模型选择器的
-模型名同色），QQ 用 `--dsw-alias-label-caption`（与档位 High 和箭头同色），箭头也取 caption，
-因此明暗对比与旁边那枚模型选择器完全一致；完整 QQ 号放在选项的 `title` 悬停提示里，
-设置页的绑定表仍是「称呼：QQ-号」。
+按钮只显示摘要（一条时「称呼 QQ」、多条时「N 条渠道」、一条都没有时「不绑定」），
+明细在菜单项与 `title` 里：称呼用 `--dsw-alias-label-secondary`（与模型选择器的模型名同色），
+通道用 `--dsw-alias-label-caption`（与档位 High 和箭头同色），箭头也取 caption。
 
 接口语义（`lib/host.js`）：
 
-- `qq` 非空：把该 `qq` 的渠道 `session` 改成 `sessionId`；当前会话原先绑着的其它渠道
-  置 `session=''`（渠道保留，不删除）。`qq` 必须已存在于 `bindings`、`sessionId` 非空，
-  否则返回 400。
-- `qq` 为空串：只把当前会话对应的渠道置为未绑定，渠道本身保留。
+- `bindings` 数组是**集合语义**：「这间会话就该绑这些」。数组里的渠道从别处移到本会话
+  （每条渠道只能绑一间会话，原来那间会话自动少一条）；本会话里没列出的渠道置
+  `session=''`（渠道保留，不删除）；数组为空 = 清空本会话的绑定。
+- 每一对 `(channel, peer)` 都必须已在 `bindings` 里，按 `channel:peer` 键匹配（不能只比
+  对端字符串）；缺任何一条返回 400，配置不动。
+- 单条形状只把这一条挂到本会话，**不清空**同会话的其它绑定；旧的 `qq` 为空串仍表示「清空这间会话」。
 - 保存沿用 `/save` 的链路：`configStore.save` → `config = save` → `bridge.updateConfig()`
   → `bridge.ensureBaselines({ at: Date.now() })` → `resetGuard()`。连接参数不变，不重启传输层。
-- 返回 `{ ok, message, ...status() }`；客户端先本地反映选中项，再用返回的 `bindings` 校准。
+- 返回 `{ ok, message, ...status() }`；客户端先本地反映勾选结果，再用返回的 `bindings` 校准。
 
-`session=''` 的渠道是「保留但未绑定」：
+## 12. 绑定模型
 
-- `normalizeBindings` 允许空 session，仍按 `qq` 去重；非空 session 之间仍按会话去重
-  （一间会话只能绑一个渠道）。
-- `Bridge.rebuildIndexes` 不把空 session 放进 `bySession`（避免 `''` 变成能被任一会话命中
-  的键）；`byPeer` 仍保留，照常按 QQ 收消息、推进水位。
+一条绑定 = 一个渠道，即 `(channel, peer)`；`peer` 唯一 → **一个对端只能绑一间会话**。
+
+- 反向不限制：**同一间会话可以挂多条绑定**（多个渠道、多个对端），它们都参与收消息；
+  出站每轮只发一条，发给「本轮入站来源」对应的那条，见 4.1。
+- `normalizeBindings` 按 `peerKey`（`channel:peer`）去重，重复的对端保留第一条；
+  `session` 允许为空（渠道保留、暂不挂会话）。
+- `Bridge.rebuildIndexes` 用 `bySession: Map<sessionKey, binding[]>` 记「会话 → 多条绑定」，
+  空 session 不进这张表（避免 `''` 变成能被任一会话命中的键）；`byPeer: Map<peerKey, binding>`
+  仍是一条渠道一条，照常按对端收消息、推进水位。
 - 未绑定渠道的消息不投递，但会标记已读并推进水位；重新绑定时不会补投未绑定期间的消息。
 - `GuardMonitor.setBindings` 忽略空 session，不占防失联监控名额。

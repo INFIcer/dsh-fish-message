@@ -58,6 +58,43 @@ window.__ModuleLoader__.load({
     // 同一串 id 在 qq 与 wechat 里可能是两个人：菜单选中与去重都按通道拼出来的键。
     const channelKey = (channel, peer) => (isWechatChannel(channel) ? 'wechat' : 'qq') + ':' + String(peer || '')
 
+    /**
+     * 保存前的本地自查：口径与后端 normalizeBindings 对齐，只拦「提交后会被静默丢掉」的两类问题
+     * （对端为空、通道非法），让用户点保存时就地看到哪一条不对。
+     * 同一间会话挂多条绑定是正常用法，不在这里拦。
+     * 返回可直接展示的中文句子；空数组表示可以提交。
+     * 对端重复、条数超上限等更少见的冲突仍由后端丢弃，原因走 /save 响应的 dropped。
+     */
+    const bindingProblems = (list) => {
+      const items = Array.isArray(list) ? list : []
+      const problems = []
+      items.forEach((item, index) => {
+        const no = index + 1
+        const raw = String(item && item.channel != null ? item.channel : '').trim().toLowerCase()
+        if (raw && raw !== 'qq' && raw !== 'wechat') {
+          problems.push(`第 ${no} 条渠道的通道只能填 qq 或 wechat（现在是「${raw}」）`)
+          return
+        }
+        const channel = raw === 'wechat' ? 'wechat' : 'qq'
+        // 与后端同口径：QQ 对端存盘前只留数字，纯字母等于空；微信对端只 trim。
+        const peer = channel === 'wechat'
+          ? String((item && (item.peer || item.qq)) || '').trim()
+          : String((item && (item.peer || item.qq)) || '').replace(/[^\d]/g, '')
+        if (!peer) {
+          problems.push(`第 ${no} 条渠道（${channelLabel(channel)}）的对端没填`)
+        }
+      })
+      return problems
+    }
+
+    /** 后端 dropped 条目 → 一条清单：「原因（微信 id）」，逐条用分号拼起来。 */
+    const droppedText = (list) => (Array.isArray(list) ? list : []).map((item) => {
+      const who = [channelLabel(item && item.channel), String((item && item.peer) || '').trim()].filter(Boolean).join(' ')
+      const reason = String((item && item.reason) || '').trim()
+      if (reason && who) return `${reason}（${who}）`
+      return reason || who
+    }).filter(Boolean).join('；')
+
     /** 相对时间：只说到「多久以前」，用来判断最近跟谁说过话。 */
     const sinceText = (value) => {
       const stamp = Number(value) || 0
@@ -415,7 +452,8 @@ window.__ModuleLoader__.load({
       text, note ? questionMark(note) : null)
 
     // 提示文案的错误分级：失败、无法、不可用这类按错误色显示，其余按成功提示。
-    const isError = (text) => /失败|无法|错误|不可用|不能|没打开/.test(String(text || ''))
+    // 文案级启发式：说「没保存」的也是坏消息，保存提示要用警告色。
+    const isError = (text) => /失败|无法|错误|不可用|不能|没打开|没保存/.test(String(text || ''))
 
     function input(value, onChange, placeholder = '', disabled = false) {
       return h('input', {
@@ -798,16 +836,16 @@ window.__ModuleLoader__.load({
       const send = async (entry) => {
         const qq = object[entry.id] || (bindings[0] && bindings[0].qq) || ''
         if (!qq) {
-          setSay('尚未配置 QQ 绑定，请先在「私聊绑定」中添加。')
+          setSay('尚未配置渠道绑定，请先在「私聊绑定」中添加。')
           return
         }
         setBusy(true)
-        setSay('正在向 QQ ' + qq + ' 发送 ' + entry.file + '…')
+        setSay('正在向 ' + qq + ' 发送 ' + entry.file + '…')
         const r = await post('/stickers/send', { qq, name: entry.id })
         setBusy(false)
         if (!r || !r.ok) setSay('发送失败：' + error(r))
-        else if (r.queued) setSay('QQ 当前无法发送，消息已加入待发列表（积压 ' + (r.pending || 0) + ' 条）。')
-        else setSay('已发送至 QQ ' + (r.qq || qq) + '。')
+        else if (r.queued) setSay('当前无法发送，消息已加入待发列表（积压 ' + (r.pending || 0) + ' 条）。')
+        else setSay('已发送至 ' + (r.qq || qq) + '。')
         await load()
       }
 
@@ -1176,8 +1214,9 @@ window.__ModuleLoader__.load({
       } catch { /* 注入失败只影响外观 */ }
     }
 
-    // ---------------- 模型选择器左侧：收发渠道胶囊按钮 + 菜单 ----------------
+    // ---------------- 模型选择器左侧：收发渠道胶囊按钮 + 多选菜单 ----------------
     // 「渠道」= 配置里的一条绑定（通道 + 对端 + 称呼 + 启用）：session 为空表示渠道保留、暂不绑定会话。
+    // 一条渠道只能绑一个会话，但一间会话可以挂多条：菜单做成多选，提交的是整组，不是单条切换。
     // 这里只调 /bindings/assign；设置页的保存语义与界面都不经过这里。
 
     /** 会话 id 的两种写法（带不带 session- 前缀）视为同一间会话。 */
@@ -1186,23 +1225,25 @@ window.__ModuleLoader__.load({
       return s.startsWith('session-') ? s.slice('session-'.length) : s
     }
 
-    /** 当前会话绑着哪个渠道：返回 { channel, peer }，没有绑定就返回 null。 */
-    function boundChannel(bindings, sessionId) {
+    /** 当前会话绑着哪些渠道：返回 [{ channel, peer }]，一间会话可以有多条。 */
+    function boundChannels(bindings, sessionId) {
       const key = stripSessionPrefix(sessionId)
-      if (!key) return null
+      if (!key) return []
+      const list = []
       for (const b of Array.isArray(bindings) ? bindings : []) {
         const peer = bindingPeer(b)
         if (!peer || stripSessionPrefix(b.session) !== key) continue
-        return { channel: bindingChannel(b), peer: peer }
+        list.push({ channel: bindingChannel(b), peer: peer })
       }
-      return null
+      return list
     }
 
     /**
-     * 菜单选项：未绑定 + 已启用的渠道，按「通道 + 对端」去重。
-     * 当前会话绑着的渠道即使被禁用也要留下，否则选中项会凭空消失。
+     * 菜单选项：已启用的渠道，按「通道 + 对端」去重。
+     * 当前会话已勾选的渠道即使被禁用也要留下，否则勾选项会凭空消失。
      */
-    function channelChoices(bindings, selected) {
+    function channelChoices(bindings, selectedKeys) {
+      const selected = new Set(Array.isArray(selectedKeys) ? selectedKeys : [])
       const list = []
       const seen = new Set()
       for (const b of Array.isArray(bindings) ? bindings : []) {
@@ -1211,13 +1252,28 @@ window.__ModuleLoader__.load({
         const channel = bindingChannel(b)
         const key = channelKey(channel, peer)
         if (seen.has(key)) continue
-        if (b.enabled === false && key !== String(selected || '')) continue
+        if (b.enabled === false && !selected.has(key)) continue
         seen.add(key)
         // 胶囊/菜单只显示「称呼 通道」：称呼用主文字色，通道用次要色（与模型选择器的亮暗搭配一致）。
         // 具体账号放到每个选项的 title 上，悬停能看到，不占横向空间。
         const name = String(b.name || '主人')
         const label = channelLabel(channel)
         list.push({ key: key, channel: channel, peer: peer, name: name, label: `${name} ${label}`, title: `${label} ${peer}` })
+      }
+      return list
+    }
+
+    /** 勾选状态里的一串键 → 要提交的 { channel, peer } 列表（按配置里的顺序，方便后端对账）。 */
+    function pickedTargets(bindings, keys) {
+      const wanted = new Set(Array.isArray(keys) ? keys : [])
+      const list = []
+      for (const b of Array.isArray(bindings) ? bindings : []) {
+        const peer = bindingPeer(b)
+        if (!peer) continue
+        const channel = bindingChannel(b)
+        if (!wanted.has(channelKey(channel, peer))) continue
+        list.push({ channel: channel, peer: peer })
+        wanted.delete(channelKey(channel, peer))
       }
       return list
     }
@@ -1268,8 +1324,9 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 会话级收发渠道：一枚胶囊按钮 + 自定义下拉菜单。
-     * 一条渠道只能绑一个会话：绑到别的会话等于把渠道移过去，原会话自动回到「不绑定」。
+     * 会话级收发渠道：一枚胶囊按钮 + 自定义多选菜单。
+     * 一间会话可以挂多条绑定（多个渠道 / 多个对端），勾上几条就一起收；取消勾选 = 解绑。
+     * 一条渠道只能绑一个会话：绑到别的会话等于把渠道移过去，原会话自动少一条。
      * 数据只来自 GET /state（挂载、会话切换、打开菜单各拉一次），不轮询、不弹窗。
      */
     function BindChannel(props) {
@@ -1288,8 +1345,7 @@ window.__ModuleLoader__.load({
       const applyState = (s) => {
         if (!s || !Array.isArray(s.bindings)) return false
         setBindings(s.bindings)
-        const bound = boundChannel(s.bindings, sessionId)
-        setSelected(bound ? channelKey(bound.channel, bound.peer) : '')
+        setSelected(boundChannels(s.bindings, sessionId).map((item) => channelKey(item.channel, item.peer)))
         // 重新拉到状态说明页面还活着：上一次的失败提示不必一直挂着。
         setNote('')
         return true
@@ -1346,30 +1402,46 @@ window.__ModuleLoader__.load({
         applyState(s)
       }
 
-      // item 为 null 表示「不绑定」：提交空对端，只解绑不删渠道。
-      const assign = async (item) => {
-        const next = item ? item.key : ''
-        if (busy || next === selected) return
+      /**
+       * 提交整组勾选结果：/bindings/assign 的集合语义是「这间会话就该绑这些」，
+       * 所以勾选一条、取消一条都发同一份完整清单，后端一次写完；取消勾选只解绑，渠道保留。
+       */
+      const submitSelection = async (nextKeys) => {
+        if (busy) return
         const previous = selected
         // 先本地反映，再用返回的状态校准；失败就退回原选中并给一次轻提示。
         pullToken.current += 1
-        setSelected(next)
+        setSelected(nextKeys)
         setBusy(true)
         setNote('')
-        // 只有微信才带 channel：缺省就是 qq，老后端与老调用照旧。
-        const body = { sessionId: sessionId, qq: item ? item.peer : '' }
-        if (item && item.channel === 'wechat') body.channel = 'wechat'
-        const r = await post('/bindings/assign', body)
+        const r = await post('/bindings/assign', {
+          sessionId: sessionId,
+          bindings: pickedTargets(bindings, nextKeys),
+        })
         setBusy(false)
         if (r && r.ok) {
           const list = Array.isArray(r.bindings) ? r.bindings : null
           if (list) setBindings(list)
-          const bound = list ? boundChannel(list, sessionId) : null
-          setSelected(bound ? channelKey(bound.channel, bound.peer) : next)
+          setSelected(list ? boundChannels(list, sessionId).map((item) => channelKey(item.channel, item.peer)) : nextKeys)
           return
         }
         setSelected(previous)
         setNote(assignErrorText(r))
+      }
+
+      // 勾选 / 取消一条：菜单保持展开，方便连着勾几条。
+      const toggleItem = (item) => {
+        if (!item || !item.key) return
+        const next = selected.indexOf(item.key) >= 0
+          ? selected.filter((key) => key !== item.key)
+          : selected.concat([item.key])
+        submitSelection(next)
+      }
+
+      // 全部解绑：只清本会话的绑定，渠道留在设置页。
+      const clearAll = () => {
+        setOpen(false)
+        if (selected.length) submitSelection([])
       }
 
       // 点按钮开合；打开的那一次才去校准状态，省掉每回聚焦都发请求。
@@ -1378,11 +1450,6 @@ window.__ModuleLoader__.load({
         const next = !open
         setOpen(next)
         if (next) refresh()
-      }
-
-      const choose = (item) => {
-        setOpen(false)
-        assign(item || null)
       }
 
       // 原生按钮会自己把回车/空格转成 click；这里的 preventDefault 挡掉重复触发，
@@ -1395,11 +1462,16 @@ window.__ModuleLoader__.load({
       }
 
       const choices = channelChoices(bindings, selected)
-      // 选中值必须对得上某一项，否则菜单里没有任何高亮；对不上时按「不绑定」处理。
-      const value = choices.some((item) => item.key === selected) ? selected : ''
-      const current = choices.find((item) => item.key === value) || null
-      const currentLabel = current ? current.label : '不绑定'
-      const items = [{ key: '', label: '不绑定', channel: '', peer: '' }].concat(choices)
+      const selectedSet = new Set(selected)
+      // 勾选状态里可能留着配置里已经删掉的渠道：只按菜单里真实存在的那几项算当前摘要。
+      const currentItems = choices.filter((item) => selectedSet.has(item.key))
+      // 摘要：一条时显示「称呼 通道」，多条只报数量（横向空间有限，明细在菜单和 title 里）。
+      const summary = currentItems.length === 0
+        ? '不绑定'
+        : (currentItems.length === 1 ? currentItems[0].label : `${currentItems.length} 条渠道`)
+      const summaryDetail = currentItems.length
+        ? currentItems.map((item) => item.title).join('、')
+        : '不绑定'
       return h('div', {
         className: 'fish-bind',
         ref: rootRef,
@@ -1408,8 +1480,8 @@ window.__ModuleLoader__.load({
         h('button', {
           type: 'button',
           className: 'fish-bind-trigger',
-          title: `收发渠道：${currentLabel}。同一个渠道只能绑定一个会话。`,
-          'aria-label': `收发渠道：${currentLabel}`,
+          title: `收发渠道：${summaryDetail}。可以勾选多条；同一个渠道只能绑定一个会话。`,
+          'aria-label': `收发渠道：${summary}。`,
           'aria-haspopup': 'listbox',
           'aria-expanded': open ? 'true' : 'false',
           disabled: busy,
@@ -1417,28 +1489,37 @@ window.__ModuleLoader__.load({
           onKeyDown: onTriggerKeyDown,
         },
           h('span', { className: 'fish-bind-current' },
-            current
-              ? [h('span', { className: 'fish-bind-name' }, current.name), ' ', h('span', { className: 'fish-bind-channel' }, channelLabel(current.channel))]
-              : '不绑定'),
+            currentItems.length === 1
+              ? [h('span', { className: 'fish-bind-name' }, currentItems[0].name), ' ', h('span', { className: 'fish-bind-channel' }, channelLabel(currentItems[0].channel))]
+              : summary),
           chevronIcon()),
         open
           ? h('div', {
             className: 'fish-bind-menu',
             role: 'listbox',
             'aria-label': '收发渠道',
-          }, items.map((item) => h('div', {
-            key: item.key || 'none',
+            'aria-multiselectable': 'true',
+          }, choices.map((item) => h('div', {
+            key: item.key,
             role: 'option',
-            'aria-selected': item.key === value ? 'true' : 'false',
+            'aria-selected': selectedSet.has(item.key) ? 'true' : 'false',
             className: 'fish-bind-item',
-            title: item.key ? item.title : item.label,
-            onClick: () => choose(item),
+            title: item.title,
+            onClick: () => toggleItem(item),
           },
             h('span', { className: 'fish-bind-item-text' },
-              item.key
-                ? [h('span', { className: 'fish-bind-name' }, item.name), ' ', h('span', { className: 'fish-bind-channel' }, channelLabel(item.channel))]
-                : item.label),
-            item.key === value ? checkIcon() : null)))
+              h('span', { className: 'fish-bind-name' }, item.name), ' ', h('span', { className: 'fish-bind-channel' }, channelLabel(item.channel))),
+            selectedSet.has(item.key) ? checkIcon() : null))
+            .concat(currentItems.length
+              ? [h('div', {
+                key: '__clear',
+                className: 'fish-bind-item fish-bind-clear',
+                role: 'option',
+                'aria-selected': 'false',
+                title: '只解除这间会话的绑定，渠道仍保留在设置页',
+                onClick: clearAll,
+              }, h('span', { className: 'fish-bind-item-text' }, '全部解绑'))]
+              : []))
           : null,
         note ? h('span', { className: 'fish-bind-note', role: 'status', title: note }, note) : null)
     }
@@ -1521,6 +1602,14 @@ window.__ModuleLoader__.load({
       .fish-bind-item .fish-bind-name { color: inherit; }
       .fish-bind-item[aria-selected="true"] { color: var(--dsw-alias-state-business-primary, #2f6fed); }
       .fish-bind-item-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      /* 「全部解绑」是动作不是渠道：用一条分隔线把它和上面的勾选项分开，颜色也压暗。 */
+      .fish-bind-clear {
+        margin-top: 4px;
+        border-top: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.12));
+        border-radius: 0 0 6px 6px;
+        color: var(--dsw-alias-label-caption, #888);
+        justify-content: flex-start;
+      }
       .fish-bind-check { flex: 0 0 auto; }
       .fish-bind-note {
         color: var(--dsw-alias-state-danger, #c0392b);
@@ -2267,12 +2356,14 @@ window.__ModuleLoader__.load({
           return
         }
         setBindNote('')
-        const firstSession = (state && state.sessions && state.sessions[0] && state.sessions[0].id) || ''
+        // 新渠道不占任何会话：一条渠道只能绑一个会话，默认抢占会把已有渠道从这间会话挤掉。
+        // 具体绑哪间交给会话输入框旁的「收发渠道」多选菜单（/bindings/assign），
+        // 那里按「这间会话就该绑这些」整组提交。
         change('bindings', [...bindings(), {
           channel: channel === 'wechat' ? 'wechat' : 'qq',
           peer: '',
           qq: '',
-          session: firstSession,
+          session: '',
           name: '主人',
           enabled: true,
         }])
@@ -2293,12 +2384,22 @@ window.__ModuleLoader__.load({
       }
 
       const store = async () => {
+        // 后端对没填对端 / 通道写错 / 对端重复的条目是「丢掉」；先本地自查，把问题说清楚。
+        const problems = bindingProblems(bindings())
+        if (problems.length) {
+          setSay(`有 ${problems.length} 条渠道没保存，这次没有提交：${problems.join('；')}。`)
+          return
+        }
         setBusy(true); setAction('保存'); setSay('正在保存…')
         const r = await post('/save', { config: config })
         setBusy(false); setAction('')
         if (r && r.ok) {
           setDirty(false)
-          setSay('设置已保存。')
+          // 本地没拦住的冲突（对端重复、条数超上限）由后端丢掉：原因在 dropped 里，逐条说给用户。
+          const dropped = Array.isArray(r.dropped) ? r.dropped : []
+          setSay(dropped.length
+            ? `设置已保存，但有 ${dropped.length} 条渠道没保存：${droppedText(dropped)}。`
+            : '设置已保存。')
           await fetch()
         } else {
           setSay('保存失败：' + String((r && (r.error || r.message)) || '没有收到服务响应，请稍后重试。'))
@@ -2309,8 +2410,8 @@ window.__ModuleLoader__.load({
         const r = await post('/test-send', {})
         setBusy(false); setAction('')
         if (!r || !r.ok) setSay('测试失败：' + String((r && r.error) || '没有收到服务响应，请稍后重试。'))
-        else if (r.queued) setSay(`QQ 当前无法发送，测试消息已加入待发列表（积压 ${r.pending ?? '?'} 条），恢复后将自动补发。`)
-        else setSay(`已发送至 QQ ${r.qq}`)
+        else if (r.queued) setSay(`当前无法发送，测试消息已加入待发列表（积压 ${r.pending ?? '?'} 条），恢复后将自动补发。`)
+        else setSay(`已发送至 ${channelLabel(r.channel)} 渠道 ${r.qq}`)
       }
       const immediateResend = async () => {
         setBusy(true); setSay('正在重试待发消息…')
@@ -2370,6 +2471,8 @@ window.__ModuleLoader__.load({
 
       const bindingPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '私聊绑定'),
+        // 绑定模型：一条 = 一个渠道（对端），对端唯一；会话那一列入同一间会话可以重复出现。
+        h('div', { style: S.dim }, '同一间会话可以挂多条渠道；一个对端只能绑一间会话。想绑哪间会话，用会话输入框旁的「收发渠道」勾选。'),
         h('div', { style: { ...S.bindGrid, marginTop: 10 } },
           h('div', { style: S.th }, '通道'),
           h('div', { style: S.th }, '对端账号'),
@@ -2419,8 +2522,8 @@ window.__ModuleLoader__.load({
 
       const connectPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '连接设置'),
-        h('div', { style: S.dim }, '消息经本机运行的 QQ 服务收发，使用前请先启动该服务。'),
-        row('QQ 服务地址', input(config.napcatBaseUrl, (v) => change('napcatBaseUrl', v), '留空使用默认地址')),
+        h('div', { style: S.dim }, '消息经本机运行的 QQ 渠道服务收发，使用前请先启动该服务。'),
+        row('QQ 渠道服务地址', input(config.napcatBaseUrl, (v) => change('napcatBaseUrl', v), '留空使用默认地址')),
         row('访问令牌（可选）', input(config.napcatToken, (v) => change('napcatToken', v), '未设置时留空'),
           null,
           '服务端开启鉴权时才需要填写。'),
@@ -2429,7 +2532,7 @@ window.__ModuleLoader__.load({
           '开启后消息更及时；不可用时自动改为定时查询。'),
         row('实时接收地址', input(config.wsUrl, (v) => change('wsUrl', v), '留空自动生成（一般是 HTTP 地址）'),
           null,
-          'QQ 服务的 WebSocket 服务端通常另开端口（例如 ws://127.0.0.1:3001）；要识别好友撤回，需要填这个地址并开启「优先实时接收」。'))
+          'QQ 渠道服务的 WebSocket 服务端通常另开端口（例如 ws://127.0.0.1:3001）；要识别好友撤回，需要填这个地址并开启「优先实时接收」。'))
 
       // 微信通道紧挨绑定区：先登录，再在下面添加渠道；未启用时只留一个开关。
       // 测试消息要指定对端：取第一条启用的微信渠道。
@@ -2444,11 +2547,11 @@ window.__ModuleLoader__.load({
 
       const behaviorPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '消息处理'),
-        h('div', { style: S.dim }, '控制 QQ 与 DSH 之间的消息如何转发。'),
+        h('div', { style: S.dim }, '控制消息渠道与 DSH 之间的消息如何转发。'),
         row('暂停转发到会话', flag(config.forwardPaused, (v) => change('forwardPaused', v)),
-          '暂停期间仍会收到 QQ 消息，恢复后按顺序补发；停放太久已过期的消息不再补发。'),
+          '暂停期间仍会收到消息，恢复后按顺序补发；停放太久已过期的消息不再补发。'),
         pauseForward ? h('div', { style: { ...S.hint, marginBottom: 6 } }, `待转发 ${forward.pending || 0} 条`) : null,
-        row('仅发送 [QQ] 标记内的内容', flag(config.onlyInsideMarkers, (v) => change('onlyInsideMarkers', v)),
+        row('仅发送 [MSG] 标记内的内容', flag(config.onlyInsideMarkers, (v) => change('onlyInsideMarkers', v)),
           null,
           '开启时只发标记内的部分；关闭时整条发送，标记会被去掉。'),
         row('发送间隔（毫秒）', h('input', {
@@ -2661,7 +2764,7 @@ window.__ModuleLoader__.load({
         row('定期核对间隔（毫秒）', h('input', {
           style: S.small, type: 'number', min: 5000, max: 600000, value: config.historyIntervalMs ?? 60000,
           onChange: (e) => change('historyIntervalMs', Number(e.target.value)),
-        }), '每隔这么久和 QQ 核对一次最近消息，防止漏收。'),
+        }), '每隔这么久和 QQ 渠道核对一次最近消息，防止漏收。'),
         row('消息排序等待（毫秒）', h('input', {
           style: S.small, type: 'number', min: 0, max: 5000, value: config.reorderBufferMs ?? 1500,
           onChange: (e) => change('reorderBufferMs', Number(e.target.value)),
@@ -2697,7 +2800,7 @@ window.__ModuleLoader__.load({
           metric(`已补发 ${outbound.sentTotal || 0} 条`),
           metric(`失败 ${outbound.failedTotal || 0} 条`),
           metric(`已丢弃 ${outbound.droppedTotal || 0} 条`)),
-        h('div', { style: S.hint }, 'QQ 暂时不可用时先存本机，恢复后按时间顺序补发。'),
+        h('div', { style: S.hint }, 'QQ 渠道暂时不可用时先存本机，恢复后按时间顺序补发。'),
         outbound.lastError && !online ? h('div', { style: { ...S.danger, marginTop: 4 } }, `最近一次发送失败：${outbound.lastError}`) : null,
         h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
           h('button', {
@@ -2715,7 +2818,7 @@ window.__ModuleLoader__.load({
             h('div', { style: { ...S.h1, margin: 0 } }, '鱼讯'),
             h('span', {
               style: { ...S.badge, ...(online ? S.ok : S.danger) },
-              title: online ? (pass.mode === 'ws' ? '按实时连接接收消息' : '按定时查询接收消息') : '暂时连不上 QQ 服务',
+              title: online ? (pass.mode === 'ws' ? '按实时连接接收消息' : '按定时查询接收消息') : '暂时连不上 QQ 渠道服务',
             }, chain),
             h('span', { style: S.dim }, `v${state.version || '?'}`)),
           h('div', { style: S.barActions },
@@ -2728,7 +2831,7 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button', style: S.btn, onClick: refresh, disabled: busy,
             }, busy && action === '刷新' ? '正在刷新…' : '刷新状态'))),
-        h('div', { style: S.dim }, '在 QQ 与 DSH 之间互传私聊消息。'),
+        h('div', { style: S.dim }, '在 QQ / 微信渠道与 DSH 之间互传私聊消息。'),
         say ? h('div', { style: { ...(isError(say) ? S.danger : S.ok), marginTop: 2 } }, say) : null)
       return h('div', { className: 'fish-msg-settings', style: S.wrap },
         actionBar,
@@ -2742,7 +2845,7 @@ window.__ModuleLoader__.load({
             metric(`出错 ${bridge.stats?.errors || 0} 次`, '历史累计，不代表当前状态。')),
           !online && offlineReason
             ? h('div', { style: { ...S.danger, marginTop: 4 } },
-              `离线原因：${offlineReason}。请检查 QQ 服务是否已启动、地址是否正确。`)
+              `离线原因：${offlineReason}。请检查 QQ 渠道服务是否已启动、地址是否正确。`)
             : null),
         connectPage, wechatPage, bindingPage, behaviorPage, guardPage, voicePage,
         // 表情包（收藏）与收图图库（缓存）相邻：两块各有「打开图库管理」，各开各的弹窗。
@@ -2800,6 +2903,9 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     // 测试用：模板、两个变体与共享组件的内部面；生产代码只经设置页按钮使用。
     exports.__test = {
+      // 保存前的本地校验与 dropped 文案：设置页保存用，测试单独覆盖文案。
+      bindingProblems,
+      droppedText,
       BindChannel,
       WechatChannel,
       wechatStateText,

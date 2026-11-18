@@ -15,6 +15,8 @@ import { normalizeConfig } from '../lib/config.js'
 import { countTextUnits, countSegmentUnits, outboundIntervalMs, OutboundPacer } from '../lib/pacing.js'
 
 const QQ = '10001'
+/** 模拟「本轮回复由 QQ 渠道的入站触发」：出站只认本轮来源。 */
+const QQ_SOURCE = { channel: 'qq', peer: QQ }
 const session = 'session-pacing'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -211,8 +213,8 @@ test('Bridge：首条直接发，紧跟的第二条只补等间隔差的那段',
   const { bridge, transport, sleeps } = makeBridge()
   await bridge.start({ syncNow: false })
   // 你好 = 2 字 → 间隔 40；第一段话 = 4 字 → 间隔 60。
-  await bridge.deliverAssistantTurn(session, '[QQ]你好[/QQ]')
-  await bridge.deliverAssistantTurn(session, '[QQ]第一段话[/QQ]')
+  await bridge.deliverAssistantTurn(session, '[MSG]你好[/MSG]', [], QQ_SOURCE)
+  await bridge.deliverAssistantTurn(session, '[MSG]第一段话[/MSG]', [], QQ_SOURCE)
 
   assert.deepEqual(sleeps, [60], '首条没有更早的消息不等；第二条距上一条还不够，补等 60ms')
   assert.equal(transport.sent.length, 2)
@@ -240,7 +242,7 @@ test('Bridge：一步里多个块各自按自己的字数算间隔', async () =>
   const { bridge, transport, sleeps } = makeBridge()
   await bridge.start({ syncNow: false })
   // 你好 = 2 字 → 40；第一段话 = 4 字 → 60；短 = 1 字 → 30。
-  await bridge.deliverAssistantTurn(session, '[QQ]你好[/QQ][QQ]第一段话[/QQ][QQ]短[/QQ]')
+  await bridge.deliverAssistantTurn(session, '[MSG]你好[/MSG][MSG]第一段话[/MSG][MSG]短[/MSG]', [], QQ_SOURCE)
   assert.deepEqual(sleeps, [60, 30], '首块立即发，后面两块各按自己的字数补等')
   assert.deepEqual(transport.sent.map((x) => x.segments[0].data.text), ['你好', '第一段话', '短'])
   await bridge.stop()
@@ -309,7 +311,7 @@ test('Bridge：出站等待期间照常收消息，不阻塞入站', async () =>
   // 先发一条，让下一条有「上一条」可比（首条按新口径不等）。
   await bridge.sendOutbound(QQ, [{ type: 'text', data: { text: '热身' } }], { reason: 'test' })
 
-  const pending = bridge.deliverAssistantTurn(session, '[QQ]慢一点发[/QQ]')
+  const pending = bridge.deliverAssistantTurn(session, '[MSG]慢一点发[/MSG]', [], QQ_SOURCE)
   assert.equal(await waitFor(() => seen.length === 1), true, '出站先进入等待')
   assert.equal(transport.sent.length, 1, '等待期间还没发到 QQ')
 

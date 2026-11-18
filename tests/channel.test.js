@@ -14,7 +14,7 @@ import { Logger } from '../lib/logger.js'
 import { Outbox } from '../lib/outbox.js'
 import { StateStore } from '../lib/storage.js'
 import { createFishMessageApi } from '../lib/service.js'
-import { normalizeConfig } from '../lib/config.js'
+import { normalizeBindings, normalizeConfig } from '../lib/config.js'
 import {
   DEFAULT_CHANNEL,
   isInboundMessage,
@@ -65,7 +65,7 @@ test('对端规整：qq 仍剥非数字，微信保留字母、@ 与下划线', 
 
 test('对端校验：微信给明确原因，qq 保持老口径', () => {
   assert.equal(peerProblem('qq', '10001'), '')
-  assert.match(peerProblem('qq', ''), /QQ 号不能为空/)
+  assert.match(peerProblem('qq', ''), /QQ 渠道的对端不能为空/)
   assert.match(peerProblem('wechat', ''), /微信对端不能为空/)
   assert.match(peerProblem('wechat', 'wx id'), /可见 ASCII/)
   assert.match(peerProblem('wechat', 'a'.repeat(129)), /太长/)
@@ -137,6 +137,38 @@ test('配置：同通道重复去重，跨通道同名 peer 都保留', () => {
   assert.deepEqual(cfg.bindings.map((b) => [b.channel, b.qq, b.session]), [
     ['qq', '10086', 'session-a'],
     ['wechat', '10086', 'session-c'],
+  ])
+})
+
+test('配置：同一间会话挂多条绑定都保留，同对端第二条丢掉并说明原因', () => {
+  const dropped = []
+  const kept = normalizeBindings([
+    { channel: 'qq', qq: '10001', session: 'session-same' },
+    { channel: 'wechat', peer: WX, session: 'session-same' },
+    { channel: 'qq', qq: '10002', session: 'session-same' },
+    { qq: '10001', session: 'session-other' },
+  ], dropped)
+  assert.deepEqual(kept.map((b) => [b.channel, b.qq, b.session]), [
+    ['qq', '10001', 'session-same'],
+    ['wechat', WX, 'session-same'],
+    ['qq', '10002', 'session-same'],
+  ])
+  assert.deepEqual(dropped, [{ channel: 'qq', peer: '10001', reason: '这个对端已经有一条渠道了' }])
+})
+
+test('配置：规整绑定的丢弃原因都能直接展示（对端没填 / 通道写错 / 格式不对）', () => {
+  const dropped = []
+  normalizeBindings([
+    { channel: 'wechat', peer: '', session: '' },
+    { channel: 'wx', peer: WX, session: '' },
+    { channel: 'wechat', peer: 'bad id', session: '' },
+    { channel: 'qq', peer: 'abc', session: '' },
+  ], dropped)
+  assert.deepEqual(dropped.map((item) => [item.channel, item.peer, item.reason]), [
+    ['wechat', '', '对端没填'],
+    ['wx', WX, '通道只能填 qq 或 wechat'],
+    ['wechat', 'bad id', '对端格式不对：微信对端只能是不含空格的可见 ASCII 字符（形如 o9cq...@im.wechat 或 wxid_xxx）'],
+    ['qq', 'abc', '对端格式不对：QQ 渠道号只能是数字'],
   ])
 })
 
@@ -279,7 +311,7 @@ test('fish.message：错误提示按通道区分，不写死纯数字 QQ', async
   const { api } = makeApi()
   await assert.rejects(() => api.sendText('', 'hi'), (error) => {
     assert.equal(error.code, 'fish_message_bad_request')
-    assert.match(error.hint, /QQ 号不能为空/)
+    assert.match(error.hint, /QQ 渠道的对端不能为空/)
     return true
   })
   await assert.rejects(() => api.sendText('bad peer', 'hi', { channel: 'wechat' }), (error) => {
@@ -345,6 +377,13 @@ function makeBridge({ dir = tempDir(), bindings, config = {} } = {}) {
   return { dir, store, logger, transport, delivery, cfg, bridge }
 }
 
+/** 一轮里一个模型步的 assistant 正文。 */
+const assistantStep = (turn, text, id = 'step-' + turn) => ({
+  type: 'assistant/message',
+  data: { turn, step: 1, message: { id, content: [{ type: 'text', text }] } },
+})
+const turnEnd = (turn) => ({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+
 const inboundEvent = ({ channel, peer, id, text, time }) => ({
   post_type: 'message',
   message_type: 'private',
@@ -375,7 +414,7 @@ test('Bridge：微信 peer 能入站、能投递，回复只带原串不带前�
   assert.ok(store.getWatermark('wechat:' + WX), '水位要带通道')
   assert.equal(store.getWatermark(WX), null)
 
-  const reply = await bridge.deliverAssistantTurn('session-wx', '[QQ]收到[/QQ]')
+  const reply = await bridge.deliverAssistantTurn('session-wx', '[MSG]收到[/MSG]', [], { channel: 'wechat', peer: WX })
   assert.equal(reply.ok, true)
   assert.equal(transport.sent.length, 1)
   assert.equal(transport.sent[0].peer, WX, '交给传输层的只有对端原串')
@@ -412,6 +451,89 @@ test('Bridge：两个通道同名 peer 各自投递、水位分开、出站不�
   await bridge.sendOutbound('10086', textSegment('同一句'), { channel: 'qq' })
   await bridge.sendOutbound('10086', textSegment('同一句'), { channel: 'wechat' })
   assert.deepEqual(transport.sent.map((x) => x.peer), ['10086', '10086'], '传输层只收对端原串')
+  await bridge.stop()
+})
+
+test('Bridge：同一会话挂 QQ + 微信两条绑定，各轮回复回到本轮来的那条', async () => {
+  const multiSession = 'session-multi'
+  const { bridge, transport, delivery } = makeBridge({
+    bindings: [
+      { channel: 'qq', qq: QQ, session: multiSession, name: '主人' },
+      { channel: 'wechat', qq: WX, session: multiSession, name: '微信' },
+    ],
+  })
+  // 记下真正交给传输层的通道：fakeTransport 不解析 options，这里包一层。
+  const sent = []
+  const originalSend = transport.sendMessage.bind(transport)
+  transport.sendMessage = async (peer, segments, options = {}) => {
+    sent.push({ channel: options.channel, peer: String(peer) })
+    return originalSend(peer, segments, options)
+  }
+  await bridge.start({ syncNow: false })
+  const now = Math.floor(Date.now() / 1000)
+
+  // 第一轮：QQ 来消息 → 本轮回复发给 QQ。
+  transport.emit(inboundEvent({ peer: QQ, id: 'multi-qq-1', text: 'QQ 这边说话', time: now - 2 }))
+  assert.equal(await waitFor(() => delivery.got.length === 1), true)
+  bridge.onSessionEvent({ id: multiSession }, assistantStep(1, '[MSG]回给 QQ[/MSG]', 'm-1'))
+  bridge.onSessionEvent({ id: multiSession }, turnEnd(1))
+  assert.equal(await waitFor(() => sent.length === 1), true)
+  assert.deepEqual(sent[0], { channel: 'qq', peer: QQ })
+
+  // 第二轮：微信来消息 → 本轮回复发给微信，而不是 QQ。
+  transport.emit(inboundEvent({ channel: 'wechat', peer: WX, id: 'multi-wx-1', text: '微信这边说话', time: now - 1 }))
+  assert.equal(await waitFor(() => delivery.got.length === 2), true)
+  bridge.onSessionEvent({ id: multiSession }, assistantStep(2, '[MSG]回给微信[/MSG]', 'm-2'))
+  bridge.onSessionEvent({ id: multiSession }, turnEnd(2))
+  assert.equal(await waitFor(() => sent.length === 2), true)
+  assert.deepEqual(sent[1], { channel: 'wechat', peer: WX })
+  await bridge.stop()
+})
+
+test('Bridge：没有入站来源的回合（网页端输入）整轮不发，也不进 Outbox', async () => {
+  const { bridge, transport } = makeBridge({
+    bindings: [
+      { channel: 'qq', qq: QQ, session, name: '主人' },
+      { channel: 'wechat', qq: WX, session, name: '微信' },
+    ],
+  })
+  await bridge.start({ syncNow: false })
+  bridge.onSessionEvent({ id: session }, assistantStep(1, '[MSG]网页端这一轮[/MSG]'))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  await sleep(80)
+  assert.equal(transport.sent.length, 0, '没有渠道来源就一条都不发')
+  assert.equal(bridge.outbox.pending(), 0, '也不进待发队列')
+  await bridge.stop()
+})
+
+test('Bridge：上一轮的渠道来源不会被网页端输入的下一轮复用', async () => {
+  const { bridge, transport, delivery } = makeBridge({ bindings: [{ qq: QQ, session, name: '主人' }] })
+  await bridge.start({ syncNow: false })
+  const now = Math.floor(Date.now() / 1000)
+  transport.emit(inboundEvent({ peer: QQ, id: 'only-1', text: '渠道来的话', time: now - 1 }))
+  assert.equal(await waitFor(() => delivery.got.length === 1), true)
+
+  bridge.onSessionEvent({ id: session }, assistantStep(1, '[MSG]回渠道[/MSG]', 't1'))
+  bridge.onSessionEvent({ id: session }, turnEnd(1))
+  assert.equal(await waitFor(() => transport.sent.length === 1), true)
+
+  // 第二轮是网页端输入：没有新的入站来源，不能拿上一轮的来源凑。
+  bridge.onSessionEvent({ id: session }, assistantStep(2, '[MSG]不该发出去[/MSG]', 't2'))
+  bridge.onSessionEvent({ id: session }, turnEnd(2))
+  await sleep(80)
+  assert.equal(transport.sent.length, 1, '第二轮一条都不发')
+  assert.equal(bridge.outbox.pending(), 0)
+  await bridge.stop()
+})
+
+test('Bridge：显式指定通道的发送（fish.message / 测试发送）不受本轮来源影响', async () => {
+  const { bridge, transport } = makeBridge({
+    bindings: [{ channel: 'wechat', qq: WX, session, name: '微信' }],
+  })
+  await bridge.start({ syncNow: false })
+  await bridge.sendOutbound(WX, textSegment('显式发微信'), { channel: 'wechat' })
+  assert.equal(transport.sent.length, 1)
+  assert.equal(transport.sent[0].peer, WX)
   await bridge.stop()
 })
 
