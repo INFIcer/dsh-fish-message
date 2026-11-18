@@ -2565,6 +2565,7 @@ window.__ModuleLoader__.load({
 
       // 默认文案都由宿主 /state 下发，前端不另写一份（原文只在 lib/config.js 一处）。
       const defaultImagePrompt = String((state.defaults && state.defaults.inboundImagePrompt) || '')
+      const defaultGuardSystemPrompt = String((state.defaults && state.defaults.guardSystemPrompt) || '')
       const defaultLongTaskReminder = String((state.defaults && state.defaults.guardStuckPrompt) || '')
       const defaultMessageChannelReminder = String((state.defaults && state.defaults.guardQqPrompt) || '')
       const guard = state.guard || {}
@@ -2574,6 +2575,25 @@ window.__ModuleLoader__.load({
         h('div', { style: S.dim }, '让绑定的消息能持续收发；注意调整会话权限设置，权限过低可能因授权问题被中断。'),
         row('保持绑定会话能收发', flag(config.guardEnabled, (v) => change('guardEnabled', v)),
           '开启后，绑定的会话内禁用会导致会话中断的工具'),
+        row('系统提示词', h('div', null,
+          h('textarea', {
+            style: {
+              ...S.input, minHeight: 64, resize: 'vertical', lineHeight: 1.6, fontFamily: 'inherit',
+            },
+            rows: 3,
+            maxLength: 4000,
+            value: config.guardSystemPrompt || '',
+            placeholder: defaultGuardSystemPrompt,
+            onChange: (e) => change('guardSystemPrompt', e.target.value),
+          }),
+          config.guardSystemPrompt
+            ? h('div', { style: { marginTop: 6 } },
+              h('button', {
+                type: 'button', style: S.btn,
+                onClick: () => change('guardSystemPrompt', ''),
+              }, '恢复默认'))
+            : null),
+        '注入到绑定会话的约定；留空用内置默认。'),
         row('长任务监控（秒）', h('input', {
           style: S.small, type: 'number', min: 1, max: 7200, value: config.guardStuckSeconds ?? 600,
           onChange: (e) => change('guardStuckSeconds', Number(e.target.value)),

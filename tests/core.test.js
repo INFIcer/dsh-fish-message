@@ -10,7 +10,7 @@ import { StateStore } from '../lib/storage.js'
 import { ForwardQueue } from '../lib/forward-queue.js'
 import { ConfigStore, removedVoiceFields, normalizeConfig, deriveWsUrl, migrateLegacyConfig, publicConfig, defaultImagePrompt, defaultLongTaskReminder, defaultChannelReminder } from '../lib/config.js'
 import {
-  GuardMonitor, constructToolGuard, guardRules, refuseTool, longTaskReminderText, channelReminderText, turnGraceMs,
+  GuardMonitor, constructToolGuard, guardRules, guardPromptText, refuseTool, longTaskReminderText, channelReminderText, turnGraceMs,
 } from '../lib/guard.js'
 import { AiService } from '../lib/ai.js'
 import { Logger } from '../lib/logger.js'
@@ -1610,6 +1610,26 @@ test('防失联：两条提醒提示词可配置，空串/非字符串/超长回
   const readRespond = store.load()
   assert.equal(readRespond.guardStuckPrompt, '保存长任务')
   assert.equal(readRespond.guardQqPrompt, '保存通道')
+})
+
+test('防失联：系统提示词可配置，空串/非字符串/超长回落空，留空用内置默认', () => {
+  assert.equal(normalizeConfig({}).guardSystemPrompt, '')
+  assert.equal(normalizeConfig({ guardSystemPrompt: '  自定义系统提示  ' }).guardSystemPrompt, '自定义系统提示')
+  assert.equal(normalizeConfig({ guardSystemPrompt: '\n自定义系统提示\n' }).guardSystemPrompt, '自定义系统提示')
+  assert.equal(normalizeConfig({ guardSystemPrompt: '   ' }).guardSystemPrompt, '')
+  assert.equal(normalizeConfig({ guardSystemPrompt: 123 }).guardSystemPrompt, '')
+  assert.equal(normalizeConfig({ guardSystemPrompt: 'x'.repeat(4001) }).guardSystemPrompt, '')
+  assert.equal(normalizeConfig({ guardSystemPrompt: 'x'.repeat(4000) }).guardSystemPrompt, 'x'.repeat(4000))
+
+  // 工具函数：没设/空白回退内置规则，自定义文字原样（去首尾空格）替换。
+  assert.equal(guardPromptText({}), guardRules)
+  assert.equal(guardPromptText({ guardSystemPrompt: '   ' }), guardRules)
+  assert.equal(guardPromptText({ guardSystemPrompt: '  自定义系统提示  ' }), '自定义系统提示')
+
+  const dir = tempDir()
+  const store = new ConfigStore({ homeDir: dir })
+  assert.ok(store.save({ ...normalizeConfig({}), guardSystemPrompt: '保存的系统提示' }))
+  assert.equal(store.load().guardSystemPrompt, '保存的系统提示')
 })
 
 test('持久化：待转发队列/状态/配置损坏时先留档，再按空值继续', () => {

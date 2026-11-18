@@ -266,6 +266,7 @@ function fullState() {
       guardQqRemindTurns: 3,
       guardStuckPrompt: '',
       guardQqPrompt: '',
+      guardSystemPrompt: '',
       backfillWindowHours: 24,
       outboxTtlHours: 24,
       outboxDedupMinutes: 10,
@@ -304,6 +305,7 @@ function fullState() {
       inboundImagePrompt: '描述这张图片',
       guardStuckPrompt: '默认长任务提醒',
       guardQqPrompt: '默认消息通道提醒',
+      guardSystemPrompt: '默认系统提示词',
     },
     bridge: {
       running: true,
@@ -453,6 +455,21 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.match(plainText, /编辑窗口（秒）/)
   assert.match(plainText, /发送间隔（毫秒）/)
   assert.match(plainText, /按字数追加间隔（毫秒）/)
+  // 系统提示词：默认留空，占位文字用宿主下发的内置文案。
+  const emptySystemPrompt = findAll(complete,
+    (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认系统提示词')
+  assert.equal(emptySystemPrompt.length, 1)
+  assert.equal(emptySystemPrompt[0].props.value, '')
+
+  // 有自定义值时显示它，并给出「恢复默认」。
+  const customSystemPrompt = fullState()
+  customSystemPrompt.config.guardSystemPrompt = '自定义系统提示'
+  const customTree = env.renderSection([customSystemPrompt])
+  const customSystemBox = findAll(customTree,
+    (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认系统提示词')
+  assert.equal(customSystemBox.length, 1)
+  assert.equal(customSystemBox[0].props.value, '自定义系统提示')
+  assert.equal(findButton(customTree, '恢复默认').length, 1)
 
   // 老版本 /state 没有 memory 字段：状态行退回 ai.online，不炸。
   const noMemory = fullState()

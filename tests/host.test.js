@@ -102,6 +102,9 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   // 两条提醒的默认文案由宿主下发，设置页占位文字直接用它。
   assert.match(status.defaults.guardStuckPrompt, /通过消息渠道与用户对话/)
   assert.match(status.defaults.guardQqPrompt, /没有消息发出/)
+  // 系统提示词同样由宿主下发默认（内置规则），设置里默认留空。
+  assert.match(status.defaults.guardSystemPrompt, /\[MSG\]/)
+  assert.equal(status.config.guardSystemPrompt, '')
   // 暂停转发：状态里有待转发队列，默认没在暂停。
   assert.equal(typeof status.forwardFile, 'string')
   assert.equal(status.bridge.forward.paused, false)
@@ -506,6 +509,118 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
 
   listen.get('agent/created')({ agent })
   assert.equal(toolGuardList.length, 2)
+
+  await app.stop()
+  await sleep(20)
+  await server.stop()
+})
+
+test('防失联：设置页改系统提示词后不重启，旧提示段撤销、新提示段生效', async () => {
+  const server = await new MockOneBotServer().start()
+  const dir = mkdtempSync(join(tmpdir(), 'fish-guard-prompt-'))
+  process.env.DSH_HOME = dir
+
+  const routes = new Map()
+  const listen = new Map()
+  const promptSegments = []
+  let abortPromptSegment = 0
+
+  const agent = {
+    id: session,
+    session: { id: session },
+    status: 'idle',
+    ctx: {
+      systemPrompt: {
+        section(segment) {
+          promptSegments.push(segment)
+          return () => { abortPromptSegment += 1 }
+        },
+      },
+    },
+    async followup() {},
+  }
+
+  const ctx = {
+    effect(cb) {
+      const d = cb()
+      return typeof d === 'function' ? d : () => {}
+    },
+    on(event, fn) {
+      listen.set(event, fn)
+      return () => listen.delete(event)
+    },
+    get(service) {
+      if (service === 'sessions') return { list: () => [{ id: session, title: '系统提示词测试' }], flush: async () => {} }
+      if (service === 'sessionTitle') return { get: () => ({ title: '系统提示词测试' }) }
+      if (service === 'workspaceRegistry') return { archivedSessionIds: [] }
+      if (service === 'attachments') return { admitPromptContent: async (c) => c, imageHostPath: () => '' }
+      return undefined
+    },
+    agents: { get: (id) => (id === session ? agent : undefined), list: () => [] },
+    webServer: {
+      register({ path, handler }) {
+        routes.set(path, handler)
+        return () => routes.delete(path)
+      },
+    },
+  }
+
+  const host = await import('../lib/host.js?host-guard-prompt')
+  const app = host.apply(ctx, {
+    napcatBaseUrl: server.baseUrl,
+    wsUrl: server.wsUrl,
+    wsEnabled: false,
+    bindings: [{ qq: QQ, session: session, name: '主人', enabled: true }],
+    pollIntervalMs: 200,
+    reorderBufferMs: 30,
+    requestTimeoutMs: 3000,
+    outboxPerMessageDelayMs: 0,
+    outboxPerCharDelayMs: 0,
+    inboundEditWindowMs: 0,
+  })
+  await wait(() => app.bridge.running, 2000)
+
+  const saveConfig = async (patch) => {
+    const request = {
+      method: 'POST',
+      url: '/dsh-fish-message/save',
+      on(event, fn) {
+        if (event === 'data') fn(JSON.stringify({ config: patch }))
+        if (event === 'end') fn()
+      },
+    }
+    const response = fakeResponse()
+    await routes.get('/dsh-fish-message/save')(request, response)
+    return JSON.parse(response.body)
+  }
+
+  // 绑定会话出现时装上守卫：提示段是内置规则。
+  listen.get('agent/created')({ agent })
+  assert.equal(promptSegments.length, 1)
+  assert.equal(promptSegments[0].name, 'fish-message:guard')
+  assert.match(promptSegments[0].text, /子代理/)
+  assert.equal(abortPromptSegment, 0)
+
+  // /save 改系统提示词：旧段先撤销，再用新文字重新注入（不重启插件）。
+  const custom = '本会话只通过 [MSG] 回话；需要拍板先问，再继续做不依赖它的部分。'
+  const saved = await saveConfig({ guardSystemPrompt: custom })
+  assert.equal(saved.ok, true)
+  assert.equal(abortPromptSegment, 1, '旧提示段必须撤销')
+  assert.equal(promptSegments.length, 2)
+  assert.equal(promptSegments[1].name, 'fish-message:guard')
+  assert.equal(promptSegments[1].order, 10150)
+  assert.equal(promptSegments[1].text, custom)
+
+  // 同一份配置再保存一次：文字没变，不重复重装。
+  await saveConfig({ guardSystemPrompt: custom })
+  assert.equal(abortPromptSegment, 1)
+  assert.equal(promptSegments.length, 2)
+
+  // 清空：重新装回内置默认。
+  await saveConfig({ guardSystemPrompt: '' })
+  assert.equal(abortPromptSegment, 2)
+  assert.equal(promptSegments.length, 3)
+  assert.match(promptSegments[2].text, /子代理/)
 
   await app.stop()
   await sleep(20)
