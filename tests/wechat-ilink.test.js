@@ -525,6 +525,56 @@ test('发不出去的三种情况都明确抛错：没锚点、语音段、未�
   }
 })
 
+test('撤回：同一条消息被重推一次带 delete_time_ms，只产生撤回通知、不再当新消息投递', async () => {
+  const server = await new MockIlinkServer().start()
+  server.qrStatuses = ['confirmed']
+  const { transport } = makeTransport({ server })
+  const events = collectEvents(transport)
+  const message = textMessage('这句话要撤回', { messageId: 7788, seq: 11 })
+  server.pushFrame({ msgs: [message], cursor: 'c1' })
+  await transport.start()
+  try {
+    assert.ok(await wait(() => events.length === 1))
+    assert.equal(events[0].post_type, 'message')
+    // 服务端撤回的表现：同一条消息再推一次，多出 delete_time_ms。
+    server.pushFrame({ msgs: [{ ...message, delete_time_ms: Date.now() }], cursor: 'c2' })
+    assert.ok(await wait(() => events.length === 2, 5000), '应当收到撤回通知')
+    const notice = events[1]
+    assert.equal(notice.post_type, 'notice')
+    assert.equal(notice.notice_type, 'friend_recall')
+    assert.equal(notice.channel, 'wechat')
+    assert.equal(notice.user_id, PEER)
+    assert.equal(String(notice.message_id), '7788')
+    assert.ok(notice.time > 0)
+    await sleep(120)
+    assert.equal(events.length, 2, '撤回帧不能再产生一条消息事件')
+  } finally {
+    await transport.stop()
+    await server.stop()
+  }
+})
+
+test('撤回：原消息还没到就先收到 delete 帧，也绝不投递占位内容', async () => {
+  const server = await new MockIlinkServer().start()
+  server.qrStatuses = ['confirmed']
+  const { transport } = makeTransport({ server })
+  const events = collectEvents(transport)
+  const message = textMessage('从未投递就被撤回', { messageId: 7789, seq: 12 })
+  // 撤回帧里 item_list 通常还在，但即使空了也不能因为「没有可识别内容」而占位投递。
+  server.pushFrame({ msgs: [{ ...message, delete_time_ms: Date.now(), item_list: [] }], cursor: 'c1' })
+  await transport.start()
+  try {
+    assert.ok(await wait(() => events.length >= 1, 5000))
+    await sleep(120)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].post_type, 'notice')
+    assert.equal(events[0].notice_type, 'friend_recall')
+  } finally {
+    await transport.stop()
+    await server.stop()
+  }
+})
+
 test('fetchHistory 恒返回 []（iLink 没有历史接口）；listRecentPeers 按活跃时间倒序', async () => {
   const server = await new MockIlinkServer().start()
   server.qrStatuses = ['confirmed']
