@@ -92,10 +92,12 @@ test('待发记录：一个段正在等待节奏时重启，新实例补发一�
   const gate = new Promise((resolve) => { release = resolve })
   const first = makeBridge({ dir, sleep: async () => { await gate } })
   await first.bridge.start({ syncNow: false })
+  // 首条按新口径不等，所以先发一条「上一条」，第二条才会进等待。
+  await first.bridge.deliverAssistantTurn(session, '[QQ]先发一条[/QQ]')
 
   const pending = first.bridge.deliverAssistantTurn(session, '[QQ]等待中被重启[/QQ]')
   assert.equal(await waitFor(() => first.bridge.inflight.pending() === 1), true, '进入等待前应先落盘')
-  assert.equal(first.transport.sent.length, 0, '等待期间还没发出去')
+  assert.equal(first.transport.sent.length, 1, '等待期间只有热身那条发出去了')
   const disk = inflightDisk(dir)
   assert.equal(disk.items.length, 1)
   assert.equal(disk.items[0].segments[0].data.text, '等待中被重启', '记录里是当前这条还没发出去的消息段')
@@ -157,6 +159,8 @@ test('待发记录：一轮多段在等待中崩溃，重启后按原顺序补�
   const gate = new Promise((resolve) => { release = resolve })
   const first = makeBridge({ dir, sleep: async () => { await gate } })
   await first.bridge.start({ syncNow: false })
+  // 首块按新口径不等，先发一条「上一条」，下面的块一才会进等待。
+  await first.bridge.deliverAssistantTurn(session, '[QQ]先发一条[/QQ]')
 
   const pending = first.bridge.deliverAssistantTurn(session, '[QQ]块一[/QQ][QQ]块二[/QQ][QQ]块三[/QQ]')
   assert.equal(await waitFor(() => first.bridge.inflight.pending() === 1), true)
@@ -190,7 +194,8 @@ test('待发记录：一条消息多段时只补发还没发出去的段', async
     dir,
     sleep: async () => {
       calls += 1
-      if (calls === 2) await gate
+      // 第一段按新口径直接发，第二段才进等待。
+      if (calls === 1) await gate
     },
   })
   await first.bridge.start({ syncNow: false })
@@ -232,7 +237,8 @@ test('待发记录：语音合成多段时，只补发还没发出的语音条',
     ai: { async tts() { return { ok: true, wavPaths: audios } } },
     sleep: async () => {
       calls += 1
-      if (calls === 2) await gate
+      // 第一条语音按新口径直接发，第二条才进等待。
+      if (calls === 1) await gate
     },
   })
   await first.bridge.start({ syncNow: false })

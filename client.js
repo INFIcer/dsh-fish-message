@@ -1663,7 +1663,7 @@ window.__ModuleLoader__.load({
         row('发送间隔（毫秒）', h('input', {
           style: S.small, type: 'number', min: 0, max: 60000, value: config.outboxPerMessageDelayMs ?? 2000,
           onChange: (e) => change('outboxPerMessageDelayMs', Number(e.target.value)),
-        }), '每条消息发出前固定等这么久，避免一下子刷屏；0 表示立即发送。'),
+        }), '与上一条消息发出的最小间隔；不够才等，空闲之后再发第一条不等；0 表示不间隔。'),
         row('按字数追加间隔（毫秒）', h('input', {
           style: S.small, type: 'number', min: 0, max: 5000, value: config.outboxPerCharDelayMs ?? 100,
           onChange: (e) => change('outboxPerCharDelayMs', Number(e.target.value)),

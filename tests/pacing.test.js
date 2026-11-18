@@ -1,6 +1,7 @@
-// 出站节奏：字数算法、等待时长、发送顺序、补发也延迟、不阻塞收消息。
+// 出站节奏：字数算法、最小间隔、发送顺序、补发也按间隔、不阻塞收消息。
 //
-// 等待用注入的 sleep 记录，不会真等 2 秒/条。
+// 时钟是注入的假时钟：sleep 会把假时钟往前拨，所以断言的是「补等了多少」，
+// 不是真实经过多久，也不会真等 2 秒。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -11,7 +12,7 @@ import { Bridge } from '../lib/bridge.js'
 import { StateStore } from '../lib/storage.js'
 import { Logger } from '../lib/logger.js'
 import { normalizeConfig } from '../lib/config.js'
-import { countTextUnits, countSegmentUnits, outboundDelayMs, OutboundPacer } from '../lib/pacing.js'
+import { countTextUnits, countSegmentUnits, outboundIntervalMs, OutboundPacer } from '../lib/pacing.js'
 
 const QQ = '10001'
 const session = 'session-pacing'
@@ -57,6 +58,8 @@ function makeBridge({ dir = mkdtempSync(join(tmpdir(), 'fish-pacing-')), config 
   const transport = new fakeTransport()
   const delivery = new fakeDelivery()
   const sleeps = []
+  // 假时钟：sleep 推进它，发送时刻因此是可断言的确定值。
+  const clock = { t: 1_700_000_000_000 }
   const cfg = normalizeConfig({
     bindings: [{ qq: QQ, session, name: '主人', enabled: true }],
     reorderBufferMs: 10,
@@ -74,10 +77,15 @@ function makeBridge({ dir = mkdtempSync(join(tmpdir(), 'fish-pacing-')), config 
     voice: { async fetchImage() { throw new Error('测试不放图片') } },
     delivery,
     autoTimers: false,
-    sleep: sleepFn || (async (ms) => { sleeps.push(ms) }),
+    now: () => clock.t,
+    sleep: async (ms) => {
+      sleeps.push(ms)
+      clock.t += ms
+      if (sleepFn) await sleepFn(ms)
+    },
   })
   store.setWatermark(QQ, { timestamp: 1, messageId: '' })
-  return { dir, store, logger, transport, delivery, sleeps, cfg, bridge }
+  return { dir, store, logger, transport, delivery, sleeps, clock, cfg, bridge }
 }
 
 const writePng = (dir) => {
@@ -138,15 +146,15 @@ test('字数：图片、文件、语音文件段不算字；语音文本按文�
   assert.equal(countSegmentUnits({ type: 'weird' }), 0)
 })
 
-test('延迟：固定延迟 + 字数 × 逐字延迟，四舍五入到毫秒', () => {
-  assert.equal(outboundDelayMs([{ type: 'text', data: { text: '你好' } }], { perMessageMs: 2000, perCharMs: 100 }), 2200)
-  assert.equal(outboundDelayMs([{ type: 'text', data: { text: '你好，世界！' } }], { perMessageMs: 0, perCharMs: 100 }), 440)
-  assert.equal(outboundDelayMs([{ type: 'image', data: { path: 'a.png' } }], { perMessageMs: 2000, perCharMs: 100 }), 2000)
-  assert.equal(outboundDelayMs([], { perMessageMs: 2000, perCharMs: 100 }), 2000)
-  assert.equal(outboundDelayMs([{ type: 'text', data: { text: '你好' } }], { perMessageMs: 0, perCharMs: 0 }), 0)
+test('间隔：固定间隔 + 字数 × 逐字间隔，四舍五入到毫秒', () => {
+  assert.equal(outboundIntervalMs([{ type: 'text', data: { text: '你好' } }], { perMessageMs: 2000, perCharMs: 100 }), 2200)
+  assert.equal(outboundIntervalMs([{ type: 'text', data: { text: '你好，世界！' } }], { perMessageMs: 0, perCharMs: 100 }), 440)
+  assert.equal(outboundIntervalMs([{ type: 'image', data: { path: 'a.png' } }], { perMessageMs: 2000, perCharMs: 100 }), 2000)
+  assert.equal(outboundIntervalMs([], { perMessageMs: 2000, perCharMs: 100 }), 2000)
+  assert.equal(outboundIntervalMs([{ type: 'text', data: { text: '你好' } }], { perMessageMs: 0, perCharMs: 0 }), 0)
 })
 
-test('Pacer：按注入的时钟与 sleep 等待，返回实际等待时长', async () => {
+test('Pacer：没有更早的消息时直接返回，不睡', async () => {
   const clock = { t: 0 }
   const calls = []
   const pacer = new OutboundPacer({
@@ -154,10 +162,37 @@ test('Pacer：按注入的时钟与 sleep 等待，返回实际等待时长', as
     now: () => clock.t,
     sleep: async (ms) => { calls.push(ms); clock.t += ms },
   })
-  const waited = await pacer.wait({ type: 'text', data: { text: '你好' } })
+  const segment = { type: 'text', data: { text: '你好' } } // 间隔 100 + 2 × 50 = 200
+  assert.equal(await pacer.wait(segment), 0, '本进程还没发过，没有更早的消息可比，不等')
+  assert.deepEqual(calls, [])
+  assert.equal(pacer.delayFor, undefined, '旧口径 delayFor 已改名为 intervalFor')
+  assert.equal(pacer.intervalFor({ type: 'text', data: { text: 'hello world' } }), 210)
+})
+
+test('Pacer：距上一条已隔够就立即发，不够只补等剩下的那一段', async () => {
+  const clock = { t: 0 }
+  const calls = []
+  const pacer = new OutboundPacer({
+    getConfig: () => ({ outboxPerMessageDelayMs: 100, outboxPerCharDelayMs: 50 }),
+    now: () => clock.t,
+    sleep: async (ms) => { calls.push(ms); clock.t += ms },
+  })
+  const segment = { type: 'text', data: { text: '你好' } } // 间隔 200
+
+  pacer.markSent() // 时刻 0 发出去一条
+  assert.equal(pacer.dueAtFor(segment), 200)
+  assert.equal(await pacer.wait(segment), 200, '紧接着发下一条：等满整个间隔')
   assert.deepEqual(calls, [200])
-  assert.equal(waited, 200)
-  assert.equal(pacer.delayFor({ type: 'text', data: { text: 'hello world' } }), 210)
+
+  pacer.markSent() // 时刻 200 又发了一条
+  clock.t += 80
+  assert.equal(await pacer.wait(segment), 120, '已经过了 80ms，只补等剩下的 120ms')
+  assert.deepEqual(calls, [200, 120])
+
+  pacer.markSent() // 时刻 320 发了一条
+  clock.t += 5000
+  assert.equal(await pacer.wait(segment), 0, '隔了 5 秒，早就够间隔了，不再等')
+  assert.deepEqual(calls, [200, 120])
 })
 
 test('Pacer：配置为 0 时不等', async () => {
@@ -172,31 +207,46 @@ test('Pacer：配置为 0 时不等', async () => {
 
 // ---------------- Bridge 行为 ----------------
 
-test('Bridge：正常回复按字数逐条等待，发送顺序不变', async () => {
+test('Bridge：首条直接发，紧跟的第二条只补等间隔差的那段', async () => {
   const { bridge, transport, sleeps } = makeBridge()
   await bridge.start({ syncNow: false })
-  // 两轮分别发：你好 = 2 字 → 20 + 20；第一段话 = 4 字 → 20 + 40。
+  // 你好 = 2 字 → 间隔 40；第一段话 = 4 字 → 间隔 60。
   await bridge.deliverAssistantTurn(session, '[QQ]你好[/QQ]')
   await bridge.deliverAssistantTurn(session, '[QQ]第一段话[/QQ]')
 
-  assert.deepEqual(sleeps, [40, 60])
+  assert.deepEqual(sleeps, [60], '首条没有更早的消息不等；第二条距上一条还不够，补等 60ms')
   assert.equal(transport.sent.length, 2)
   assert.equal(transport.sent[0].segments[0].data.text, '你好')
   assert.equal(transport.sent[1].segments[0].data.text, '第一段话')
   await bridge.stop()
 })
 
-test('Bridge：一步里多个块各自按自己的字数等待', async () => {
+test('Bridge：距上一条发出已超过间隔时立即发，不等整段', async () => {
+  const { bridge, transport, sleeps, clock } = makeBridge()
+  await bridge.start({ syncNow: false })
+  await bridge.sendOutbound(QQ, [{ type: 'text', data: { text: '早' } }], { reason: 'test' })
+  clock.t += 10000 // 隔了很久
+  await bridge.sendOutbound(QQ, [{ type: 'text', data: { text: '很久以后的回复' } }], { reason: 'test' })
+  clock.t += 5
+  await bridge.sendOutbound(QQ, [{ type: 'text', data: { text: '紧接着的下一条' } }], { reason: 'test' })
+
+  // 「很久以后的回复」隔够了直接发；「紧接着的下一条」7 字 → 间隔 90，只过了 5ms，补等 85。
+  assert.deepEqual(sleeps, [85])
+  assert.equal(transport.sent.length, 3)
+  await bridge.stop()
+})
+
+test('Bridge：一步里多个块各自按自己的字数算间隔', async () => {
   const { bridge, transport, sleeps } = makeBridge()
   await bridge.start({ syncNow: false })
-  // 你好 = 2 字 → 20 + 20；第一段话 = 4 字 → 20 + 40；短 = 1 字 → 20 + 10。
+  // 你好 = 2 字 → 40；第一段话 = 4 字 → 60；短 = 1 字 → 30。
   await bridge.deliverAssistantTurn(session, '[QQ]你好[/QQ][QQ]第一段话[/QQ][QQ]短[/QQ]')
-  assert.deepEqual(sleeps, [40, 60, 30], '每块单独等一次，不按合并后的整段字数等')
+  assert.deepEqual(sleeps, [60, 30], '首块立即发，后面两块各按自己的字数补等')
   assert.deepEqual(transport.sent.map((x) => x.segments[0].data.text), ['你好', '第一段话', '短'])
   await bridge.stop()
 })
 
-test('Bridge：图片与语音文件段只等固定延迟，不等字数', async () => {
+test('Bridge：图片与语音文件段只按固定间隔', async () => {
   const { bridge, transport, sleeps, dir } = makeBridge()
   await bridge.start({ syncNow: false })
   const png = writePng(dir)
@@ -204,16 +254,19 @@ test('Bridge：图片与语音文件段只等固定延迟，不等字数', async
 
   await bridge.sendOutbound(QQ, [{ type: 'image', data: { path: png } }], { reason: 'test' })
   await bridge.sendOutbound(QQ, [{ type: 'record', data: { path: wav } }], { reason: 'test' })
-  assert.deepEqual(sleeps, [20, 20])
+  assert.deepEqual(sleeps, [20], '首条图片直接发；语音只隔固定 20ms，不按字数加')
   assert.equal(transport.sent.length, 2)
   assert.equal(transport.sent[0].segments[0].type, 'image')
   assert.equal(transport.sent[1].segments[0].type, 'record')
   await bridge.stop()
 })
 
-test('Bridge：补发队列里的消息也要等节奏', async () => {
-  const { bridge, transport, sleeps } = makeBridge()
+test('Bridge：补发队列里的消息也按间隔等（只补剩下的）', async () => {
+  const { bridge, transport, sleeps, clock } = makeBridge()
   await bridge.start({ syncNow: false })
+  await bridge.sendText(QQ, '先发一条')
+  assert.deepEqual(sleeps, [], '首条直接发，不等')
+
   // 传输层已停：直接入队，不尝试发送（所以也不该等）。
   transport.status.mode = 'stopped'
   const queued = await bridge.sendText(QQ, '这条先入队')
@@ -223,11 +276,13 @@ test('Bridge：补发队列里的消息也要等节奏', async () => {
 
   transport.status.mode = 'http'
   transport.online = true
+  clock.t += 15 // 距上一条已经过了 15ms
   const flushed = await bridge.flushOutbox('test', { force: true })
   assert.equal(flushed.sent, 1)
-  assert.deepEqual(sleeps, [20 + 5 * 10], '补发同样按「固定 + 字数」等')
-  assert.equal(transport.sent.length, 1)
-  assert.equal(transport.sent[0].segments[0].data.text, '这条先入队')
+  // 「这条先入队」5 字 → 间隔 70；已经过了 15ms，只补等剩下的 55ms。
+  assert.deepEqual(sleeps, [55], '补发同样按间隔补等')
+  assert.equal(transport.sent.length, 2)
+  assert.equal(transport.sent[1].segments[0].data.text, '这条先入队')
   await bridge.stop()
 })
 
@@ -237,8 +292,9 @@ test('Bridge：节奏全关（0/0）时不等，照常发送', async () => {
   })
   await bridge.start({ syncNow: false })
   await bridge.sendText(QQ, '不等直接发')
+  await bridge.sendText(QQ, '第二条也不等')
   assert.deepEqual(sleeps, [])
-  assert.equal(transport.sent.length, 1)
+  assert.equal(transport.sent.length, 2)
   await bridge.stop()
 })
 
@@ -250,10 +306,12 @@ test('Bridge：出站等待期间照常收消息，不阻塞入站', async () =>
     sleep: async (ms) => { seen.push(ms); await gate },
   })
   await bridge.start({ syncNow: false })
+  // 先发一条，让下一条有「上一条」可比（首条按新口径不等）。
+  await bridge.sendOutbound(QQ, [{ type: 'text', data: { text: '热身' } }], { reason: 'test' })
 
   const pending = bridge.deliverAssistantTurn(session, '[QQ]慢一点发[/QQ]')
   assert.equal(await waitFor(() => seen.length === 1), true, '出站先进入等待')
-  assert.equal(transport.sent.length, 0, '等待期间还没发到 QQ')
+  assert.equal(transport.sent.length, 1, '等待期间还没发到 QQ')
 
   transport.emit({
     post_type: 'message',
@@ -270,8 +328,8 @@ test('Bridge：出站等待期间照常收消息，不阻塞入站', async () =>
 
   release()
   await pending
-  assert.equal(transport.sent.length, 1, '等待结束后照常发出')
-  assert.equal(transport.sent[0].segments[0].data.text, '慢一点发')
+  assert.equal(transport.sent.length, 2, '等待结束后照常发出')
+  assert.equal(transport.sent[1].segments[0].data.text, '慢一点发')
   await bridge.stop()
 })
 
