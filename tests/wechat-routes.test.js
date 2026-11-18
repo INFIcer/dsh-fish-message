@@ -287,6 +287,13 @@ test('微信接口：开关变化走重启，绑定与测试发送按通道', as
     assert.equal(env.adapters[0].sent[0].to, WX)
     assert.match(env.adapters[0].sent[0].segments[0].data.text, /测试/)
 
+    // 只给通道、不给对端：按通道挑第一条启用的绑定，不能落到另一条通道上。
+    const channelOnly = await call(env.routes, TEST_SEND, { body: { channel: 'wechat' } })
+    assert.equal(channelOnly.status, 200)
+    assert.equal(channelOnly.body.channel, 'wechat')
+    assert.equal(channelOnly.body.qq, WX)
+    assert.equal(env.adapters[0].sent.length, 2)
+
     // 缺省 channel 仍然是 qq：NapCat 那边收得到。
     const toQq = await call(env.routes, TEST_SEND, { body: { qq: QQ } })
     assert.equal(toQq.status, 200)
