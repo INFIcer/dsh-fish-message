@@ -168,8 +168,8 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(sticker.total, 0)
   assert.equal(sticker.stats.count, 0)
 
-  // 这一轮由 QQ 渠道的入站触发：桥只给本轮有来源的回合出站。
-  app.bridge.noteInboundSource(session, 'qq', QQ)
+  // 这间会话的送信渠道是 QQ（相当于刚收到过一条 QQ 消息）：桥只给有渠道的回合出站。
+  app.bridge.setReplyTarget(session, 'qq', QQ)
   const send = listen.get('session/event')
   assert.equal(typeof send, 'function')
   send({ id: session }, {

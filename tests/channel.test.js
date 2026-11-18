@@ -383,6 +383,8 @@ const assistantStep = (turn, text, id = 'step-' + turn) => ({
   data: { turn, step: 1, message: { id, content: [{ type: 'text', text }] } },
 })
 const turnEnd = (turn) => ({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+/** DSH 的 user/message：source.kind 区分「谁把这条消息送进会话的」。 */
+const userMessage = (kind) => ({ type: 'user/message', data: { source: { kind } } })
 
 const inboundEvent = ({ channel, peer, id, text, time }) => ({
   post_type: 'message',
@@ -490,7 +492,7 @@ test('Bridge：同一会话挂 QQ + 微信两条绑定，各轮回复回到本�
   await bridge.stop()
 })
 
-test('Bridge：没有入站来源的回合（网页端输入）整轮不发，也不进 Outbox', async () => {
+test('Bridge：从没收到过渠道消息的会话整轮不发，也不进 Outbox', async () => {
   const { bridge, transport } = makeBridge({
     bindings: [
       { channel: 'qq', qq: QQ, session, name: '主人' },
@@ -498,15 +500,17 @@ test('Bridge：没有入站来源的回合（网页端输入）整轮不发，�
     ],
   })
   await bridge.start({ syncNow: false })
+  // 用户直接在网页端发言：没有渠道可清，也没有渠道可发。
+  bridge.onSessionEvent({ id: session }, userMessage('user'))
   bridge.onSessionEvent({ id: session }, assistantStep(1, '[MSG]网页端这一轮[/MSG]'))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   await sleep(80)
-  assert.equal(transport.sent.length, 0, '没有渠道来源就一条都不发')
+  assert.equal(transport.sent.length, 0, '没有送信渠道就一条都不发')
   assert.equal(bridge.outbox.pending(), 0, '也不进待发队列')
   await bridge.stop()
 })
 
-test('Bridge：上一轮的渠道来源不会被网页端输入的下一轮复用', async () => {
+test('Bridge：用户直接在网页端发言后，送信渠道被清空，后续回合整轮不发', async () => {
   const { bridge, transport, delivery } = makeBridge({ bindings: [{ qq: QQ, session, name: '主人' }] })
   await bridge.start({ syncNow: false })
   const now = Math.floor(Date.now() / 1000)
@@ -517,7 +521,9 @@ test('Bridge：上一轮的渠道来源不会被网页端输入的下一轮复�
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await waitFor(() => transport.sent.length === 1), true)
 
-  // 第二轮是网页端输入：没有新的入站来源，不能拿上一轮的来源凑。
+  // 用户在 Web GUI 里直接发言：渠道被清空，之后的回合不再往任何渠道发。
+  bridge.onSessionEvent({ id: session }, userMessage('user'))
+  assert.equal(bridge.replyTargetFor(session), null)
   bridge.onSessionEvent({ id: session }, assistantStep(2, '[MSG]不该发出去[/MSG]', 't2'))
   bridge.onSessionEvent({ id: session }, turnEnd(2))
   await sleep(80)

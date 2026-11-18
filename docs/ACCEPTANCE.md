@@ -24,7 +24,7 @@ npm test
 ```
 
 期望：`get_login_info` 返回 `user_id=2983830957`；`/health` 返回 `ok=true`；
-测试 262 项全部 pass。
+`npm test` 全绿。
 
 ---
 
@@ -84,9 +84,23 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 ## 3. 私聊文字双向
 
+### 3.0 送信渠道（先读这条）
+
+回复发到哪条渠道是**粘性**的，只有两种事改变它：
+
+- 收到渠道消息：QQ 私聊来消息 → 之后的回合都回 QQ；微信私聊来消息 → 改回微信；
+- 你在 DSH 网页端（Web GUI）直接发消息：清空，之后不再往任何渠道发，直到渠道里再来消息。
+
+定时提醒、重启通知、子代理消息、上下文注入都不改变它；重启 DSH 也照旧保持（记在状态文件
+`fish-message-state.json` 的 `replyTargets` 里）。
+
+所以下面所有「DSH → QQ / 微信」的验收，都要**在一条渠道消息触发的那一轮里**写 `[MSG]`：
+先给机器人发一条私聊，等它回话，在它回话的那一轮里带上块；不要在网页端起头。
+
 ### DSH → QQ
 
-在绑定的 DSH 会话里发一轮带块的回复：
+先用主人 QQ 给机器人发一条私聊（随便一句，例如 `【验收 1】开始`），在它触发的那一轮里
+回复下面这段：
 
 ```text
 这句留本地。
@@ -145,7 +159,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 ### 5.1 `[语音]文字[/语音]`：本地 AI 正常时合成并发送
 
-在 DSH 会话里发：
+在由 QQ 私聊触发的那一轮里回复（见 3.0）：
 
 ```text
 [MSG][语音]【验收 3】这是 DSH 发出来的语音。[/语音][/MSG]
@@ -181,7 +195,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 ## 6. 转义发送字面量 `[/MSG]`
 
-在 DSH 会话里发：
+在由 QQ 私聊触发的那一轮里回复（见 3.0）：
 
 ```text
 [MSG]【验收 4】字面量 A 和 B 都该原样出现。[/MSG]
@@ -240,7 +254,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 ## 8. 图片（可选）
 
-DSH → QQ：
+DSH → QQ（同样要在 QQ 私聊触发的那一轮里回复，见 3.0）：
 
 ```text
 [MSG]【验收 5】[图片:C:\pics\test.png][/MSG]

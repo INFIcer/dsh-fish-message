@@ -361,7 +361,7 @@ const turnEnd = (turn, kind = 'completed') => ({ type: 'turn/end', data: { turn,
 test('出站：一轮两个模型步，中途步的 [MSG] 也发出去且顺序在前', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.setReplyTarget(session, 'qq', QQ)
   bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '先去查 [MSG]第一步的结论[/MSG] 然后继续' }]))
   bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '收尾完成，这一步没有要发的' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
@@ -373,7 +373,7 @@ test('出站：一轮两个模型步，中途步的 [MSG] 也发出去且顺序�
 test('出站：一轮多个模型步各有一段 [MSG] 时按顺序全发', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.setReplyTarget(session, 'qq', QQ)
   bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[MSG]第一段[/MSG]' }]))
   bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[MSG]第二段[/MSG]' }]))
   bridge.onSessionEvent({ id: session }, assistantStep(1, 3, [{ type: 'text', text: '[MSG]第三段[/MSG]' }]))
@@ -389,7 +389,7 @@ test('出站：一轮多个模型步各有一段 [MSG] 时按顺序全发', asyn
 test('出站：一步里写三个 [MSG] 块 → 三条独立消息，顺序与块序一致', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.setReplyTarget(session, 'qq', QQ)
   bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[MSG]第一块[/MSG][MSG]第二块[/MSG][MSG]第三块[/MSG]' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 3), true)
@@ -403,7 +403,7 @@ test('出站：一步里写三个 [MSG] 块 → 三条独立消息，顺序与�
 test('出站：块外文字不发、空块忽略，只发非空块', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.setReplyTarget(session, 'qq', QQ)
   bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '草稿 [MSG]第一块[/MSG] [MSG]   [/MSG] 中间 [MSG]第二块[/MSG] 尾巴' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
   assert.equal(await wait(() => transport.sent.length === 2), true)
@@ -430,7 +430,7 @@ test('出站：块内文字与 [图片] 按出现顺序发，下一块另起消�
 test('出站：同一条 assistant/message 重复投递只发一遍', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.setReplyTarget(session, 'qq', QQ)
   const event = assistantStep(1, 1, [{ type: 'text', text: '[MSG]只发这一遍[/MSG]' }])
   bridge.onSessionEvent({ id: session }, event)
   bridge.onSessionEvent({ id: session }, event)
@@ -444,7 +444,7 @@ test('出站：同一条 assistant/message 重复投递只发一遍', async () =
 test('出站：某步只写了 [MSG] 没写 [/MSG]，不会把下一步的内部文字粘进来', async () => {
   const { bridge, transport } = makeBridge()
   await bridge.start({ syncNow: false })
-  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.setReplyTarget(session, 'qq', QQ)
   bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [{ type: 'text', text: '[MSG]只发这句' }]))
   bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '这段是内部草稿，不外发' }]))
   bridge.onSessionEvent({ id: session }, turnEnd(1))
@@ -474,7 +474,7 @@ test('出站：同一张图跨模型步只发一次', async () => {
   const { bridge, transport, delivery } = makeBridge({ dir })
   delivery.attachmentPath = async () => image
   await bridge.start({ syncNow: false })
-  bridge.noteInboundSource(session, 'qq', QQ)
+  bridge.setReplyTarget(session, 'qq', QQ)
   const imageBlock = { type: 'image', attachment: { attachmentId: 'sha-image-a', mediaType: 'image/png', bytes: 9, width: 1, height: 1 } }
   bridge.onSessionEvent({ id: session }, assistantStep(1, 1, [imageBlock]))
   bridge.onSessionEvent({ id: session }, assistantStep(1, 2, [{ type: 'text', text: '[MSG]看图[/MSG]' }, imageBlock]))
@@ -1363,12 +1363,16 @@ test('防失联工具守卫：挡住会等人的工具（提问/干等），不�
   assert.doesNotMatch(guardRules, /QQ/, '提示词里不再出现 QQ 这个说法')
   assert.match(guardRules, /用户/)
   assert.doesNotMatch(guardRules, /主人/, '用通用称呼，不带个人设定')
-  assert.ok(guardRules.split('\n').length <= 4, '短提示：最多 4 句')
+  // 粘性渠道规则写在提示词里：模型看不见上一轮是谁发起的，只按「最近一次渠道」写块。
+  assert.match(guardRules, /最近一次给你发消息/)
+  assert.match(guardRules, /渠道/)
+  assert.ok(guardRules.split('\n').length <= 5, '短提示：最多 5 句')
   // 下面这些由机制保证，提示词里不再重复（同一条规矩只留一处出处）：
   // 拒用工具 → 工具守卫；审批 → 策略 never；[MSG] 出站 → 桥只投递块内内容。
   assert.doesNotMatch(guardRules, /ask_user_question|wait_agent/)
   assert.doesNotMatch(guardRules, /send_message/)
-  assert.doesNotMatch(guardRules, /重启|dsh_restart|杀进程|进程/, '重启/杀进程是独立插件的职责，鱼讯的提示词不越界')
+  // 「重启通知」只是要说明的一种输入（它不改变渠道）；提示词仍不许教模型自己去重启/杀进程。
+  assert.doesNotMatch(guardRules.replaceAll('重启通知', ''), /重启|dsh_restart|杀进程|进程/, '重启/杀进程是独立插件的职责，鱼讯的提示词不越界')
 })
 
 test('防失联：按回合计数，一个回合里 5 个 assistant/message 只算 1 轮', () => {

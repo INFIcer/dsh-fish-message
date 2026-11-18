@@ -69,7 +69,7 @@ dsh-LocalAIService（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/format.js` | `[MSG]` 块、转义、显式指令 | 不发送 |
 | `lib/queue.js` | 每个聊天的入站缓冲：乱序排序、编辑窗口、按 id 撤回删除 | 不做持久化，不合并正文 |
 | `lib/pacing.js` | 出站节奏：字数口径、最小间隔、可注入的 sleep/now | 不发消息、不改顺序、不读网络 |
-| `lib/storage.js` | 水位 / seen / 统计 / 最近事件 | 不做网络 |
+| `lib/storage.js` | 水位 / seen / 统计 / 最近事件 / 送信渠道 | 不做网络 |
 | `lib/voice.js` | 入站语音 get_record / 落盘 / 读时长；图片落盘 | 不做 ASR / TTS / 转码 |
 | `lib/ai.js` | 可选本地 AI 门面：能力探测、参数校验、错误转人话 | 不实现 AI，不直连服务端口 |
 | `lib/split-voice-text.js` | 长语音按句切段（纯函数） | 不改写原文、不调服务、不读配置 |
@@ -383,19 +383,29 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
 已累积的内容一起丢弃（半段话可能只写了一半，也可能是被叫停的方向）。
 
 一间会话可以挂多条绑定，但一轮回复只发一条：`deliverAssistantTurn` 用
-`pickSessionBinding` 选唯一目标，而目标必须由**本轮入站来源**决定。
+`pickSessionBinding` 选唯一目标，而目标由**这间会话的送信渠道**决定。
 
-来源的认领顺序（`Bridge.noteInboundSource` / `claimTurnSource`）：
+送信渠道是粘性的，落在状态文件的 `replyTargets` 里（会话键 → `{channel, peer, at}`，
+最多 200 条、按 `at` 淘汰最旧），所以跨回合、跨进程重启都保持。只有两种事件改变它
+（`Bridge.setReplyTarget` / `clearReplyTarget` / `replyTargetFor`）：
 
-1. 入站消息投递成功时，把 `(channel, peer)` 放进该会话的待认领队列；
-2. 下一个回合第一次出现 `assistant/message` 时认领一条，按「会话 key + turn」记下；
-   同一轮的所有模型步共用这一条（`turnSeen` 保证只认领一次）；
-3. `turn/end` 出站时只认这条来源对应的绑定；
-4. **没有来源 = 这一轮的输入不是渠道消息**（网页端直接输入、定时提醒、子代理唤醒），
-   整轮跳过、不进 Outbox，只记一行日志「本轮输入不来自渠道，跳过发送」。
+1. **渠道消息投递成功**（正常入站投递与暂停转发后的补发都算）→ 设为这条 `(channel, peer)`；
+2. **用户在 Web GUI 里直接发言**（`user/message` 且 `source.kind === 'user'`）→ 清空，
+   之后这一轮及后续都不往任何渠道发，直到渠道里再来消息。
 
-来源只存在内存里、按回合隔离：这样上一轮的渠道绝不会被本轮的网页端输入复用；代价是
-进程重启时没发完的那一轮会丢（重启后那一轮本来也不存在）。**绝不广播、也不退回默认渠道**。
+其它一切输入都不改变渠道，回复继续走上一次渠道：定时提醒 / 重启通知（`schedule`）、
+子代理消息（`agent-message`、`subagent-settled`）、上下文注入（`runtime-context`、
+`compact-checkpoint`、`cordis-host-runner`、`session-reference`、`plan-mode`、`goal`、
+`webhook`、`skill-invocation`、`ptc-mode`、`user-question-reply`、`retry`、`action-cards`、
+`model` / `tool` / `system-prompt` 等）。「QQ 来消息 → 回 QQ；随后一条重启通知 →
+仍回 QQ；再来微信消息 → 回微信」就是预期行为。
+
+回合开始（创建 `currentTurn`）时把当时的渠道快照进这一轮，`turn/end` 用快照出站：
+生成期间另一条渠道进来，也不会把这一轮的回复改发到新渠道。
+
+**没有渠道 = 从没收到过渠道消息，或已被直接发言清空**：整轮跳过、不进 Outbox，只记一行
+日志「本轮没有送信渠道，跳过发送」。渠道还在、但对应绑定已被删或改得对不上，同样跳过。
+**绝不广播、也不退回默认渠道**。
 
 ### 4.2 解析
 
@@ -842,7 +852,7 @@ props 带当前 `sessionId`，按会话显示和勾选渠道；设置页的绑�
 一条绑定 = 一个渠道，即 `(channel, peer)`；`peer` 唯一 → **一个对端只能绑一间会话**。
 
 - 反向不限制：**同一间会话可以挂多条绑定**（多个渠道、多个对端），它们都参与收消息；
-  出站每轮只发一条，发给「本轮入站来源」对应的那条，见 4.1。
+  出站每轮只发一条，发给这间会话当前「送信渠道」对应的那条，见 4.1。
 - `normalizeBindings` 按 `peerKey`（`channel:peer`）去重，重复的对端保留第一条；
   `session` 允许为空（渠道保留、暂不挂会话）。
 - `Bridge.rebuildIndexes` 用 `bySession: Map<sessionKey, binding[]>` 记「会话 → 多条绑定」，
