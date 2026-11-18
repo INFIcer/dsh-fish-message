@@ -41,6 +41,11 @@ export class MockIlinkServer {
     this.qrImg = 'https://weixin.qq.com/x/test-qr'
     // 最后一项会一直重复：['wait','scaned','confirmed'] 之后永远 confirmed。
     this.qrStatuses = ['wait', 'scaned', 'confirmed']
+    // 扫码状态接口服务端会 hold：只在 wait 上挂住，非 wait 立刻回。
+    // 调大到客户端超时之上，就能测「本地超时不能当成登录失败」。
+    this.qrHoldMs = 0
+    // 先回几次业务错误（ret 非 0），用来测状态机恢复。
+    this.qrErrors = []
     this.botToken = 'ilinkbot_test_token'
     this.botId = 'e06c1ceea05e@im.bot'
     this.userId = 'o9cq800kum_4g8Py8Qw5G0a@im.wechat'
@@ -83,7 +88,10 @@ export class MockIlinkServer {
         return respond(res, { qrcode: this.qrcode, qrcode_img_content: this.qrImg })
       }
       if (route === '/ilink/bot/get_qrcode_status') {
+        const error = this.qrErrors.shift()
+        if (error) return respond(res, { ret: error, errmsg: 'qrcode status boom' })
         const status = this.qrStatuses.length > 1 ? this.qrStatuses.shift() : (this.qrStatuses[0] || 'wait')
+        if (status === 'wait' && this.qrHoldMs > 0) await sleep(this.qrHoldMs)
         if (status === 'confirmed') {
           return respond(res, {
             status,

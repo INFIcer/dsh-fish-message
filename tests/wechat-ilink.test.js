@@ -82,6 +82,45 @@ test('扫码登录：state 走 wait → scaned → confirmed，二维码内容�
   }
 })
 
+test('扫码状态接口被服务端 hold：本地超时不能算登录失败', async () => {
+  const server = await new MockIlinkServer().start()
+  server.qrStatuses = ['wait', 'wait', 'confirmed']
+  // 服务端 hold 比客户端请求超时长：真实服务端就是「一直挂到状态变化」。
+  server.qrHoldMs = 200
+  const { transport } = makeTransport({ server, config: { requestTimeoutMs: 60 } })
+  const states = []
+  await transport.start({ onStatus: (status) => states.push(status.state) })
+  try {
+    assert.ok(await wait(() => transport.getStatus().state === 'confirmed', 5000), `state=${transport.getStatus().state}`)
+    // 超时只是「还没变」：不能进 error，否则设置页在二维码还有效时显示登录失败。
+    assert.ok(!states.includes('error'), `超时不该进 error：${states.join('→')}`)
+    assert.equal(transport.getStatus().lastError, '')
+    assert.equal(transport.getQrcode().error, '')
+    assert.ok(server.requestsTo('/ilink/bot/get_qrcode_status').length >= 3, '超时之后要立刻续轮')
+  } finally {
+    await transport.stop()
+    await server.stop()
+  }
+})
+
+test('扫码状态接口偶发业务错误：链路恢复后回到等待扫码，不卡在登录失败', async () => {
+  const server = await new MockIlinkServer().start()
+  server.qrStatuses = ['wait', 'confirmed']
+  server.qrErrors = [-3]
+  const { transport } = makeTransport({ server })
+  const states = []
+  await transport.start({ onStatus: (status) => states.push(status.state) })
+  try {
+    assert.ok(await wait(() => transport.getStatus().state === 'confirmed', 5000), `state=${transport.getStatus().state}`)
+    assert.ok(states.includes('error'), `应当先失败过一次：${states.join('→')}`)
+    assert.ok(states.indexOf('error') < states.lastIndexOf('waiting_scan'), `恢复后要回到 waiting_scan：${states.join('→')}`)
+    assert.equal(transport.getStatus().lastError, '')
+  } finally {
+    await transport.stop()
+    await server.stop()
+  }
+})
+
 test('业务请求头：bot_token、AuthorizationType、base_info 与每请求重算的 X-WECHAT-UIN', async () => {
   const server = await new MockIlinkServer().start()
   server.qrStatuses = ['confirmed']
