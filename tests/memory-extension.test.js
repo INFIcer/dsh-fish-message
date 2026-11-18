@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { Bridge } from '../lib/bridge.js'
 import { StateStore } from '../lib/storage.js'
 import { normalizeConfig } from '../lib/config.js'
-import { MemoryExtension, formatImageNote, formatVoiceNote } from '../lib/memory-extension.js'
+import { MemoryExtension, formatImageNote, formatVoiceNote, strangerVoiceNote } from '../lib/memory-extension.js'
 import { smallPng } from './image-fixtures.js'
 
 const QQ = '10001'
@@ -146,21 +146,37 @@ test('语音认出：追加声音来自谁与相似度，音频路径交给声�
   assert.equal(memory.calls.identify[0].wavPath, env.wavPath)
 })
 
-test('语音认不出：只记日志，正文不加噪音', async () => {
-  const memory = fakeMemory({ identifyResult: { ok: true, best: null, matches: [] } })
+test('语音认不出：正文标为陌生人，不当作已认出的熟人', async () => {
+  const memory = fakeMemory({
+    identifyResult: {
+      ok: true,
+      matches: [{ name: '主人', score: 0.6296 }, { name: '同事', score: 0.41 }],
+      threshold: 0.65,
+    },
+  })
   const env = makeEnv({ memory })
   const content = await env.bridge.buildInbound(binding, voiceMessage('m-voice-miss'))
   assert.match(content.text, /（语音：.+\.wav，2 秒）/)
-  assert.doesNotMatch(content.text, /记忆：/)
+  assert.match(content.text, /（记忆：声音没认出来，标为陌生人）/)
+  assert.doesNotMatch(content.text, /声音来自/, '没达到阈值就不该说成某个人')
   assert.ok(env.logger.counts.debug >= 1)
 })
 
-test('声纹服务不可用：只跳过声纹比对，语音消息照常', async () => {
-  const memory = fakeMemory({ identifyResult: { ok: false, code: 'memory_voice_service_unavailable' } })
+test('语音认不出且没有候选：同样标为陌生人', async () => {
+  const memory = fakeMemory({ identifyResult: { ok: true, best: null, matches: [], threshold: 0.65 } })
+  const env = makeEnv({ memory })
+  const content = await env.bridge.buildInbound(binding, voiceMessage('m-voice-empty'))
+  assert.match(content.text, /（记忆：声音没认出来，标为陌生人）/)
+})
+
+test('声纹服务不可用：只跳过声纹比对，语音消息照常，也不标陌生人', async () => {
+  // 「没法比」和「比了但不是熟人」要分开：后者才标陌生人。
+  const memory = fakeMemory({ identifyResult: { ok: false, code: 'memory_voice_service_unavailable', hint: '本地 AI 没在跑' } })
   const env = makeEnv({ memory })
   const content = await env.bridge.buildInbound(binding, voiceMessage('m-voice-unavailable'))
   assert.match(content.text, /（语音：.+\.wav，2 秒）/)
   assert.doesNotMatch(content.text, /记忆：/)
+  assert.doesNotMatch(content.text, /陌生人/)
 })
 
 test('总开关关掉：完全不取记忆服务，也不比对', async () => {
@@ -225,6 +241,7 @@ test('格式化：无标签、无分数时用降级写法', () => {
   assert.equal(formatImageNote({ desc: '', tags: [] }), '（记忆：这张图在图库里，还没写描述）')
   assert.equal(formatVoiceNote({ name: '主人' }), '（记忆：声音来自主人）')
   assert.equal(formatVoiceNote({}), '')
+  assert.equal(strangerVoiceNote, '（记忆：声音没认出来，标为陌生人）')
 })
 
 test('记忆服务不响应：超时后放弃比对，正文回到现状', async () => {

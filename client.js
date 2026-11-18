@@ -2743,7 +2743,7 @@ window.__ModuleLoader__.load({
             : '需先开启记忆扩展。'),
         row('比对声纹', flag(config.memoryCompareVoices !== false, (v) => change('memoryCompareVoices', v), !memoryExtensionOn),
           memoryExtensionOn
-            ? '与声纹库按声音认人；需要本地 AI 服务在运行。'
+            ? '与声纹库按声音认人；认不出标为陌生人。需要本地 AI 服务在运行。'
             : '需先开启记忆扩展。'),
         h('div', { style: { ...S.dim, marginTop: 8 } },
           `记忆服务：${memoryConnected ? '已连接' : '未检测到（需要安装并启用记忆插件）'}`),
