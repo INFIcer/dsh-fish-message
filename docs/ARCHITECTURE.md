@@ -3,16 +3,15 @@
 ## 1. 总览
 
 ```text
-QQ 客户端
-   │
-   │  QQ 协议
-   ▼
-NapCat（OneBot 11）
-   │  HTTP send_private_msg / get_friend_msg_history / get_record
-   │  WebSocket 事件推送
-   ▼
-Transport 适配器（v1：napcat-onebot）
-   │  start / stop / sendMessage / onEvent / fetchHistory
+QQ 客户端 ──QQ 协议──► NapCat（OneBot 11）
+                          │  HTTP send_private_msg / get_friend_msg_history / get_record
+                          │  WebSocket 事件推送
+微信（iLink / ClawBot）──► 微信适配器（wechat-ilink）
+                          │  扫码登录 + getupdates 长轮询 + sendmessage
+                          ▼
+RouterTransport（lib/transport/router.js）
+   │  按 channel 路由：qq → napcat-onebot，wechat → wechat-ilink（见 2.1）
+   │  对外仍是一个 transport：start / stop / sendMessage / fetchHistory / download / getRecord
    ▼
 Bridge（lib/bridge.js）
    ├─ 入站：过滤私聊 → 编辑窗口（合并批次 / 撤回）→ 去重 → 水位 → 补投
@@ -39,7 +38,9 @@ DSH 会话（模型照常开一轮）
 收图图库是 `lib/image-library.js`（纯磁盘逻辑）+ `lib/vision-cache.js`（识图策略）；
 图库弹窗的数据路由在 `lib/gallery-routes.js`（收图图库列表/出图/改描述/打开原图）。
 
-**职责边界：鱼讯只做 QQ 传输。** 语音和图片的基础链路（落盘、发送、补发）始终可用；
+**职责边界：鱼讯只做消息通道的传输。** 目前两条：QQ（NapCat / OneBot 11）与微信
+（iLink / ClawBot，单聊）。微信受协议限制：必须先收到过对方的消息拿到 `context_token`
+才能回复、不能主动开始会话、没有历史消息接口。语音和图片的基础链路（落盘、发送、补发）始终可用；
 语音识别 / 合成 / 本地识图是**可选能力**，由本地 AI 插件提供的 `fish.service` 支持。
 鱼讯不直连本地 AI 服务，也不把它当硬依赖：没装插件时，收发文字/图片/文件、表情、
 离线补投等原有功能照常，语音相关设置灰掉，发语音时只回一句提示。
@@ -84,6 +85,40 @@ dsh-LocalAIService（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/tools.js` | `fish_sticker_list` / `fish_sticker_send` / `fish_sticker_save` 工具定义与注册 | 不直接读写索引 |
 | `lib/image-tools.js` | `fish_image_get` / `fish_image_note` 工具定义与注册 | 不直接读写索引（走 `fish.message`） |
 | `lib/service.js` | `fish.message` 门面（发送/历史/语音/表情/图库） | 不重新实现发送 |
+| `lib/transport/router.js` | 通道路由：按 channel 分发到各适配器、聚合连接状态、运行时增删通道 | 不实现任何协议，不改消息内容 |
+| `lib/transport/wechat-ilink.js` | 微信 iLink：扫码登录、长轮询收消息、加密上传与发送 | 不做业务去重（交给 Bridge），不做 SILK 编解码 |
+| `lib/peer.js` | 通道维度的对端标识：规整、校验、`channel:peer` 键、水位键 | 不认识具体协议 |
+
+### 2.1 通道维度（qq / wechat）
+
+内部键统一是 `${channel}:${peer}`（`lib/peer.js`）。同一段对端字符串在两条通道下是两个人：
+QQ 的 `10086` 与微信的 `10086` 必须分别排队、去重、记水位、绑定会话。键里不带通道，
+共用一份 seen / 水位 / 队列就会串聊。对端键同时决定绑定索引（`Bridge.byPeer`）与水位键
+（qq 沿用裸号以兼容老状态文件，微信带 `wechat:` 前缀）。
+
+路由由 `RouterTransport` 做，规则是**按调用方给的 channel 显式路由**：
+
+- Bridge 的每个发送/补拉调用都带 `{ channel }`（绑定时就知道是哪条通道）；
+- 没给 channel 才按对端形态兜底：纯数字 → qq，其它形态找非 qq 的通道；
+- 路由不到就抛明确错误（说明哪条通道没启用），不静默成功——静默成功等于消息丢了还被算作送达。
+
+为什么不按对端形态当主路由：wxid / openid 与 QQ 号都没有可判别的类型标记，猜错就是把消息
+发给另一个人。形态兜底只留给「调用方确实不知道通道」的旧接口。
+
+三条来自微信协议的约束（不是实现偷懒）：
+
+- **没有历史接口**：iLink 只给一个不透明游标 `get_updates_buf`，掉线期间的消息由服务端在
+  游标之后重投（at-least-once），所以 `fetchHistory` 恒返回空数组。Bridge 的 HTTP 补拉因此
+  只对 QQ 有意义（`transportNeedsPoll()` 只看 QQ 那一路是否在线）。
+- **能不能发 ≠ 连接在不在**：`sendmessage` 必须带最近一次入站消息里的 `context_token`。
+  没有锚点（从没收到过对方的消息）就是发不出去，适配器明确抛错，消息进 Outbox 等能发时再补。
+- **语音方向不对称**：微信语音是 SILK，出站 v1 不支持（明确报错）；入站不解码，用服务端
+  已给的 `voice_item.text` 转写。所以 `getRecord` 只转给 QQ，`record` 段里的 `data.file`
+  只可能来自 QQ。
+
+聚合状态口径（`RouterTransport.getStatus()`）：`connected` = 任一通道在线；`mode` =
+只有一路活着时透出它的 mode、多路为 `multi`、全停为 `stopped`。Bridge 靠 `mode === 'stopped'`
+判断「传输层停了，先入队」，靠 `connected` 与各通道分项判断要不要停 HTTP 补拉，这两个口径不能改。
 
 ---
 
@@ -95,7 +130,9 @@ dsh-LocalAIService（可选） ── fish.service.tts / asr / visionDescribe
   同一条连接也推 `post_type=notice`（好友撤回 `friend_recall`，见 3.3.1）；
 - **HTTP 轮询**：WS 不可用时，Bridge 每 `pollIntervalMs` 调 `fetchHistory`；
 - **定时补投**：即使 WS 连着，每 `historyIntervalMs` 也拉一次历史；
-- **WS 重连后**：立即补一次历史。
+- **WS 重连后**：立即补一次历史；
+- **微信通道**：没有 WS、没有历史接口，消息由适配器自己的长轮询拉回来，直接走 `onEvent`
+  交给 Bridge，不进 HTTP 补拉（见 2.1）。
 
 ### 3.2 过滤
 
@@ -567,9 +604,13 @@ class Transport {
 
 1. 新写一个 `lib/transport/xxx.js`，实现上述五个方法；
 2. 把 IM 的「收到消息」转成 OneBot 风格的 `message` 事件（至少含
-   `message_id/time/user_id/message[]`）；
-3. 在 `host.js` 里按配置选适配器；
-4. `Bridge`、去重、水位、补投、DSH 投递完全不用改。
+   `message_id/time/user_id/message[]`），并填 `channel` 标记；
+3. 在 `lib/peer.js` 的 `PEER_CHANNELS` 里登记通道，补上该通道的对端规整与校验——
+   **只写 transport 不够**：同一段对端字符串在两条通道下是两个人，键、水位、去重、
+   绑定索引都靠 `channel:peer` 分桶，身份归一化必须按通道走（见 2.1）；
+4. 在 `host.js` 里把适配器接到 `RouterTransport` 的 resolve（按配置决定建不建），
+   需要运行时增删通道（扫码登录这类）走 `router.attach / detach`；
+5. `Bridge`、去重、水位、补投、DSH 投递完全不用改。
 
 v1 不实现群聊。将来要加群：
 
