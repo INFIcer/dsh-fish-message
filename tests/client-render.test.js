@@ -7,6 +7,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -653,10 +654,10 @@ test('渠道按钮：胶囊显示当前会话绑定的渠道，只列启用的�
     assert.doesNotMatch(shown, /10001/, '胶囊上不显示完整 QQ 号')
     const currentName = findAll(trigger, (node) => node.props && node.props.className === 'fish-bind-name')
       .map((node) => collectText(node.children).join(''))
-    const currentQq = findAll(trigger, (node) => node.props && node.props.className === 'fish-bind-qq')
+    const currentChannel = findAll(trigger, (node) => node.props && node.props.className === 'fish-bind-channel')
       .map((node) => collectText(node.children).join(''))
     assert.deepEqual(currentName, ['主人'], '称呼用亮色（fish-bind-name）')
-    assert.deepEqual(currentQq, ['QQ'], 'QQ 用次要色（fish-bind-qq）')
+    assert.deepEqual(currentChannel, ['QQ'], '通道用次要色（fish-bind-channel）')
     assert.equal(trigger.props['aria-label'], '收发渠道：主人 QQ')
     assert.equal(trigger.props['aria-haspopup'], 'listbox')
     assert.equal(trigger.props['aria-expanded'], 'false')
@@ -1287,5 +1288,455 @@ test('客户端设置页：默认文案常量声明在第一次使用之前（�
       declare < firstSaveReference,
       name + ' 在第 ' + (declare + 1) + ' 行声明，但第 ' + (firstSaveReference + 1) + ' 行就用了；这会在打开设置页时抛 TDZ、整页白屏',
     )
+  }
+})
+
+// ---------------- 微信通道（扫码登录 + 绑定区通道选择） ----------------
+
+const WX = 'o9cq800kum_4g8Py8Qw5G0a@im.wechat'
+// 真机 iLink 返回的原样内容：qrcode_img_content 是待编码的 https 链接，不是图片地址。
+const WX_QR_LINK = 'https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=e97a70cd49f5ece52933a1b03b1b9a3d&bot_type=3'
+// 同一段文本的模块矩阵指纹：oracle 由公开实现（dsh-im-wechat 的 qr.js）算出，只用于钉住编码器。
+const WX_QR_DIGEST = 'fe55f4f73cf97704e0535fccdd537d5bfffc1302e716ede9b990b2f45c8fce2c'
+
+/** 绑定行里的通道下拉：选项值只会是 qq / wechat。 */
+function channelSelects(tree) {
+  return findAll(tree, (node) => node.type === 'select'
+    && (node.children || []).some((child) => child && child.props && (child.props.value === 'qq' || child.props.value === 'wechat')))
+}
+
+/** 通道下拉里的可见选项文字（条件渲染的 null 槽位跳过）。 */
+function channelOptionTexts(select) {
+  return (select.children || [])
+    .filter((child) => child && typeof child === 'object')
+    .map((child) => visibleText(child.children).join(''))
+}
+
+/** 某个 placeholder 的输入框（绑定行里的对端输入）。 */
+function inputsWithPlaceholder(tree, placeholder) {
+  return findAll(tree, (node) => node.type === 'input' && node.props && node.props.placeholder === placeholder)
+}
+
+test('设置页：微信未启用时绑定区不给微信选项，启用后才出现', async () => {
+  const env = await setupPlugin()
+
+  const off = fullState()
+  off.config.wechatEnabled = false
+  const tree = env.renderSection([off])
+  assert.equal(findButton(tree, '添加微信渠道').length, 0, '未启用时不出现「添加微信渠道」')
+  assert.deepEqual(channelSelects(tree).map(channelOptionTexts), [['QQ']], '通道下拉只有 QQ')
+  // 启用入口本身要一直在，否则没法打开这个通道。
+  assert.match(textOf(tree), /微信通道/)
+  assert.match(textOf(tree), /启用微信通道/)
+
+  const on = fullState()
+  on.config.wechatEnabled = true
+  on.wechat = { enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} }
+  const enabledTree = env.renderSection([on])
+  assert.equal(findButton(enabledTree, '添加微信渠道').length, 1)
+  assert.deepEqual(channelSelects(enabledTree).map(channelOptionTexts), [['QQ', '微信']])
+
+  // 已经存下的微信渠道即使开关关着，也要显示成微信，不能被改成 QQ。
+  const legacy = fullState()
+  legacy.config.wechatEnabled = false
+  legacy.config.bindings = [{ channel: 'wechat', peer: WX, session: 'session-test-0001', name: '小号', enabled: true }]
+  const legacyTree = env.renderSection([legacy])
+  const legacySelect = channelSelects(legacyTree)[0]
+  assert.equal(legacySelect.props.value, 'wechat')
+  assert.deepEqual(channelOptionTexts(legacySelect), ['QQ', '微信'])
+})
+
+test('设置页：微信没登录时点添加微信渠道只提示先扫码，不新增条目', async () => {
+  const env = await setupPlugin()
+  const state = fullState()
+  state.config.wechatEnabled = true
+  let tree = env.renderSection([state])
+  const add = findButton(tree, '添加微信渠道')
+  assert.equal(add.length, 1)
+  add[0].props.onClick({})
+  tree = env.flush()
+  assert.match(textOf(tree), /先在上面扫码登录，再添加渠道。/)
+  assert.equal(channelSelects(tree).length, 1, '没登录时不新增绑定行')
+})
+
+test('设置页：微信已登录时可添加微信渠道，微信对端保留字母与 @，QQ 仍只收数字', async () => {
+  const env = await setupPlugin()
+  const state = fullState()
+  state.config.wechatEnabled = true
+  state.wechat = { enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} }
+  let tree = env.renderSection([state])
+
+  findButton(tree, '添加微信渠道')[0].props.onClick({})
+  tree = env.flush()
+  assert.equal(channelSelects(tree).length, 2, '新增一条绑定')
+  assert.equal(channelSelects(tree)[1].props.value, 'wechat', '新条目的通道是微信')
+
+  const wechatPeer = inputsWithPlaceholder(tree, 'wxid 或 @im.wechat 结尾的 id')
+  assert.equal(wechatPeer.length, 1)
+  wechatPeer[0].props.onChange({ target: { value: WX } })
+  tree = env.flush()
+  assert.equal(inputsWithPlaceholder(tree, 'wxid 或 @im.wechat 结尾的 id')[0].props.value, WX, '微信对端原样保留')
+
+  const qqPeer = inputsWithPlaceholder(tree, '1696117435')[0]
+  qqPeer.props.onChange({ target: { value: '12ab34' } })
+  tree = env.flush()
+  assert.equal(inputsWithPlaceholder(tree, '1696117435')[0].props.value, '1234', 'QQ 对端仍只留数字')
+})
+
+test('设置页：保存设置时 wechatEnabled 随 config 一起提交', async () => {
+  const env = await setupPlugin()
+  const state = fullState()
+  state.config.wechatEnabled = true
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options = {}) => {
+    const address = String(url)
+    calls.push({ url: address, options: options })
+    return { json: async () => (address.endsWith('/save') ? { ok: true } : state) }
+  }
+  try {
+    const tree = env.renderSection([state])
+    findButton(tree, '保存设置')[0].props.onClick({})
+    await nextTick()
+    env.flush()
+    const save = calls.find((call) => call.url.endsWith('/save'))
+    assert.ok(save, '应该调用 /save')
+    assert.equal(save.options.method, 'POST')
+    assert.equal(JSON.parse(save.options.body).config.wechatEnabled, true)
+  } finally {
+    env.mount(() => null)
+    globalThis.fetch = original
+  }
+})
+
+test('微信卡片：登录状态文案与按钮', async () => {
+  const env = await setupPlugin()
+  const { WechatChannel, wechatStateText } = env.module.__test
+
+  // 文案映射本身先对一遍：未知状态按未登录处理。
+  assert.equal(wechatStateText('stopped'), '未登录')
+  assert.equal(wechatStateText('connecting'), '正在获取二维码…')
+  assert.equal(wechatStateText('waiting_scan'), '等待扫码')
+  assert.equal(wechatStateText('scaned'), '已扫码，请在手机上确认。')
+  assert.equal(wechatStateText('expired'), '二维码过期了。')
+  assert.equal(wechatStateText('error'), '登录失败')
+  assert.equal(wechatStateText('confirmed'), '已登录')
+  assert.equal(wechatStateText('nonsense'), '未登录')
+
+  const mount = (state, extra = {}) => env.renderComponent(WechatChannel, {
+    config: { wechatEnabled: true },
+    change: () => {},
+    initial: { enabled: true, status: { state, ...(extra.status || {}) }, qrcode: extra.qrcode || {} },
+  })
+
+  let tree = mount('stopped')
+  assert.match(textOf(tree), /未登录/)
+  assert.equal(findButton(tree, '扫码登录').length, 1)
+
+  tree = mount('connecting')
+  assert.match(textOf(tree), /正在获取二维码…/)
+  assert.equal(findButton(tree, '扫码登录').length, 0, '取二维码期间不再给登录按钮')
+
+  tree = mount('scaned')
+  assert.match(textOf(tree), /已扫码，请在手机上确认/)
+
+  tree = mount('expired')
+  assert.match(textOf(tree), /二维码过期了。/)
+  assert.equal(findButton(tree, '重新获取二维码').length, 1)
+
+  tree = mount('error', { status: { lastError: '登录凭证失效' } })
+  assert.match(textOf(tree), /登录失败：登录凭证失效/)
+  assert.equal(findButton(tree, '重新登录').length, 1)
+
+  tree = mount('confirmed', { status: { connected: true, botId: 'ilink-bot-123456' } })
+  assert.match(textOf(tree), /已登录/)
+  assert.match(textOf(tree), /账号尾号 123456/)
+  assert.equal(findButton(tree, '退出登录').length, 1)
+  const sendTest = findButton(tree, '发送微信测试消息')
+  assert.equal(sendTest.length, 1)
+  // 还没有微信渠道时不能瞎发：按钮置灰并说清下一步。
+  assert.equal(sendTest[0].props.disabled, true)
+  assert.match(textOf(tree), /先在下面的「私聊绑定」里添加一条微信渠道，才能发测试消息。/)
+})
+
+test('微信卡片：开关写 wechatEnabled，未启用时不显示登录区', async () => {
+  const env = await setupPlugin()
+  const { WechatChannel } = env.module.__test
+  const changes = []
+  const tree = env.renderComponent(WechatChannel, {
+    config: { wechatEnabled: false },
+    change: (key, value) => changes.push([key, value]),
+    initial: { enabled: false, status: { state: 'stopped' }, qrcode: {} },
+  })
+  assert.match(textOf(tree), /打开开关后可以扫码登录。/)
+  assert.equal(findButton(tree, '扫码登录').length, 0, '未启用时没有登录按钮')
+  const box = findAll(tree, (node) => node.type === 'input' && node.props && node.props.type === 'checkbox')[0]
+  assert.ok(box, '需要有启用开关')
+  box.props.onChange({ target: { checked: true } })
+  assert.deepEqual(changes, [['wechatEnabled', true]])
+})
+
+/** 页面里的二维码 SVG（role="img" 的那个）。 */
+function qrSvgOf(tree) {
+  return findAll(tree, (node) => node.type === 'svg' && node.props && node.props.role === 'img')
+}
+
+test('微信卡片：二维码由 imgContent 编成，矩阵与公开实现逐格一致', async () => {
+  const env = await setupPlugin()
+  const { encodeQr, qrGeometry } = env.module.__test
+
+  const code = encodeQr(WX_QR_LINK)
+  assert.equal(code.version, 6, '真实登录链接落在版本 6')
+  assert.equal(code.size, 41)
+  const flat = code.modules.map((row) => row.map((cell) => (cell ? '1' : '0')).join('')).join('\n')
+  assert.equal(createHash('sha256').update(flat).digest('hex'), WX_QR_DIGEST, '矩阵要和公开实现一致，不能只是「看起来像二维码」')
+
+  // 结构自检：三个角有定位图案，第 6 行是定时图案。
+  assert.equal(code.modules[0][0], true)
+  assert.equal(code.modules[0][code.size - 1], true)
+  assert.equal(code.modules[code.size - 1][0], true)
+  assert.equal(code.modules[1][1], false)
+  assert.equal(code.modules[3][3], true)
+  assert.equal(code.modules[6][8], true)
+  assert.equal(code.modules[6][9], false)
+
+  // 几何：41 个模块 + 两侧各 4 个模块静区；左上角第一个黑块从静区外开始。
+  const geometry = qrGeometry(code)
+  assert.equal(geometry.dimension, 49)
+  assert.match(geometry.path, /^M4 4h1v1h-1z/)
+
+  // 超出版本 10 的容量要明确报错，而不是产出一张坏码。
+  assert.throws(() => encodeQr('x'.repeat(400)), /版本 10/)
+})
+
+test('微信卡片：waiting_scan 画内联 SVG 二维码，并给打开与复制两条兜底', async () => {
+  const env = await setupPlugin()
+  const { WechatChannel } = env.module.__test
+  const mount = (initial) => env.renderComponent(WechatChannel, {
+    config: { wechatEnabled: true },
+    change: () => {},
+    initial,
+  })
+
+  let tree = mount({ enabled: true, status: { state: 'waiting_scan' }, qrcode: { qrcode: 'e97a70cd', imgContent: WX_QR_LINK } })
+  const svg = qrSvgOf(tree)
+  assert.equal(svg.length, 1, '要有二维码')
+  assert.equal(svg[0].props.viewBox, '0 0 49 49')
+  assert.equal(findAll(tree, (node) => node.type === 'img').length, 0, '不把链接当图片地址塞进 img')
+  assert.equal(findAll(svg[0], (node) => node.type === 'path').length, 1, '黑块合并成一条 path')
+  assert.match(textOf(tree), /等待扫码/)
+  assert.match(textOf(tree), /用手机微信扫码确认。/)
+  const link = findAll(tree, (node) => node.type === 'a' && node.props && node.props.href === WX_QR_LINK)[0]
+  assert.ok(link, '「在浏览器打开」要有链接')
+  assert.equal(link.props.target, '_blank')
+  assert.equal(link.props.rel, 'noreferrer noopener')
+  assert.deepEqual(visibleText(link.children), ['在浏览器打开'])
+  assert.equal(findButton(tree, '复制链接').length, 1, '「复制链接」按钮要一直在')
+
+  // 已登录：即使状态里还留着上一张二维码的内容，也不再画码。
+  tree = mount({ enabled: true, status: { state: 'confirmed', connected: true, botId: 'ilink-bot-1' }, qrcode: { qrcode: '', imgContent: WX_QR_LINK } })
+  assert.equal(qrSvgOf(tree).length, 0, '已登录不出二维码')
+  assert.match(textOf(tree), /已登录/)
+  assert.equal(findButton(tree, '复制链接').length, 0, '已登录不显示链接兜底')
+
+  // 二维码还没出来：给一句可等的提示，不画空框里的假码。
+  tree = mount({ enabled: true, status: { state: 'waiting_scan' }, qrcode: { qrcode: 'token', imgContent: '' } })
+  assert.equal(findAll(tree, (node) => node.type === 'svg').length, 0)
+  assert.match(textOf(tree), /二维码还没出来，请稍候…/)
+})
+
+test('微信卡片：复制链接写到剪贴板，没有剪贴板时给可操作的提示', async () => {
+  const env = await setupPlugin()
+  const { WechatChannel } = env.module.__test
+  const mount = () => env.renderComponent(WechatChannel, {
+    config: { wechatEnabled: true },
+    change: () => {},
+    initial: { enabled: true, status: { state: 'waiting_scan' }, qrcode: { qrcode: 'token', imgContent: WX_QR_LINK } },
+  })
+
+  // 测试环境没有 navigator.clipboard（Node 默认如此）：要说明复制失败，别静默。
+  let tree = mount()
+  findButton(tree, '复制链接')[0].props.onClick({})
+  await nextTick()
+  tree = env.flush()
+  assert.match(textOf(tree), /复制失败，请手动选中链接复制。/)
+
+  // 有剪贴板时写入的就是 imgContent 原串。
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const written = []
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { clipboard: { writeText: async (text) => { written.push(text) } } },
+  })
+  try {
+    tree = mount()
+    findButton(tree, '复制链接')[0].props.onClick({})
+    await nextTick()
+    tree = env.flush()
+    assert.deepEqual(written, [WX_QR_LINK])
+    assert.match(textOf(tree), /链接已复制。/)
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor)
+    else delete globalThis.navigator
+  }
+})
+
+test('微信卡片：扫码登录、退出登录、测试消息各打对接口', async () => {
+  const env = await setupPlugin()
+  const { WechatChannel } = env.module.__test
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options: options })
+    return { json: async () => ({ ok: true, enabled: true, status: { state: 'connecting' }, qrcode: {} }) }
+  }
+  try {
+    let tree = env.renderComponent(WechatChannel, {
+      config: { wechatEnabled: true },
+      change: () => {},
+      initial: { enabled: true, status: { state: 'stopped' }, qrcode: {} },
+    })
+    findButton(tree, '扫码登录')[0].props.onClick({})
+    await nextTick()
+    tree = env.flush()
+    const login = calls.find((call) => call.url.endsWith('/wechat/login'))
+    assert.ok(login, '要调 /wechat/login')
+    assert.equal(login.options.method, 'POST')
+    assert.match(textOf(tree), /正在获取二维码…/, '按返回状态刷新')
+
+    calls.length = 0
+    tree = env.renderComponent(WechatChannel, {
+      config: { wechatEnabled: true },
+      change: () => {},
+      initial: { enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} },
+      testPeer: WX,
+    })
+    findButton(tree, '发送微信测试消息')[0].props.onClick({})
+    await nextTick()
+    tree = env.flush()
+    const testSend = calls.find((call) => call.url.endsWith('/test-send'))
+    assert.ok(testSend, '要调 /test-send')
+    assert.deepEqual(JSON.parse(testSend.options.body), { channel: 'wechat', qq: WX })
+    assert.match(textOf(tree), /已发送微信测试消息/)
+
+    calls.length = 0
+    tree = env.renderComponent(WechatChannel, {
+      config: { wechatEnabled: true },
+      change: () => {},
+      initial: { enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} },
+    })
+    findButton(tree, '退出登录')[0].props.onClick({})
+    await nextTick()
+    env.flush()
+    assert.ok(calls.some((call) => call.url.endsWith('/wechat/logout')), '要调 /wechat/logout')
+  } finally {
+    env.mount(() => null)
+    globalThis.fetch = original
+  }
+})
+
+test('微信卡片：登录中每 2 秒轮询，登录完成后停，卸载清理定时器', async () => {
+  const env = await setupPlugin()
+  const { WechatChannel } = env.module.__test
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
+  const originalFetch = globalThis.fetch
+  const timers = []
+  const cleared = []
+  const calls = []
+  globalThis.setTimeout = (fn, ms) => {
+    timers.push({ fn, ms })
+    return timers.length
+  }
+  globalThis.clearTimeout = (id) => { cleared.push(id) }
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return { json: async () => ({ ok: true, enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} }) }
+  }
+  try {
+    env.setEffects(true)
+    env.mount(WechatChannel, {
+      config: { wechatEnabled: true },
+      change: () => {},
+      initial: { enabled: true, status: { state: 'waiting_scan' }, qrcode: { qrcode: 'q', imgContent: '' } },
+    })
+    assert.equal(timers.length, 1, '等待扫码时排一次轮询')
+    assert.equal(timers[0].ms, 2000, '轮询间隔 2 秒')
+
+    // 定时器到点：拉一次登录接口，拿到已登录状态。
+    await timers[0].fn()
+    const tree = env.flush()
+    assert.ok(calls.some((url) => url.endsWith('/wechat/login')), '轮询要调登录接口')
+    assert.equal(timers.length, 1, '登录完成后不再排下一次')
+    assert.match(visibleText(tree).join(''), /已登录/)
+    assert.deepEqual(cleared, [1], '状态变化时清掉上一个定时器')
+
+    // 已登录、未启用两种情况下都不轮询。
+    timers.length = 0
+    env.mount(WechatChannel, {
+      config: { wechatEnabled: true },
+      change: () => {},
+      initial: { enabled: true, status: { state: 'confirmed', connected: true }, qrcode: {} },
+    })
+    assert.equal(timers.length, 0, '已登录不轮询')
+    env.mount(WechatChannel, {
+      config: { wechatEnabled: false },
+      change: () => {},
+      initial: { enabled: false, status: { state: 'waiting_scan' }, qrcode: {} },
+    })
+    assert.equal(timers.length, 0, '未启用不轮询')
+
+    // 卸载：登录中挂着的定时器要清掉。
+    timers.length = 0
+    cleared.length = 0
+    env.mount(WechatChannel, {
+      config: { wechatEnabled: true },
+      change: () => {},
+      initial: { enabled: true, status: { state: 'connecting' }, qrcode: {} },
+    })
+    assert.equal(timers.length, 1)
+    env.mount(() => null)
+    assert.deepEqual(cleared, [1], '卸载时清定时器')
+  } finally {
+    env.mount(() => null)
+    globalThis.setTimeout = originalSetTimeout
+    globalThis.clearTimeout = originalClearTimeout
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('渠道按钮：微信渠道显示「微信」前缀，提交 /bindings/assign 时带 channel', async () => {
+  const env = await setupPlugin()
+  const bindings = [
+    { channel: 'wechat', peer: WX, qq: WX, session: '', name: '小号', enabled: true },
+    { channel: 'qq', qq: '10001', session: 'session-test-0002', name: '主人', enabled: true },
+  ]
+  const stub = stubBindFetch({ bindings })
+  try {
+    let tree = await mountBindChannel(env, { sessionId: 'session-test-0002' })
+    assert.equal(channelTriggerText(tree), '主人 QQ')
+
+    tree = await openChannelMenu(env)
+    assert.deepEqual(channelOptions(tree).map(channelOptionLabel), ['不绑定', '小号 微信', '主人 QQ'])
+    assert.deepEqual(
+      channelOptions(tree).map((node) => node.props.title),
+      ['不绑定', '微信 ' + WX, 'QQ 10001'],
+      '完整账号放 title，微信的字母与 @ 不删',
+    )
+
+    pickChannel(tree, '小号 微信')
+    tree = env.flush()
+    await nextTick()
+    tree = env.flush()
+    const call = stub.calls.find((item) => item.url.endsWith('/bindings/assign'))
+    assert.ok(call, '切换微信渠道要提交 /bindings/assign')
+    assert.deepEqual(JSON.parse(call.options.body), {
+      sessionId: 'session-test-0002',
+      qq: WX,
+      channel: 'wechat',
+    })
+  } finally {
+    env.mount(() => null)
+    stub.restore()
   }
 })

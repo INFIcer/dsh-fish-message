@@ -47,6 +47,28 @@ window.__ModuleLoader__.load({
       return date.toLocaleString('zh-CN', { hour12: false })
     }
 
+    // ---------------- 通道：qq / wechat ----------------
+    // 绑定条目是 { channel, peer, name, session }：channel 缺省 qq（老配置没有这个字段），
+    // peer 是对方 id；老配置把它存在 qq 字段里，两者等值，前端两个都读、两个都写。
+    const isWechatChannel = (channel) => String(channel || '').trim().toLowerCase() === 'wechat'
+    const channelLabel = (channel) => (isWechatChannel(channel) ? '微信' : 'QQ')
+    const bindingChannel = (binding) => (isWechatChannel(binding && binding.channel) ? 'wechat' : 'qq')
+    // 微信 id 带字母、@ 和下划线，必须原样展示，不能像 QQ 那样剥掉非数字。
+    const bindingPeer = (binding) => String((binding && (binding.peer || binding.qq)) || '').trim()
+    // 同一串 id 在 qq 与 wechat 里可能是两个人：菜单选中与去重都按通道拼出来的键。
+    const channelKey = (channel, peer) => (isWechatChannel(channel) ? 'wechat' : 'qq') + ':' + String(peer || '')
+
+    /** 相对时间：只说到「多久以前」，用来判断最近跟谁说过话。 */
+    const sinceText = (value) => {
+      const stamp = Number(value) || 0
+      if (!stamp) return '时间未知'
+      const diff = Date.now() - stamp
+      if (diff < 60e3) return '刚刚'
+      if (diff < 3600e3) return Math.floor(diff / 60e3) + ' 分钟前'
+      if (diff < 86400e3) return Math.floor(diff / 3600e3) + ' 小时前'
+      return Math.floor(diff / 86400e3) + ' 天前'
+    }
+
     const S = {
       wrap: {
         padding: '12px 14px 28px',
@@ -133,9 +155,34 @@ window.__ModuleLoader__.load({
         fontSize: 11.5,
         border: '1px solid var(--dsw-alias-border-l2)',
       },
+      // 二维码容器：固定方形、白底，深浅色主题下都能扫；内容溢出时自己滚。
+      qrBox: {
+        width: 176,
+        height: 176,
+        boxSizing: 'border-box',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 8,
+        background: '#fff',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 8,
+        overflow: 'auto',
+      },
+      qrSvg: { width: '100%', height: '100%', display: 'block' },
+      // 退化成字符串时的等宽框：白底容器里配深色字，避免跟随主题变成白字白底。
+      qrRaw: {
+        fontFamily: 'ui-monospace, Consolas, monospace',
+        fontSize: 11,
+        lineHeight: 1.5,
+        color: '#1f1f1f',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all',
+      },
+      // 一条绑定一行：通道、对端、会话、称呼、启用、删除。
       bindGrid: {
         display: 'grid',
-        gridTemplateColumns: '120px 1fr 110px 52px 40px',
+        gridTemplateColumns: '76px 1fr 1.4fr 80px 40px 44px',
         gap: 6,
         alignItems: 'center',
         marginBottom: 6,
@@ -1130,7 +1177,7 @@ window.__ModuleLoader__.load({
     }
 
     // ---------------- 模型选择器左侧：收发渠道胶囊按钮 + 菜单 ----------------
-    // 「渠道」= 配置里的一条绑定（qq + 称呼 + 启用）：session 为空表示渠道保留、暂不绑定会话。
+    // 「渠道」= 配置里的一条绑定（通道 + 对端 + 称呼 + 启用）：session 为空表示渠道保留、暂不绑定会话。
     // 这里只调 /bindings/assign；设置页的保存语义与界面都不经过这里。
 
     /** 会话 id 的两种写法（带不带 session- 前缀）视为同一间会话。 */
@@ -1139,33 +1186,38 @@ window.__ModuleLoader__.load({
       return s.startsWith('session-') ? s.slice('session-'.length) : s
     }
 
-    /** 当前会话绑着哪个渠道：返回 qq，没有绑定就返回空串。 */
-    function boundChannelQq(bindings, sessionId) {
+    /** 当前会话绑着哪个渠道：返回 { channel, peer }，没有绑定就返回 null。 */
+    function boundChannel(bindings, sessionId) {
       const key = stripSessionPrefix(sessionId)
-      if (!key) return ''
+      if (!key) return null
       for (const b of Array.isArray(bindings) ? bindings : []) {
-        if (b && b.qq && stripSessionPrefix(b.session) === key) return String(b.qq)
+        const peer = bindingPeer(b)
+        if (!peer || stripSessionPrefix(b.session) !== key) continue
+        return { channel: bindingChannel(b), peer: peer }
       }
-      return ''
+      return null
     }
 
     /**
-     * 菜单选项：未绑定 + 已启用的渠道，按 qq 去重。
+     * 菜单选项：未绑定 + 已启用的渠道，按「通道 + 对端」去重。
      * 当前会话绑着的渠道即使被禁用也要留下，否则选中项会凭空消失。
      */
     function channelChoices(bindings, selected) {
       const list = []
       const seen = new Set()
       for (const b of Array.isArray(bindings) ? bindings : []) {
-        if (!b || !b.qq) continue
-        const qq = String(b.qq)
-        if (seen.has(qq)) continue
-        if (b.enabled === false && qq !== String(selected || '')) continue
-        seen.add(qq)
-        // 胶囊/菜单只显示「称呼 QQ」：称呼用主文字色，QQ 用次要色（与模型选择器的亮暗搭配一致）。
-        // 具体号码放到每个选项的 title 上，悬停能看到，不占横向空间。
+        const peer = bindingPeer(b)
+        if (!peer) continue
+        const channel = bindingChannel(b)
+        const key = channelKey(channel, peer)
+        if (seen.has(key)) continue
+        if (b.enabled === false && key !== String(selected || '')) continue
+        seen.add(key)
+        // 胶囊/菜单只显示「称呼 通道」：称呼用主文字色，通道用次要色（与模型选择器的亮暗搭配一致）。
+        // 具体账号放到每个选项的 title 上，悬停能看到，不占横向空间。
         const name = String(b.name || '主人')
-        list.push({ qq: qq, name: name, label: `${name} QQ`, title: `QQ ${qq}` })
+        const label = channelLabel(channel)
+        list.push({ key: key, channel: channel, peer: peer, name: name, label: `${name} ${label}`, title: `${label} ${peer}` })
       }
       return list
     }
@@ -1236,7 +1288,8 @@ window.__ModuleLoader__.load({
       const applyState = (s) => {
         if (!s || !Array.isArray(s.bindings)) return false
         setBindings(s.bindings)
-        setSelected(boundChannelQq(s.bindings, sessionId))
+        const bound = boundChannel(s.bindings, sessionId)
+        setSelected(bound ? channelKey(bound.channel, bound.peer) : '')
         // 重新拉到状态说明页面还活着：上一次的失败提示不必一直挂着。
         setNote('')
         return true
@@ -1293,7 +1346,9 @@ window.__ModuleLoader__.load({
         applyState(s)
       }
 
-      const assign = async (next) => {
+      // item 为 null 表示「不绑定」：提交空对端，只解绑不删渠道。
+      const assign = async (item) => {
+        const next = item ? item.key : ''
         if (busy || next === selected) return
         const previous = selected
         // 先本地反映，再用返回的状态校准；失败就退回原选中并给一次轻提示。
@@ -1301,12 +1356,16 @@ window.__ModuleLoader__.load({
         setSelected(next)
         setBusy(true)
         setNote('')
-        const r = await post('/bindings/assign', { sessionId: sessionId, qq: next })
+        // 只有微信才带 channel：缺省就是 qq，老后端与老调用照旧。
+        const body = { sessionId: sessionId, qq: item ? item.peer : '' }
+        if (item && item.channel === 'wechat') body.channel = 'wechat'
+        const r = await post('/bindings/assign', body)
         setBusy(false)
         if (r && r.ok) {
           const list = Array.isArray(r.bindings) ? r.bindings : null
           if (list) setBindings(list)
-          setSelected(list ? boundChannelQq(list, sessionId) : next)
+          const bound = list ? boundChannel(list, sessionId) : null
+          setSelected(bound ? channelKey(bound.channel, bound.peer) : next)
           return
         }
         setSelected(previous)
@@ -1321,9 +1380,9 @@ window.__ModuleLoader__.load({
         if (next) refresh()
       }
 
-      const choose = (qq) => {
+      const choose = (item) => {
         setOpen(false)
-        assign(String(qq ?? ''))
+        assign(item || null)
       }
 
       // 原生按钮会自己把回车/空格转成 click；这里的 preventDefault 挡掉重复触发，
@@ -1337,10 +1396,10 @@ window.__ModuleLoader__.load({
 
       const choices = channelChoices(bindings, selected)
       // 选中值必须对得上某一项，否则菜单里没有任何高亮；对不上时按「不绑定」处理。
-      const value = choices.some((item) => item.qq === selected) ? selected : ''
-      const current = choices.find((item) => item.qq === value) || null
+      const value = choices.some((item) => item.key === selected) ? selected : ''
+      const current = choices.find((item) => item.key === value) || null
       const currentLabel = current ? current.label : '不绑定'
-      const items = [{ qq: '', label: '不绑定' }].concat(choices)
+      const items = [{ key: '', label: '不绑定', channel: '', peer: '' }].concat(choices)
       return h('div', {
         className: 'fish-bind',
         ref: rootRef,
@@ -1359,7 +1418,7 @@ window.__ModuleLoader__.load({
         },
           h('span', { className: 'fish-bind-current' },
             current
-              ? [h('span', { className: 'fish-bind-name' }, current.name), ' ', h('span', { className: 'fish-bind-qq' }, 'QQ')]
+              ? [h('span', { className: 'fish-bind-name' }, current.name), ' ', h('span', { className: 'fish-bind-channel' }, channelLabel(current.channel))]
               : '不绑定'),
           chevronIcon()),
         open
@@ -1368,18 +1427,18 @@ window.__ModuleLoader__.load({
             role: 'listbox',
             'aria-label': '收发渠道',
           }, items.map((item) => h('div', {
-            key: item.qq || 'none',
+            key: item.key || 'none',
             role: 'option',
-            'aria-selected': item.qq === value ? 'true' : 'false',
+            'aria-selected': item.key === value ? 'true' : 'false',
             className: 'fish-bind-item',
-            title: item.qq ? item.title : item.label,
-            onClick: () => choose(item.qq),
+            title: item.key ? item.title : item.label,
+            onClick: () => choose(item),
           },
             h('span', { className: 'fish-bind-item-text' },
-              item.qq
-                ? [h('span', { className: 'fish-bind-name' }, item.name), ' ', h('span', { className: 'fish-bind-qq' }, 'QQ')]
+              item.key
+                ? [h('span', { className: 'fish-bind-name' }, item.name), ' ', h('span', { className: 'fish-bind-channel' }, channelLabel(item.channel))]
                 : item.label),
-            item.qq === value ? checkIcon() : null)))
+            item.key === value ? checkIcon() : null)))
           : null,
         note ? h('span', { className: 'fish-bind-note', role: 'status', title: note }, note) : null)
     }
@@ -1420,11 +1479,11 @@ window.__ModuleLoader__.load({
       }
       .fish-bind-trigger[disabled] { opacity: .55; cursor: default; }
       .fish-bind-current { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-      /* 与模型选择器同口径：称呼取 label-secondary（同模型名），QQ 取 label-caption
-         （同档位 High 与箭头），所以两者的明暗差和旁边那枚按钮完全一致。
-         具体号码只在 title 里给。 */
+      /* 与模型选择器同口径：称呼取 label-secondary（同模型名），通道（QQ / 微信）取
+         label-caption（同档位 High 与箭头），所以两者的明暗差和旁边那枚按钮完全一致。
+         具体账号只在 title 里给。 */
       .fish-bind-name { color: var(--dsw-alias-label-secondary, inherit); }
-      .fish-bind-qq { color: var(--dsw-alias-label-caption, #888); }
+      .fish-bind-channel { color: var(--dsw-alias-label-caption, #888); }
       .fish-bind-chevron { flex: 0 0 auto; color: var(--dsw-alias-label-caption, #888); transition: transform .12s ease; }
       .fish-bind[data-open="1"] .fish-bind-chevron { transform: rotate(180deg); }
       .fish-bind-menu {
@@ -1458,7 +1517,7 @@ window.__ModuleLoader__.load({
         cursor: pointer;
       }
       .fish-bind-item:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.06)); }
-      /* 菜单项文字沿用菜单自己的 label-primary，只让「QQ」保持次要色。 */
+      /* 菜单项文字沿用菜单自己的 label-primary，只让通道标签保持次要色。 */
       .fish-bind-item .fish-bind-name { color: inherit; }
       .fish-bind-item[aria-selected="true"] { color: var(--dsw-alias-state-business-primary, #2f6fed); }
       .fish-bind-item-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -1482,6 +1541,652 @@ window.__ModuleLoader__.load({
       } catch { /* 注入失败只影响外观 */ }
     }
 
+    // ---------------- 二维码编码器（零依赖，单文件内联） ----------------
+    // iLink 的登录二维码里编码的是 qrcode_img_content：一个待编码的 https 链接，
+    // 不是图片地址也不是 data URI。这里只做「文本 → 模块矩阵」，渲染交给内联 SVG。
+    // 只实现字节模式、纠错级别 M、版本 1–10：登录链接一两百字节，版本 10 约 213 字节够用。
+    //
+    // 移植并精简自 dsh-im-wechat 的 lib/src/shared/qr.js（https://github.com/xbzbing/dsh-im-wechat）：
+    //
+    // MIT License
+    //
+    // Copyright (c) 2026 xbzbing
+    //
+    // Permission is hereby granted, free of charge, to any person obtaining a copy
+    // of this software and associated documentation files (the "Software"), to deal
+    // in the Software without restriction, including without limitation the rights
+    // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    // copies of the Software, and to permit persons to whom the Software is
+    // furnished to do so, subject to the following conditions:
+    //
+    // The above copyright notice and this permission notice shall be included in all
+    // copies or substantial portions of the Software.
+    //
+    // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    // SOFTWARE.
+
+    /** 版本上限：表只覆盖到这里。 */
+    const QR_MAX_VERSION = 10
+    /** 纠错级别 M 的分块参数（ISO/IEC 18004 表 9）：[纠错码字数, [[块数, 每块数据码字数], …]]。 */
+    const QR_ECC_M = {
+      1: [10, [[1, 16]]],
+      2: [16, [[1, 28]]],
+      3: [26, [[1, 44]]],
+      4: [18, [[2, 32]]],
+      5: [24, [[2, 43]]],
+      6: [16, [[4, 27]]],
+      7: [18, [[4, 31]]],
+      8: [22, [[2, 38], [2, 39]]],
+      9: [22, [[3, 36], [2, 37]]],
+      10: [26, [[4, 43], [1, 44]]],
+    }
+    /** 校准图案中心坐标（版本 1 没有校准图案）。 */
+    const QR_ALIGNMENT = {
+      1: [],
+      2: [6, 18],
+      3: [6, 22],
+      4: [6, 26],
+      5: [6, 30],
+      6: [6, 34],
+      7: [6, 22, 38],
+      8: [6, 24, 42],
+      9: [6, 26, 46],
+      10: [6, 28, 50],
+    }
+
+    // GF(256) 的对数/指数表：乘 0x11d 生成，用来算 Reed-Solomon 纠错。
+    const QR_GF_EXP = new Uint8Array(512)
+    const QR_GF_LOG = new Uint8Array(256)
+    {
+      let value = 1
+      for (let index = 0; index < 255; index += 1) {
+        QR_GF_EXP[index] = value
+        QR_GF_LOG[value] = index
+        value <<= 1
+        if (value & 0x100) value ^= 0x11d
+      }
+      for (let index = 255; index < 512; index += 1) QR_GF_EXP[index] = QR_GF_EXP[index - 255]
+    }
+
+    const qrMultiply = (a, b) => (a === 0 || b === 0 ? 0 : QR_GF_EXP[QR_GF_LOG[a] + QR_GF_LOG[b]])
+
+    /** 生成多项式 (x − α^0)…(x − α^(degree−1))，首项系数为 1。 */
+    function qrGenerator(degree) {
+      let polynomial = [1]
+      for (let index = 0; index < degree; index += 1) {
+        const next = new Array(polynomial.length + 1).fill(0)
+        for (let at = 0; at < polynomial.length; at += 1) {
+          next[at] ^= polynomial[at]
+          next[at + 1] ^= qrMultiply(polynomial[at], QR_GF_EXP[index])
+        }
+        polynomial = next
+      }
+      return polynomial
+    }
+
+    /** 纠错码字：data·x^degree mod generator。 */
+    function qrRemainder(data, degree) {
+      const generator = qrGenerator(degree)
+      const remainder = new Array(degree).fill(0)
+      for (let at = 0; at < data.length; at += 1) {
+        const factor = data[at] ^ remainder[0]
+        remainder.shift()
+        remainder.push(0)
+        if (factor !== 0) {
+          for (let index = 0; index < degree; index += 1) remainder[index] ^= qrMultiply(generator[index + 1], factor)
+        }
+      }
+      return remainder
+    }
+
+    /** 追加若干位（高位在前）。 */
+    function qrPushBits(bits, value, length) {
+      for (let shift = length - 1; shift >= 0; shift -= 1) bits.push((value >>> shift) & 1)
+    }
+
+    /** 字节模式下的字符计数位数：版本 10 及以上是 16 位。 */
+    const qrCountBits = (version) => (version <= 9 ? 8 : 16)
+
+    const qrDataCodewords = (version) => QR_ECC_M[version][1].reduce((sum, group) => sum + group[0] * group[1], 0)
+
+    /** 按字节数挑最小版本：4 位模式 + 计数字段 + 数据本身要放进数据码字容量。 */
+    function qrPickVersion(byteLength) {
+      for (let version = 1; version <= QR_MAX_VERSION; version += 1) {
+        const capacityBits = qrDataCodewords(version) * 8
+        const neededBits = 4 + qrCountBits(version) + byteLength * 8
+        if (neededBits <= capacityBits) return version
+      }
+      throw new RangeError('内容太长，超出二维码版本 ' + QR_MAX_VERSION + ' 的容量')
+    }
+
+    /** 字节模式编码 + 补齐到数据码字（补 0 位与 0xEC/0x11 填充字节）。 */
+    function qrEncodeData(bytes, version) {
+      const bits = []
+      qrPushBits(bits, 0b0100, 4)
+      qrPushBits(bits, bytes.length, qrCountBits(version))
+      for (const byte of bytes) qrPushBits(bits, byte, 8)
+      const capacityBits = qrDataCodewords(version) * 8
+      qrPushBits(bits, 0, Math.min(4, capacityBits - bits.length))
+      while (bits.length % 8 !== 0) bits.push(0)
+      const codewords = []
+      for (let at = 0; at < bits.length; at += 8) {
+        let value = 0
+        for (let index = 0; index < 8; index += 1) value = (value << 1) | bits[at + index]
+        codewords.push(value)
+      }
+      for (let pad = 0xec; codewords.length < capacityBits / 8; pad ^= 0xec ^ 0x11) codewords.push(pad)
+      return codewords
+    }
+
+    /** 分块算纠错码，再按标准交织（数据在前、纠错在后）。 */
+    function qrInterleave(codewords, version) {
+      const [eccLength, groups] = QR_ECC_M[version]
+      const blocks = []
+      let offset = 0
+      for (const [count, perBlock] of groups) {
+        for (let index = 0; index < count; index += 1) {
+          blocks.push(codewords.slice(offset, offset + perBlock))
+          offset += perBlock
+        }
+      }
+      const eccBlocks = blocks.map((block) => qrRemainder(block, eccLength))
+      const result = []
+      const maxDataLength = Math.max(...blocks.map((block) => block.length))
+      for (let at = 0; at < maxDataLength; at += 1) {
+        for (const block of blocks) {
+          if (at < block.length) result.push(block[at])
+        }
+      }
+      for (let at = 0; at < eccLength; at += 1) {
+        for (const block of eccBlocks) result.push(block[at])
+      }
+      return result
+    }
+
+    const qrCreateMatrix = (size) => ({
+      size: size,
+      modules: Array.from({ length: size }, () => new Array(size).fill(false)),
+      isFunction: Array.from({ length: size }, () => new Array(size).fill(false)),
+    })
+
+    function qrSet(matrix, row, col, dark) {
+      matrix.modules[row][col] = dark
+      matrix.isFunction[row][col] = true
+    }
+
+    /** 三个角上的定位图案（含一圈分隔带）。 */
+    function qrFinderPatterns(matrix) {
+      const corners = [[0, 0], [0, matrix.size - 7], [matrix.size - 7, 0]]
+      for (const corner of corners) {
+        for (let dy = -1; dy <= 7; dy += 1) {
+          for (let dx = -1; dx <= 7; dx += 1) {
+            const y = corner[0] + dy
+            const x = corner[1] + dx
+            if (y < 0 || y >= matrix.size || x < 0 || x >= matrix.size) continue
+            const inRing = dy >= 0 && dy <= 6 && dx >= 0 && dx <= 6
+            const dark = inRing && (dy === 0 || dy === 6 || dx === 0 || dx === 6
+              || (dy >= 2 && dy <= 4 && dx >= 2 && dx <= 4))
+            qrSet(matrix, y, x, dark)
+          }
+        }
+      }
+    }
+
+    /** 定时图案：第 6 行与第 6 列的交替模块。 */
+    function qrTimingPatterns(matrix) {
+      for (let at = 8; at < matrix.size - 8; at += 1) {
+        const dark = at % 2 === 0
+        if (!matrix.isFunction[6][at]) qrSet(matrix, 6, at, dark)
+        if (!matrix.isFunction[at][6]) qrSet(matrix, at, 6, dark)
+      }
+    }
+
+    /** 校准图案：跳过会盖住三个定位图案的位置。 */
+    function qrAlignmentPatterns(matrix, version) {
+      const positions = QR_ALIGNMENT[version] || []
+      for (let rowIndex = 0; rowIndex < positions.length; rowIndex += 1) {
+        for (let colIndex = 0; colIndex < positions.length; colIndex += 1) {
+          const last = positions.length - 1
+          if ((rowIndex === 0 && colIndex === 0) || (rowIndex === 0 && colIndex === last)
+            || (rowIndex === last && colIndex === 0)) continue
+          const row = positions[rowIndex]
+          const col = positions[colIndex]
+          for (let dy = -2; dy <= 2; dy += 1) {
+            for (let dx = -2; dx <= 2; dx += 1) {
+              qrSet(matrix, row + dy, col + dx, Math.max(Math.abs(dy), Math.abs(dx)) !== 1)
+            }
+          }
+        }
+      }
+    }
+
+    /** 先占住格式信息与版本信息的位置，掩码选完再写真实值。 */
+    function qrReserveFormat(matrix, version) {
+      const size = matrix.size
+      for (let at = 0; at <= 8; at += 1) {
+        if (!matrix.isFunction[at][8]) qrSet(matrix, at, 8, false)
+        if (!matrix.isFunction[8][at]) qrSet(matrix, 8, at, false)
+      }
+      for (let at = 0; at < 8; at += 1) {
+        if (!matrix.isFunction[8][size - 1 - at]) qrSet(matrix, 8, size - 1 - at, false)
+        if (!matrix.isFunction[size - 1 - at][8]) qrSet(matrix, size - 1 - at, 8, false)
+      }
+      if (version >= 7) {
+        for (let at = 0; at < 18; at += 1) {
+          const a = size - 11 + (at % 3)
+          const b = Math.floor(at / 3)
+          if (!matrix.isFunction[b][a]) qrSet(matrix, b, a, false)
+          if (!matrix.isFunction[a][b]) qrSet(matrix, a, b, false)
+        }
+      }
+    }
+
+    /** 数据按「从右下角向上、两列一组」的蛇形填进去。 */
+    function qrDrawData(matrix, codewords) {
+      const bits = codewords.flatMap((byte) => [byte >>> 7, (byte >>> 6) & 1, (byte >>> 5) & 1, (byte >>> 4) & 1,
+        (byte >>> 3) & 1, (byte >>> 2) & 1, (byte >>> 1) & 1, byte & 1])
+      let bitIndex = 0
+      let upward = true
+      for (let right = matrix.size - 1; right >= 1; right -= 2) {
+        if (right === 6) right = 5
+        for (let vertical = 0; vertical < matrix.size; vertical += 1) {
+          const row = upward ? matrix.size - 1 - vertical : vertical
+          for (let offset = 0; offset < 2; offset += 1) {
+            const col = right - offset
+            if (matrix.isFunction[row][col]) continue
+            matrix.modules[row][col] = bitIndex < bits.length ? bits[bitIndex] === 1 : false
+            bitIndex += 1
+          }
+        }
+        upward = !upward
+      }
+    }
+
+    /** 八种掩码的数据位取反规则。 */
+    function qrMaskBit(mask, row, col) {
+      switch (mask) {
+        case 0: return (row + col) % 2 === 0
+        case 1: return row % 2 === 0
+        case 2: return col % 3 === 0
+        case 3: return (row + col) % 3 === 0
+        case 4: return (Math.floor(row / 2) + Math.floor(col / 3)) % 2 === 0
+        case 5: return ((row * col) % 2) + ((row * col) % 3) === 0
+        case 6: return (((row * col) % 2) + ((row * col) % 3)) % 2 === 0
+        default: return (((row + col) % 2) + ((row * col) % 3)) % 2 === 0
+      }
+    }
+
+    function qrApplyMask(matrix, mask) {
+      for (let row = 0; row < matrix.size; row += 1) {
+        for (let col = 0; col < matrix.size; col += 1) {
+          if (!matrix.isFunction[row][col] && qrMaskBit(mask, row, col)) matrix.modules[row][col] = !matrix.modules[row][col]
+        }
+      }
+    }
+
+    function qrBchRemainder(value, polynomial, degree) {
+      let remainder = value
+      for (let at = degree; at >= 0; at -= 1) {
+        if ((remainder >>> (at + 10)) & 1) remainder ^= polynomial << at
+      }
+      return remainder
+    }
+
+    /** 15 位格式信息：2 位纠错级别 + 3 位掩码 + BCH 校验，最后异或固定值。 */
+    function qrFormatBits(mask) {
+      // 纠错级别 M 的两位编码是 00，所以数据位只剩掩码号。
+      const data = mask
+      const remainder = qrBchRemainder(data << 10, 0x537, 4)
+      return ((data << 10) | remainder) ^ 0x5412
+    }
+
+    function qrDrawFormat(matrix, mask) {
+      const bits = qrFormatBits(mask)
+      const size = matrix.size
+      const bit = (index) => ((bits >>> index) & 1) === 1
+      for (let at = 0; at <= 5; at += 1) qrSet(matrix, at, 8, bit(at))
+      qrSet(matrix, 7, 8, bit(6))
+      qrSet(matrix, 8, 8, bit(7))
+      qrSet(matrix, 8, 7, bit(8))
+      for (let at = 9; at < 15; at += 1) qrSet(matrix, 8, 14 - at, bit(at))
+      for (let at = 0; at < 8; at += 1) qrSet(matrix, 8, size - 1 - at, bit(at))
+      for (let at = 8; at < 15; at += 1) qrSet(matrix, size - 15 + at, 8, bit(at))
+      // 固定的黑模块。
+      qrSet(matrix, size - 8, 8, true)
+    }
+
+    function qrDrawVersionInfo(matrix, version) {
+      if (version < 7) return
+      let remainder = version
+      for (let at = 0; at < 12; at += 1) remainder = (remainder << 1) ^ ((remainder >>> 11) * 0x1f25)
+      const bits = (version << 12) | remainder
+      for (let at = 0; at < 18; at += 1) {
+        const dark = ((bits >>> at) & 1) === 1
+        const a = matrix.size - 11 + (at % 3)
+        const b = Math.floor(at / 3)
+        qrSet(matrix, b, a, dark)
+        qrSet(matrix, a, b, dark)
+      }
+    }
+
+    /** 标准的四条罚分规则：用来在八种掩码里挑最不容易看错的。 */
+    function qrPenalty(matrix) {
+      const size = matrix.size
+      let score = 0
+      // 规则 1：行/列上连续 5 个以上同色。
+      for (let row = 0; row < size; row += 1) {
+        let runLength = 1
+        for (let col = 1; col < size; col += 1) {
+          if (matrix.modules[row][col] === matrix.modules[row][col - 1]) runLength += 1
+          else {
+            if (runLength >= 5) score += 3 + (runLength - 5)
+            runLength = 1
+          }
+        }
+        if (runLength >= 5) score += 3 + (runLength - 5)
+      }
+      for (let col = 0; col < size; col += 1) {
+        let runLength = 1
+        for (let row = 1; row < size; row += 1) {
+          if (matrix.modules[row][col] === matrix.modules[row - 1][col]) runLength += 1
+          else {
+            if (runLength >= 5) score += 3 + (runLength - 5)
+            runLength = 1
+          }
+        }
+        if (runLength >= 5) score += 3 + (runLength - 5)
+      }
+      // 规则 2：2x2 同色块。
+      for (let row = 0; row < size - 1; row += 1) {
+        for (let col = 0; col < size - 1; col += 1) {
+          const color = matrix.modules[row][col]
+          if (color === matrix.modules[row][col + 1] && color === matrix.modules[row + 1][col]
+            && color === matrix.modules[row + 1][col + 1]) score += 3
+        }
+      }
+      // 规则 3：1:1:3:1:1 的定位图案前后带 4 个白模块；按 11 位窗口匹配。
+      const finderA = 0x5d0
+      const finderB = 0x05d
+      for (let line = 0; line < size; line += 1) {
+        let rowBits = 0
+        let colBits = 0
+        for (let at = 0; at < size; at += 1) {
+          rowBits = ((rowBits << 1) & 0x7ff) | (matrix.modules[line][at] ? 1 : 0)
+          colBits = ((colBits << 1) & 0x7ff) | (matrix.modules[at][line] ? 1 : 0)
+          if (at >= 10 && (rowBits === finderA || rowBits === finderB)) score += 40
+          if (at >= 10 && (colBits === finderA || colBits === finderB)) score += 40
+        }
+      }
+      // 规则 4：黑色占比偏离 50%。与标准一致：以 5% 为步长向上取整后再比。
+      let dark = 0
+      for (const line of matrix.modules) {
+        for (const cell of line) if (cell) dark += 1
+      }
+      const steps = Math.abs(Math.ceil((dark * 100) / (size * size) / 5) - 10)
+      return score + steps * 10
+    }
+
+    /** 文本 → 二维码模块矩阵（字节模式、纠错 M、自动挑最小版本与掩码）。 */
+    function encodeQr(text) {
+      const bytes = new TextEncoder().encode(String(text == null ? '' : text))
+      const version = qrPickVersion(bytes.length)
+      const codewords = qrInterleave(qrEncodeData(bytes, version), version)
+      const size = 17 + 4 * version
+      const template = qrCreateMatrix(size)
+      qrFinderPatterns(template)
+      qrTimingPatterns(template)
+      qrAlignmentPatterns(template, version)
+      qrReserveFormat(template, version)
+      qrDrawData(template, codewords)
+      qrDrawVersionInfo(template, version)
+      let best = null
+      let bestMask = 0
+      let bestScore = Number.POSITIVE_INFINITY
+      for (let mask = 0; mask < 8; mask += 1) {
+        const candidate = qrCreateMatrix(size)
+        for (let row = 0; row < size; row += 1) {
+          candidate.modules[row] = [...template.modules[row]]
+          candidate.isFunction[row] = [...template.isFunction[row]]
+        }
+        qrApplyMask(candidate, mask)
+        qrDrawFormat(candidate, mask)
+        const score = qrPenalty(candidate)
+        if (score < bestScore) {
+          bestScore = score
+          best = candidate
+          bestMask = mask
+        }
+      }
+      const chosen = best || template
+      qrDrawFormat(chosen, bestMask)
+      return { version: version, size: size, modules: chosen.modules }
+    }
+
+    /** 矩阵 → 内联 SVG 用的几何：每个黑块一个 1×1 方块，四周留 4 个模块的静区。 */
+    function qrGeometry(code) {
+      const margin = 4
+      const dimension = code.size + margin * 2
+      const commands = []
+      for (let row = 0; row < code.size; row += 1) {
+        for (let col = 0; col < code.size; col += 1) {
+          if (!code.modules[row][col]) continue
+          commands.push('M' + (col + margin) + ' ' + (row + margin) + 'h1v1h-1z')
+        }
+      }
+      return { dimension: dimension, path: commands.join('') }
+    }
+    // ---------------- 微信通道（iLink 扫码登录） ----------------
+    // 微信只能单聊、不能主动开会话、也没有历史消息，所以设置页只做三件事：
+    // 启用开关、扫码登录/退出、登录后发一条测试消息。绑定列表与 QQ 共用「私聊绑定」。
+    // 扫码期间由本组件自己按 2 秒轮询登录接口：宿主的 /state 是 5 秒节奏，扫码反馈太慢。
+
+    const WECHAT_POLL_MS = 2000
+
+    /** 登录状态 → 一句话；未知状态按未登录处理，宁可让用户多点一次登录。 */
+    function wechatStateText(state) {
+      return ({
+        stopped: '未登录',
+        connecting: '正在获取二维码…',
+        waiting_scan: '等待扫码',
+        scaned: '已扫码，请在手机上确认。',
+        confirmed: '已登录',
+        expired: '二维码过期了。',
+        error: '登录失败',
+      })[state] || '未登录'
+    }
+
+    /** 登录接口的响应统一成 { enabled, status, qrcode }；连状态都没有就当这次没成功。 */
+    function wechatPayload(result) {
+      if (!result || typeof result !== 'object') return null
+      if (!result.status && !result.qrcode) return null
+      return {
+        enabled: result.enabled === true,
+        status: result.status || {},
+        qrcode: result.qrcode || {},
+      }
+    }
+
+    /** 动作失败时的提示：宿主写好的中文直接透出，其余给一句能照着做的话。 */
+    function wechatActionError(result) {
+      const raw = String((result && (result.error || result.hint)) || '').trim()
+      if (raw && /[\u4e00-\u9fa5]/.test(raw)) return raw
+      return '没拿到登录状态，请稍后重试。'
+    }
+
+    function WechatChannel({ config = {}, change, initial = null, onUpdate, testPeer = '' }) {
+      const [login, setLogin] = React.useState(initial)
+      const [busy, setBusy] = React.useState(false)
+      const [note, setNote] = React.useState('')
+      const [testSay, setTestSay] = React.useState('')
+      // 复制二维码链接的结果提示：复制成功与否都要说一句。
+      const [copySay, setCopySay] = React.useState('')
+      const enabled = config.wechatEnabled === true
+      const status = (login && login.status) || {}
+      const state = String(status.state || 'stopped')
+      const lastError = String(status.lastError || '').trim()
+      // 带上次凭证重启时可能只有 connected，没有 confirmed：两种都算登录有效。
+      const loggedIn = state === 'confirmed' || status.connected === true
+
+      // 拿到新状态就往下传一份：绑定区要用它判断「能不能加微信渠道」。
+      const apply = (payload) => {
+        setLogin(payload)
+        // 登录接口会把 wechatEnabled 打开：本地配置跟着变，否则一保存又把登录关掉了。
+        if (payload && payload.enabled && config.wechatEnabled !== true) change('wechatEnabled', true)
+        if (onUpdate) onUpdate(payload)
+      }
+
+      // 扫码期间短轮询：状态离开这三个值就不再排下一次；卸载或状态变化时清掉定时器。
+      React.useEffect(() => {
+        const polling = state === 'connecting' || state === 'waiting_scan' || state === 'scaned'
+        if (!enabled || !polling) return undefined
+        let alive = true
+        const timer = setTimeout(async () => {
+          const result = await get('/wechat/login')
+          if (!alive) return
+          const payload = wechatPayload(result)
+          if (payload) apply(payload)
+        }, WECHAT_POLL_MS)
+        return () => {
+          alive = false
+          clearTimeout(timer)
+        }
+      }, [enabled, login])
+
+      const startLogin = async () => {
+        if (busy) return
+        setBusy(true); setNote('')
+        const result = await post('/wechat/login', {})
+        setBusy(false)
+        const payload = wechatPayload(result)
+        if (payload) apply(payload)
+        else setNote(wechatActionError(result))
+      }
+      const logout = async () => {
+        if (busy) return
+        setBusy(true); setNote('')
+        const result = await post('/wechat/logout', {})
+        setBusy(false)
+        const payload = wechatPayload(result)
+        if (payload) apply(payload)
+        else setNote(wechatActionError(result))
+      }
+      const sendTest = async () => {
+        if (busy) return
+        // 对端要明确给：后台在没给对端时只会挑第一条启用的绑定，不一定是微信。
+        if (!testPeer) {
+          setTestSay('先在下面添加一条微信渠道，才能发测试消息。')
+          return
+        }
+        setBusy(true); setTestSay('')
+        const result = await post('/test-send', { channel: 'wechat', qq: testPeer })
+        setBusy(false)
+        if (!result || !result.ok) setTestSay('发送失败：' + String((result && result.error) || '没有收到服务响应，请稍后重试。'))
+        else if (result.queued) setTestSay('微信当前无法发送，测试消息已加入待发列表，恢复后会补发。')
+        else setTestSay('已发送微信测试消息。')
+      }
+
+      // 二维码编码的是 imgContent：协议给的是待编码的 https 链接，不是图片地址，
+      // 所以这里自己编成矩阵再画成 SVG。链接本身也留着当兜底（官方实现也这么提示）。
+      const qrcode = (login && login.qrcode) || {}
+      const imgContent = String(qrcode.imgContent || '').trim()
+      const linkLike = /^https?:\/\//i.test(imgContent)
+      let qrCode = null
+      let qrError = ''
+      if (state === 'waiting_scan' && imgContent) {
+        try {
+          qrCode = encodeQr(imgContent)
+        } catch (error) {
+          // 只有内容超出版本 10 的容量才会走到这里：说清原因，别把异常丢给页面。
+          qrError = '二维码内容太长，没能生成。'
+        }
+      }
+      const qrSvg = qrCode ? (() => {
+        const geometry = qrGeometry(qrCode)
+        return h('svg', {
+          viewBox: '0 0 ' + geometry.dimension + ' ' + geometry.dimension,
+          style: S.qrSvg,
+          role: 'img',
+          'aria-label': '微信登录二维码',
+          shapeRendering: 'crispEdges',
+        },
+          h('rect', { width: geometry.dimension, height: geometry.dimension, fill: '#ffffff' }),
+          h('path', { d: geometry.path, fill: '#000000' }))
+      })() : null
+      const copyQrLink = async () => {
+        try {
+          await navigator.clipboard.writeText(imgContent)
+          setCopySay('链接已复制。')
+        } catch {
+          setCopySay('复制失败，请手动选中链接复制。')
+        }
+      }
+      const qrActions = imgContent
+        ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 } },
+          linkLike
+            ? h('a', {
+              href: imgContent,
+              target: '_blank',
+              rel: 'noreferrer noopener',
+              style: { ...S.btn, textDecoration: 'none', display: 'inline-block' },
+            }, '在浏览器打开')
+            : null,
+          h('button', { type: 'button', style: S.btn, onClick: copyQrLink }, '复制链接'))
+        : null
+
+      const pieces = []
+      if (loggedIn) {
+        const botId = String(status.botId || '').trim()
+        pieces.push(h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+          h('span', { style: S.ok }, '已登录'),
+          botId ? h('span', { style: S.dim }, '账号尾号 ' + botId.slice(-6)) : null,
+          h('button', { type: 'button', style: S.btn, disabled: busy, onClick: logout }, '退出登录')))
+        pieces.push(h('div', { style: { marginTop: 8 } },
+          h('button', { type: 'button', style: S.btn, disabled: busy || !testPeer, onClick: sendTest }, '发送微信测试消息'),
+          testPeer ? null : h('div', { style: S.hint }, '先在下面的「私聊绑定」里添加一条微信渠道，才能发测试消息。')))
+        if (testSay) pieces.push(h('div', { style: { ...(isError(testSay) ? S.danger : S.ok), marginTop: 4 } }, testSay))
+      } else if (state === 'waiting_scan') {
+        // 三条路都要说清：有码扫码，没码就用链接，链接也还没有就再等等。
+        const qrHint = qrSvg
+          ? '用手机微信扫码确认。'
+          : (imgContent ? '二维码没能生成，可以用下面的「在浏览器打开」完成确认。' : '')
+        pieces.push(h('div', null,
+          h('div', { style: { ...S.dim, marginBottom: 6 } }, wechatStateText(state)),
+          h('div', { style: S.qrBox },
+            qrSvg || h('div', { style: { ...S.qrRaw, fontSize: 12 } }, qrError || '二维码还没出来，请稍候…')),
+          qrHint ? h('div', { style: S.hint }, qrHint) : null,
+          qrActions,
+          copySay ? h('div', { style: S.hint }, copySay) : null))
+      } else if (state === 'expired') {
+        pieces.push(h('div', null,
+          h('div', { style: { ...S.dim, marginBottom: 6 } }, wechatStateText(state)),
+          h('button', { type: 'button', style: S.btn, disabled: busy, onClick: startLogin }, '重新获取二维码')))
+      } else if (state === 'error') {
+        pieces.push(h('div', null,
+          h('div', { style: S.danger }, lastError ? wechatStateText(state) + '：' + lastError : wechatStateText(state) + '。'),
+          h('div', { style: { marginTop: 6 } },
+            h('button', { type: 'button', style: S.btn, disabled: busy, onClick: startLogin }, '重新登录'))))
+      } else if (state === 'connecting' || state === 'scaned') {
+        pieces.push(h('div', { style: S.dim }, wechatStateText(state)))
+      } else {
+        pieces.push(h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+          h('span', { style: S.dim }, wechatStateText(state)),
+          h('button', { type: 'button', style: S.btn, disabled: busy, onClick: startLogin }, '扫码登录')))
+      }
+      if (note) pieces.push(h('div', { style: { ...S.danger, marginTop: 6 } }, note))
+
+      return h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '微信通道'),
+        h('div', { style: S.dim }, '扫码登录后，微信私聊也能接进 DSH 会话。微信只能单聊，也没有历史消息，登录后才收得到新消息。'),
+        row('启用微信通道', flag(enabled, (v) => change('wechatEnabled', v)), null,
+          '关闭后不再收发微信消息，已有的渠道仍保留。'),
+        enabled ? row('登录状态', h('div', null, pieces)) : hint('打开开关后可以扫码登录。'))
+    }
+
     function Section() {
       const [state, setState] = React.useState(null)
       const [dirty, setDirty] = React.useState(false)
@@ -1494,6 +2199,12 @@ window.__ModuleLoader__.load({
       const [voiceHint, setVoiceHint] = React.useState('')
       // 图库弹窗是设置页里的独立界面：值存当前打开的是哪个库，null 表示关闭。
       const [gallery, setGallery] = React.useState(null)
+      // 微信通道：登录状态由微信卡片自己轮询，这里留一份最新结果，供绑定区判断能不能加微信渠道。
+      const [wechatLive, setWechatLive] = React.useState(null)
+      // 最近跟这个微信说过话的人：添加微信渠道时当候选，省得手抄 id。
+      const [wechatPeers, setWechatPeers] = React.useState([])
+      // 绑定区的轻提示，例如微信还没登录就点了添加。
+      const [bindNote, setBindNote] = React.useState('')
       // 弹窗关闭后把焦点还给触发它的按钮。
       const galleryTrigger = React.useRef(null)
       const canFetchVoices = Boolean(state && state.ai && state.ai.tts)
@@ -1529,15 +2240,42 @@ window.__ModuleLoader__.load({
       }, [dirty])
 
       const config = (state && state.config) || {}
+      // 微信通道：开关与其它配置一起保存；登录状态优先用微信卡片轮询到的最新结果。
+      const wechatEnabled = config.wechatEnabled === true
+      const wechatStatus = (wechatLive && wechatLive.status)
+        || (state && state.wechat && state.wechat.status) || {}
+      const wechatConnected = wechatStatus.state === 'confirmed' || wechatStatus.connected === true
       const change = (key, value) => {
         setState((prev) => (prev ? { ...prev, config: { ...(prev.config || {}), [key]: value } } : prev))
         setDirty(true)
       }
       const bindings = () => (Array.isArray(config.bindings) ? config.bindings : [])
       const changeBinding = (i, patch) => change('bindings', bindings().map((x, j) => (j === i ? { ...x, ...patch } : x)))
-      const addBinding = () => {
+      /** 改对端 id：qq 与 peer 同值写下去（老配置读 qq，新配置读 peer）。 */
+      const setPeer = (i, value) => {
+        const channel = bindingChannel(bindings()[i])
+        // QQ 对端只收数字；微信 id 带字母和 @，原样保留。
+        const peer = channel === 'wechat' ? value.trim() : value.replace(/[^\d]/g, '')
+        changeBinding(i, { channel: channel, peer: peer, qq: peer })
+      }
+      // 换通道等于换一个人：对端清空，免得把 QQ 号当微信号存下来。
+      const changeChannel = (i, channel) => changeBinding(i, { channel: channel, peer: '', qq: '' })
+      // 添加渠道：微信没登录时先不添加，没有能对话的对端，加了也收不到消息。
+      const addBinding = (channel) => {
+        if (channel === 'wechat' && !wechatConnected) {
+          setBindNote('先在上面扫码登录，再添加渠道。')
+          return
+        }
+        setBindNote('')
         const firstSession = (state && state.sessions && state.sessions[0] && state.sessions[0].id) || ''
-        change('bindings', [...bindings(), { qq: '', session: firstSession, name: '主人', enabled: true }])
+        change('bindings', [...bindings(), {
+          channel: channel === 'wechat' ? 'wechat' : 'qq',
+          peer: '',
+          qq: '',
+          session: firstSession,
+          name: '主人',
+          enabled: true,
+        }])
       }
       const deleteBinding = (i) => change('bindings', bindings().filter((_, j) => j !== i))
 
@@ -1594,6 +2332,21 @@ window.__ModuleLoader__.load({
         await fetch()
       }
 
+      // 微信候选对端只在启用后拉一次，用来在「添加微信渠道」时选人；拉不到不影响手填。
+      React.useEffect(() => {
+        if (!wechatEnabled) return undefined
+        let alive = true
+        get('/wechat/peers').then((result) => {
+          if (alive && result && result.ok && Array.isArray(result.peers)) setWechatPeers(result.peers)
+        })
+        return () => { alive = false }
+      }, [wechatEnabled])
+
+      // 登录成功后清掉「先扫码登录」的提示，不让它一直挂在那儿。
+      React.useEffect(() => {
+        if (wechatConnected) setBindNote('')
+      }, [wechatConnected])
+
       if (!state) return h('div', { className: 'fish-msg-settings', style: S.wrap }, h('div', { style: S.h1 }, '鱼讯'), h('div', { style: S.dim }, '正在读取当前状态…'))
 
       const bridge = state.bridge || {}
@@ -1606,36 +2359,63 @@ window.__ModuleLoader__.load({
       const pauseForward = Boolean(config.forwardPaused)
       const sessionList = Array.isArray(state.sessions) ? state.sessions : []
 
+      // 微信候选对端：datalist 让对端输入框自带下拉，选中填原串，也能直接手填。
+      const wechatPeerOptions = wechatPeers.length
+        ? h('datalist', { id: 'fish-wechat-peers' },
+          wechatPeers.map((item) => h('option', {
+            key: String(item.peer),
+            value: String(item.peer),
+          }, sinceText(item.lastActiveAt))))
+        : null
+
       const bindingPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '私聊绑定'),
         h('div', { style: { ...S.bindGrid, marginTop: 10 } },
-          h('div', { style: S.th }, 'QQ 号'),
+          h('div', { style: S.th }, '通道'),
+          h('div', { style: S.th }, '对端账号'),
           h('div', { style: S.th }, 'DSH 会话'),
           h('div', { style: S.th }, '称呼'),
           h('div', { style: S.th }, '启用'),
           h('div', { style: S.th }, '')),
-        ...bindings().map((b, i) => h('div', { key: i, style: S.bindGrid },
-          h('input', {
-            style: S.input, value: b.qq || '', placeholder: '1696117435',
-            onChange: (e) => changeBinding(i, { qq: e.target.value.replace(/[^\d]/g, '') }),
-          }),
-          h('select', {
-            style: S.input, value: b.session || '',
-            onChange: (e) => changeBinding(i, { session: e.target.value }),
-          },
-            h('option', { value: '' }, '（选择会话）'),
-            sessionList.map((s) => h('option', { key: s.id, value: s.id }, s.title || s.id)),
-            b.session && !sessionList.some((s) => s.id === b.session)
-              ? h('option', { key: b.session, value: b.session }, `（会话当前不可用）${b.session}`)
-              : null),
-          h('input', {
-            style: S.input, value: b.name || '',
-            onChange: (e) => changeBinding(i, { name: e.target.value }),
-          }),
-          h('div', null, flag(b.enabled !== false, (v) => changeBinding(i, { enabled: v }))),
-          h('button', { type: 'button', style: S.btn, onClick: () => deleteBinding(i) }, '删除'))),
-        bindings().length === 0 ? h('div', { style: S.dim, margin: '8px 0' }, '还没有绑定。添加一条后，QQ 私聊才会转进 DSH 会话。') : null,
-        h('div', { style: { marginTop: 8 } }, h('button', { type: 'button', style: S.btn, onClick: addBinding }, '添加绑定')))
+        ...bindings().map((b, i) => {
+          const channel = bindingChannel(b)
+          return h('div', { key: i, style: S.bindGrid },
+            h('select', {
+              style: S.input, value: channel,
+              onChange: (e) => changeChannel(i, e.target.value),
+            },
+              h('option', { value: 'qq' }, 'QQ'),
+              // 微信未启用时不给这个选项；已经存下的微信渠道仍要能显示成微信。
+              (wechatEnabled || channel === 'wechat') ? h('option', { value: 'wechat' }, '微信') : null),
+            h('input', {
+              style: S.input,
+              value: bindingPeer(b),
+              placeholder: channel === 'wechat' ? 'wxid 或 @im.wechat 结尾的 id' : '1696117435',
+              list: channel === 'wechat' && wechatPeers.length ? 'fish-wechat-peers' : undefined,
+              onChange: (e) => setPeer(i, e.target.value),
+            }),
+            h('select', {
+              style: S.input, value: b.session || '',
+              onChange: (e) => changeBinding(i, { session: e.target.value }),
+            },
+              h('option', { value: '' }, '（选择会话）'),
+              sessionList.map((s) => h('option', { key: s.id, value: s.id }, s.title || s.id)),
+              b.session && !sessionList.some((s) => s.id === b.session)
+                ? h('option', { key: b.session, value: b.session }, `（会话当前不可用）${b.session}`)
+                : null),
+            h('input', {
+              style: S.input, value: b.name || '',
+              onChange: (e) => changeBinding(i, { name: e.target.value }),
+            }),
+            h('div', null, flag(b.enabled !== false, (v) => changeBinding(i, { enabled: v }))),
+            h('button', { type: 'button', style: S.btn, onClick: () => deleteBinding(i) }, '删除'))
+        }),
+        bindings().length === 0 ? h('div', { style: S.dim, margin: '8px 0' }, '还没有绑定。添加一条后，私聊才会转进 DSH 会话。') : null,
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 } },
+          h('button', { type: 'button', style: S.btn, onClick: () => addBinding('qq') }, '添加 QQ 渠道'),
+          wechatEnabled ? h('button', { type: 'button', style: S.btn, onClick: () => addBinding('wechat') }, '添加微信渠道') : null,
+          bindNote ? h('span', { style: S.danger }, bindNote) : null),
+        wechatPeerOptions)
 
       const connectPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '连接设置'),
@@ -1650,6 +2430,17 @@ window.__ModuleLoader__.load({
         row('实时接收地址', input(config.wsUrl, (v) => change('wsUrl', v), '留空自动生成（一般是 HTTP 地址）'),
           null,
           'QQ 服务的 WebSocket 服务端通常另开端口（例如 ws://127.0.0.1:3001）；要识别好友撤回，需要填这个地址并开启「优先实时接收」。'))
+
+      // 微信通道紧挨绑定区：先登录，再在下面添加渠道；未启用时只留一个开关。
+      // 测试消息要指定对端：取第一条启用的微信渠道。
+      const wechatTestBinding = bindings().find((b) => bindingChannel(b) === 'wechat' && b.enabled !== false)
+      const wechatPage = h(WechatChannel, {
+        config,
+        change,
+        initial: (state && state.wechat) || null,
+        onUpdate: setWechatLive,
+        testPeer: wechatTestBinding ? bindingPeer(wechatTestBinding) : '',
+      })
 
       const behaviorPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '消息处理'),
@@ -1953,7 +2744,7 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { ...S.danger, marginTop: 4 } },
               `离线原因：${offlineReason}。请检查 QQ 服务是否已启动、地址是否正确。`)
             : null),
-        connectPage, bindingPage, behaviorPage, guardPage, voicePage,
+        connectPage, wechatPage, bindingPage, behaviorPage, guardPage, voicePage,
         // 表情包（收藏）与收图图库（缓存）相邻：两块各有「打开图库管理」，各开各的弹窗。
         h(stickerSettings, {
           config,
@@ -2010,6 +2801,11 @@ window.__ModuleLoader__.load({
     // 测试用：模板、两个变体与共享组件的内部面；生产代码只经设置页按钮使用。
     exports.__test = {
       BindChannel,
+      WechatChannel,
+      wechatStateText,
+      // 二维码编码器的内部面：测试里拿它和公开实现比矩阵。
+      encodeQr,
+      qrGeometry,
       GalleryModal,
       StickerGalleryModal,
       ImageGalleryModal,
