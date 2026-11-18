@@ -243,7 +243,8 @@ test('latestVoice：没有语音 / 指定 id 不存在 / 下载失败', async ()
 
 test('bindings / getConfig 只读且脱敏；health 不触发网络', () => {
   const { api } = makeApi()
-  assert.deepEqual(api.bindings(), [{ qq: QQ, session: 'session-abc', name: '主人' }])
+  // 绑定投影带通道：老配置没有 channel 时按 qq 读。
+  assert.deepEqual(api.bindings(), [{ channel: 'qq', qq: QQ, session: 'session-abc', name: '主人' }])
   const config = api.getConfig()
   assert.equal(config.napcatToken, '***已设置***')
   assert.equal(config.bindings.length, 1)
