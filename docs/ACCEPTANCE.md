@@ -1,6 +1,6 @@
 # 真机验收清单
 
-> 前提：NapCat 在 `http://127.0.0.1:3000`，机器人 QQ `2983830957`，主人 QQ `1696117435`；
+> 前提：NapCat 在 `http://127.0.0.1:3000`，机器人 QQ `2983830957`，主人 QQ `10001`（示例号）；
 > 本地 AI 服务在 `http://127.0.0.1:7880`；DSH profile 是 `desktop`。
 >
 > **重新加载 DSH 插件会杀掉正在跑这个会话的进程。** 如果当前 agent 就在 DSH 里，
@@ -72,7 +72,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 - `health.ok = true`；
 - `health.transport.connected = true` 或 `transport.mode = "http"`（WS 关闭/连不上时）；
-- `state.bindings[0].qq = "1696117435"`；
+- `state.bindings[0].qq = "10001"`（示例：填自己绑的那个号码）；
 - `state.bindings[0].alive = true`（旧键名 `活着` 仍会一并下发，兼容老前端）；
 - `state.config.onlyInsideMarkers = true`；
 - 日志里没有 `桥启动失败`。
@@ -127,7 +127,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 - DSH 会话里出现 `【验收 2】QQ → DSH 文字通了。`；
 - `state.bridge.stats.delivered` 增加；
-- `state.bridge.watermarks["1696117435"].timestamp` 前进。
+- `state.bridge.watermarks["10001"].timestamp` 前进（键是绑定里的号码）。
 
 ---
 
@@ -237,7 +237,7 @@ Invoke-RestMethod 'http://127.0.0.1:2968/dsh-fish-message/state' | ConvertTo-Jso
 
 - 两条消息按原顺序进入 DSH（先 `离线 1`，再 `离线 2`）；
 - 不重复；
-- `state.bridge.watermarks["1696117435"]` 前进到最新；
+- `state.bridge.watermarks["10001"]` 前进到最新；
 - 日志有「QQ … → DSH」两条。
 
 如果只看到一条：看 `fish-message.log` 是否有 followup 失败；会话没开时不会推进水位，下一轮会重试。

@@ -1501,10 +1501,10 @@ test('设置页：微信已登录时可添加微信渠道，微信对端保留�
   tree = env.flush()
   assert.equal(inputsWithPlaceholder(tree, 'wxid 或 @im.wechat 结尾的 id')[0].props.value, WX, '微信对端原样保留')
 
-  const qqPeer = inputsWithPlaceholder(tree, '1696117435')[0]
+  const qqPeer = inputsWithPlaceholder(tree, '对方的 QQ 号')[0]
   qqPeer.props.onChange({ target: { value: '12ab34' } })
   tree = env.flush()
-  assert.equal(inputsWithPlaceholder(tree, '1696117435')[0].props.value, '1234', 'QQ 对端仍只留数字')
+  assert.equal(inputsWithPlaceholder(tree, '对方的 QQ 号')[0].props.value, '1234', 'QQ 对端仍只留数字')
 })
 
 test('设置页：保存设置时 wechatEnabled 随 config 一起提交', async () => {

@@ -548,12 +548,12 @@ test('配置：派生 WS 地址、旧桥字段迁移、范围钳制', () => {
   assert.equal(deriveWsUrl('http://127.0.0.1:3000/'), 'ws://127.0.0.1:3000')
   const prev = migrateLegacyConfig({
     NapCat: 'http://127.0.0.1:3000',
-    绑定: [{ 类型: '私聊', 号码: '1696117435', 会话: 'session-a', 称呼: '主人' }],
+    绑定: [{ 类型: '私聊', 号码: '10001', 会话: 'session-a', 称呼: '主人' }],
     只发标记内: true,
     补投窗口分: 10,
   })
   assert.equal(prev.bindings.length, 1)
-  assert.equal(prev.bindings[0].qq, '1696117435')
+  assert.equal(prev.bindings[0].qq, '10001')
   assert.equal(prev.backfillWindowHours, 24, '迁移时至少给 24 小时')
   const clamp = normalizeConfig({ pollIntervalMs: 10, historyCount: 9999, logLevel: '怪' })
   assert.equal(clamp.pollIntervalMs, 500)

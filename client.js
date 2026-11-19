@@ -2493,7 +2493,7 @@ window.__ModuleLoader__.load({
             h('input', {
               style: S.input,
               value: bindingPeer(b),
-              placeholder: channel === 'wechat' ? 'wxid 或 @im.wechat 结尾的 id' : '1696117435',
+              placeholder: channel === 'wechat' ? 'wxid 或 @im.wechat 结尾的 id' : '对方的 QQ 号',
               list: channel === 'wechat' && wechatPeers.length ? 'fish-wechat-peers' : undefined,
               onChange: (e) => setPeer(i, e.target.value),
             }),

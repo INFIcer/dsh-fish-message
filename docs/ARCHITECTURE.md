@@ -212,7 +212,7 @@ A(10:00:00) → B(10:00:01) → 撤回 A    → 只投 B
 {
   "version": 1,
   "watermarks": {
-    "1696117435": { "timestamp": 1794200000, "messageId": "123456", "updatedAt": 1794200001000 }
+    "10001": { "timestamp": 1794200000, "messageId": "123456", "updatedAt": 1794200001000 }
   },
   "seen": ["123456", "123457"],
   "stats": { "received": 1, "delivered": 1, "skippedOld": 0, "errors": 0 }
