@@ -18,12 +18,14 @@ Bridge（lib/bridge.js）
    ├─ 语音：record → VoiceService → inbox 落盘 → 「语音：路径，N 秒」（可选附情感/背景音/转写）
    ├─ 图片：image → inbox → 图库（按 sha256 命中描述就不附原图）→ 本地识图 / DSH 附件
    ├─ 记忆扩展：图片/语音 → memory.library 只读比对 → 正文附「记忆：…」（可选，默认关）
+   ├─ 峰时（可选）：fish.token 报峰时 → 这一批不投会话，收进非紧要任务队列（见 3.10）
    ├─ 表情：[表情:名字/#标签/id] → StickerStore → image 段
    ├─ 出站：session/event → [MSG] 解析 → 发送锁 → 待发记录落盘 → 节奏等待 → text / image / record / file
    │    ├─ 成功 → 删除待发记录
    │    ├─ 失败 → Outbox（fish-message-outbox.json）→ 心跳/恢复/手动补发
    │    └─ 进程在等待中退出 → Inflight（fish-message-inflight.json）→ 启动时回放
-   └─ 可选能力：AiService → fish.service（TTS / ASR / 识图；没有就降级）
+   ├─ 可选能力：AiService → fish.service（TTS / ASR / 识图；没有就降级）
+   └─ 余额提醒（可选）：fish.token.subscribe(balance-low) → 当前送信渠道（见 4.6）
    │
    ▼
 Delivery（lib/delivery.js）
@@ -47,6 +49,11 @@ DSH 会话（模型照常开一轮）
 
 记忆扩展是另一个可选依赖：记忆插件提供的 `memory.library` 服务，只读比对入站图片与语音。
 没装、抛错或超时都只跳过附注，不改变消息收发；两个底层库（收图图库、表情库）不受影响。
+
+计价与余额是第三个可选依赖：fish-token 插件提供的 `fish.token` 服务（契约版本 1）。
+鱼讯只按契约调用，不 import 对方代码、不加 `inject`：峰时把入站消息收进对方的非紧要
+任务队列并发一条渠道提醒；余额跌破阈值时把提醒转发到当前送信渠道。服务不存在时这两项
+完全不可用，收发行为与没装之前一模一样（见 3.10、4.6、13）。
 
 ```text
 dsh-LocalAIService（可选） ── fish.service.tts / asr / visionDescribe
@@ -82,6 +89,7 @@ dsh-LocalAIService（可选） ── fish.service.tts / asr / visionDescribe
 | `lib/image-library.js` | 收图图库：按 sha256 存原图与描述、命中计数、上限淘汰 | 不碰 HTTP / DSH，也不认识「识图」 |
 | `lib/vision-cache.js` | 入站图片的识别缓存策略：查库 / 本地识图 / 交给模型看 | 不存盘、不拼消息正文 |
 | `lib/memory-extension.js` | 记忆扩展策略：开关判定、调 `memory.library` 只读比对、附注格式、超时降级 | 不写记忆库、不碰收图图库/表情库、不 import 记忆插件 |
+| `lib/token-link.js` | 计价/余额的可选接入层：惰性取 `fish.token`、峰时判定、任务入队、提醒冷却、余额提醒转发 | 不自己算峰谷、不发消息（走 Bridge）、不 import fish-token |
 | `lib/tools.js` | `fish_sticker_list` / `fish_sticker_send` / `fish_sticker_save` 工具定义与注册 | 不直接读写索引 |
 | `lib/image-tools.js` | `fish_image_get` / `fish_image_note` 工具定义与注册 | 不直接读写索引（走 `fish.message`） |
 | `lib/service.js` | `fish.message` 门面（发送/历史/语音/表情/图库） | 不重新实现发送 |
@@ -364,6 +372,42 @@ descModel / descAt / descFirstAt / firstSeenAt / lastSeenAt / hits / misses`。
 - **开销**：图片只在本机算内容指纹；语音要把音频交给本机记忆服务（本地 AI），不上外网。
 - **状态**：`/state` 的 `memory` 字段给设置页两条状态行（`service` / `localAI`），不另开轮询。
 
+### 3.10 峰时转任务队列（可选，fish.token）
+
+峰时收到的消息不投进会话，而是收进 fish-token 的非紧要任务队列，谷时再处理。
+**只改「转入会话」这一步**：队列、编辑窗口、合并、撤回、去重、水位、多通道、
+粘性送信渠道全部照旧。
+
+```text
+入站一批（合并后）→
+  ├─ forwardPaused → 待转发队列（旧逻辑，优先级更高）
+  ├─ peakDeferEnabled=false / fish.token 不存在 → 直接投递进会话（旧行为）
+  ├─ getPricing() 明确谷时 → 直接投递进会话
+  ├─ 正文 trim 后以【紧要】开头 → 去掉标记，直接投递进会话
+  └─ 峰时 → enqueueTask({ prompt, sessionKey, channel, peer, source:'fish-message' })
+        ├─ ok   → 记 seen / 水位 / received，回一条渠道提醒（受冷却）
+        └─ 失败 → 记 warn，退回直接投递进会话（消息绝不丢）
+```
+
+判定只来自 `fish.token.getPricing()`：鱼讯**不自己算钟点、周末或节假日**（官方窗口会随
+法定节假日 / 调休变化，自己算必然对不上；现行规则见 fish-token 的实现，鱼讯只消费结论）。
+
+- **拿不到怎么算**：服务或方法不存在 = 功能不可用 → 直接投递（旧行为）；服务在但查询
+  抛错、返回形状不对（拿不到时段）→ 按最保守的**峰时**处理（走入队，入队失败再退回投递）。
+- **【紧要】只认开头**：`text.trim().startsWith('【紧要】')`，去掉这三个字后投递；正文
+  只剩标记时保留原文（否则变成空消息投不进会话）。服务不可用时标记原样保留，与旧版一致。
+- **提醒**：默认文案见 `lib/config.js` 的 `defaultPeakNotice`；`peakNoticeTemplate` 可改，
+  支持 `{offPeakStart}` / `{offPeakEnd}`（填 fish.token 给的下一段谷时起止时刻；
+  拿不到就整段回退内置默认，默认文案不含占位符）。提醒走正常出站链路（失败进 Outbox 补发）。
+- **冷却**：同一 `channel:peer` 的提醒按 `peakNoticeCooldownMinutes`（默认 30 分钟，0 = 不冷却）
+  冷却，从**发出提醒的时刻**起算；冷却期内消息照样入队，只是不再重复提醒。
+- **没进会话的那一批**：`seen` / 水位 / `received` / `recordEvent`（文本前缀 `[峰时转任务]`）
+  仍按每条记，`delivered` 不计；`received` 事件带 `deferred:true`。
+  同时把送信渠道设为这条 —— 任务稍后跑起来时，回复要回到同一个渠道。
+- **图片**：`enqueueTask` 只有正文参数，这一批的图片附件不会转交；正文里仍有图片的本地路径
+  / 描述（见 3.7），所以信息不会凭空消失。
+- **超时**：入队等 `tokenTimeoutMs`（默认 800ms，见 `lib/token-link.js`），超时按入队失败处理。
+
 ---
 
 ## 4. 出站流程
@@ -579,6 +623,28 @@ StickerStore（index.json + 文件）
 - 上限到顶只报错（`sticker_limit`），不自动淘汰；
 - URL 取图只允许 `stickerDir` 内、扩展名在白名单里的文件（路径穿越返回 403）。
 
+### 4.6 余额提醒转发（可选，fish.token）
+
+装配时 `ctx.get('fish.token')`，有 `subscribe` 就订上（返回的取消函数交给 `ctx.effect` 保存，
+卸载时调用）；没有服务、没有 `subscribe` 就只记一条 debug，什么都不做。
+
+```text
+event { type:'balance-low', threshold, balance } →
+  ├─ balanceAlertMode = off → 什么都不发
+  ├─ 同一阈值 30 分钟内已转过 → 跳过（防刷屏）
+  ├─ 当前送信渠道（replyTargets 里最近更新的一条）不存在 → 跳过，绝不退回默认渠道
+  ├─ sticker 模式且配了表情名 → 走 fish_sticker_send 同一条路（StickerStore → Bridge.sendOutbound）
+  │    └─ 没配表情 / 发送失败 → 回退成文字
+  └─ message 模式 → Bridge.sendText → 失败自动进 Outbox 补发
+```
+
+- 目标只看**粘性送信渠道**：状态文件 `replyTargets` 里 `at` 最大的那条
+  （`StateStore.latestReplyTarget` → `Bridge.latestReplyTarget`）；没有就跳过。
+- 文案：`balanceAlertTemplate`（`{balance}` 换成两位小数），留空用 `defaultBalanceAlert`。
+- 表情：`balanceAlertSticker` 是名字 / `#标签` / id；空串表示直接发文字。
+- 去重窗口固定 30 分钟（`balanceAlertDedupMs`），与峰时提醒的冷却互不相干。
+- 时段切换事件（`period-switch`）本插件不转发，只认 `balance-low`。
+
 ---
 
 ## 5. 连接与重连
@@ -692,6 +758,12 @@ v1 不实现群聊。将来要加群：
 | 表情找不到 | 记日志/状态；会话里投「找不到表情」提示；该 token 跳过，其它 token 照发 |
 | 表情库超上限 | 入库/导入返回 `sticker_limit`，提示清理；已有条目和文件不动 |
 | 状态文件写失败 | 日志记错；内存继续，重启可能重投（已知风险） |
+| fish.token 不存在 | 峰时转任务与余额提醒都不可用；入站照旧直接投递，收发与没装之前一致，只记一条 debug |
+| 计价时段查不到（抛错 / 形状不对） | 按最保守的峰时处理：先尝试入队；入队失败即退回直接投递 |
+| enqueueTask 失败 / 抛错 / 超时 800ms | 记 warn，这一批照常直接投进会话；消息不丢 |
+| 峰时提醒发不出去 | 只记 warn；消息已经进任务队列，不受影响 |
+| 余额提醒没有送信渠道 | 跳过，不往任何渠道发（绝不退回默认渠道） |
+| 余额提醒发送失败 | 文字进 Outbox 按 FIFO 补发；表情失败回退成文字；同一阈值 30 分钟内不重复转 |
 
 ---
 
@@ -861,3 +933,32 @@ props 带当前 `sessionId`，按会话显示和勾选渠道；设置页的绑�
   仍是一条渠道一条，照常按对端收消息、推进水位。
 - 未绑定渠道的消息不投递，但会标记已读并推进水位；重新绑定时不会补投未绑定期间的消息。
 - `GuardMonitor.setBindings` 忽略空 session，不占防失联监控名额。
+
+---
+
+## 13. 可选扩展：fish.token（计价与余额）
+
+fish-token 插件通过 `ctx.provide('fish.token')` 注册；鱼讯按下面这份冻结契约惰性调用
+（`lib/token-link.js`），不 import 对方代码、不加 `inject`、不等它加载。
+
+| 方法 | 鱼讯怎么用 |
+|---|---|
+| `api.getPricing(at?)` | 同步读「现在峰时还是谷时」；纯本地计算，不抛错 |
+| `await api.enqueueTask({ prompt, sessionKey, channel, peer, source })` | 峰时把这一批收进非紧要任务队列；等 800ms |
+| `api.subscribe(handler)` | 只订 `balance-low`；返回的取消函数在卸载时调用 |
+| `getBalance` / `getStatus` / `listTasks` / `updateTask` / `removeTask` / `runTaskNow` | 本插件不用 |
+
+配置键（都在 `lib/config.js` 的 `DEFAULT_CONFIG` 与 schema 里；旧配置缺这些键时全部落默认）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `peakDeferEnabled` | `true` | 峰时把入站消息转进任务队列；关掉 = 旧行为 |
+| `peakNoticeTemplate` | `''` | 峰时提醒文案；留空用 `defaultPeakNotice`，`{offPeakStart}` / `{offPeakEnd}` 填服务给的下一段谷时 |
+| `peakNoticeCooldownMinutes` | `30` | 同一对端的提醒冷却（分钟，0~1440）；0 = 每次都提醒 |
+| `balanceAlertMode` | `'message'` | `off` / `message` / `sticker` |
+| `balanceAlertTemplate` | `''` | 余额提醒文案；留空用 `defaultBalanceAlert`，`{balance}` 换成两位小数 |
+| `balanceAlertSticker` | `''` | 表情名字 / `#标签` / id；空串回退成文字 |
+
+设置页在「计价与余额」卡片里读写这六个键，并从 `/state` 的 `token` 字段显示服务是否连上、
+当前是峰时还是谷时（老版本 `/state` 没有这个字段时显示「未检测到」）。
+

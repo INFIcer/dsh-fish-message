@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MockOneBotServer, wait, sleep } from './mock-onebot.js'
+import { MockOneBotServer, wait, sleep, message } from './mock-onebot.js'
 
 // 心跳常规是 30 秒；测试里调快，才能验证「卡住→提醒」这条链路真的走通。
 process.env.FISH_MESSAGE_GUARD_TICK_MS = '40'
@@ -26,13 +26,43 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   const dir = mkdtempSync(join(tmpdir(), 'fish-host-'))
   process.env.DSH_HOME = dir
   // 必须在 DSH_HOME 指向临时目录之后再加载配置模块，否则默认表情库目录会落到真实家目录。
-  const { defaultImagePrompt } = await import('../lib/config.js')
+  const { defaultImagePrompt, defaultPeakNotice, defaultBalanceAlert } = await import('../lib/config.js')
 
   const routes = new Map()
   const listen = new Map()
   const toolDefinitions = []
   // 记忆插件是可选的：宿主只按服务名探测，不 import 对方代码。
   const memoryLibrary = { version: '0.1', images: {}, voices: {} }
+  // 计价插件（fish-token）同样是可选的：假的 fish.token 只实现鱼讯会用的方法。
+  // peakNow 默认谷时，免得把本用例的入站投递改道；后面再单独翻成峰时验收。
+  let peakNow = false
+  const enqueueCalls = []
+  const tokenListeners = []
+  let tokenOffCalled = 0
+  const tokenService = {
+    version: 1,
+    getPricing(at = Date.now()) {
+      return {
+        ok: true,
+        period: peakNow ? 'peak' : 'offpeak',
+        peak: peakNow,
+        multiplier: peakNow ? 2 : 1,
+        timezone: 'Asia/Hong_Kong',
+        now: at,
+        nextSwitchAt: 0,
+        nextPeakAt: null,
+        nextOffPeakAt: null,
+      }
+    },
+    async enqueueTask(payload) {
+      enqueueCalls.push(payload)
+      return { ok: true, task: { id: 'task-1', status: 'pending' } }
+    },
+    subscribe(handler) {
+      tokenListeners.push(handler)
+      return () => { tokenOffCalled += 1 }
+    },
+  }
   const agent = {
     session: { id: session },
     async followup(msg) { this.received = msg },
@@ -54,6 +84,7 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
     },
     get(service) {
       if (service === 'memory.library') return memoryLibrary
+      if (service === 'fish.token') return tokenService
       if (service === 'sessions') return { list: () => [{ id: session, title: '宿主测试' }], flush: async () => {} }
       if (service === 'sessionTitle') return { get: () => ({ title: '宿主测试' }) }
       if (service === 'workspaceRegistry') return { archivedSessionIds: [] }
@@ -140,6 +171,18 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(status.config.memoryCompareVoices, true)
   assert.deepEqual(status.memory, { service: true, localAI: false })
 
+  // 计价与余额：默认开关、默认文案由宿主下发；fish.token 在时状态行如实报。
+  assert.equal(status.config.peakDeferEnabled, true)
+  assert.equal(status.config.peakNoticeTemplate, '')
+  assert.equal(status.config.peakNoticeCooldownMinutes, 30)
+  assert.equal(status.config.balanceAlertMode, 'message')
+  assert.equal(status.defaults.peakNoticeTemplate, defaultPeakNotice)
+  assert.equal(status.defaults.balanceAlertTemplate, defaultBalanceAlert)
+  assert.equal(status.token.service, true)
+  assert.equal(status.token.peak, false)
+  // 装配时就订了事件：订阅回调存下来，卸载时注销。
+  assert.equal(tokenListeners.length, 1)
+
   // 表情库路由已经在宿主里挂上；空库返回 0 条。
   assert.equal(typeof routes.get('/dsh-fish-message/stickers'), 'function')
   assert.equal(typeof routes.get('/dsh-fish-message/open-folder'), 'function')
@@ -184,7 +227,37 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(emitted, true)
   assert.equal(server.sent[0].message[0].data.text, '宿主入口测试')
 
+  // ---- 峰时转任务：宿主真的把 fish.token 传进了 Bridge ----
+  peakNow = true
+  server.addHistory(QQ, message(777, '峰时留言', Math.floor(Date.now() / 1000), QQ))
+  assert.equal(await wait(() => enqueueCalls.length > 0, 4000), true, '峰时消息要进任务队列')
+  assert.deepEqual(enqueueCalls[0], {
+    prompt: '峰时留言',
+    sessionKey: 'host-test',
+    channel: 'qq',
+    peer: QQ,
+    source: 'fish-message',
+  })
+  assert.equal(agent.received, undefined, '峰时这一批不能投进会话')
+  // 自动回一条默认提醒（走的还是正常出站链路）。
+  assert.equal(
+    await wait(() => server.sent.some((x) => x.message?.[0]?.data?.text === defaultPeakNotice), 3000),
+    true,
+    '峰时转任务后要回一条提醒',
+  )
+  assert.equal(app.store.hasSeen(777), true, '消息没丢：seen 与水位照常推进')
+  assert.equal(String(app.store.getWatermark(QQ).messageId), '777')
+
+  // ---- 余额提醒：订阅事件 → 当前送信渠道（上面已经设成 QQ） ----
+  tokenListeners[0]({ type: 'balance-low', threshold: 10, balance: 9.6, at: Date.now() })
+  assert.equal(
+    await wait(() => server.sent.some((x) => String(x.message?.[0]?.data?.text || '').includes('当前余额 9.60 元')), 3000),
+    true,
+    '余额偏低要转发到当前渠道',
+  )
+
   await app.stop()
+  assert.equal(tokenOffCalled, 1, '卸载时要注销 fish.token 订阅')
   await sleep(20)
   await server.stop()
 })

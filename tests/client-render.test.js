@@ -299,6 +299,12 @@ function fullState() {
       imageLibraryMaxItems: 1000,
       imageLibraryMaxMB: 512,
       imageLibraryKeepFiles: true,
+      peakDeferEnabled: true,
+      peakNoticeTemplate: '',
+      peakNoticeCooldownMinutes: 30,
+      balanceAlertMode: 'message',
+      balanceAlertTemplate: '',
+      balanceAlertSticker: '',
       logLevel: 'info',
     },
     defaults: {
@@ -306,6 +312,8 @@ function fullState() {
       guardStuckPrompt: '默认长任务提醒',
       guardQqPrompt: '默认消息通道提醒',
       guardSystemPrompt: '默认系统提示词',
+      peakNoticeTemplate: '默认峰时提醒',
+      balanceAlertTemplate: '默认余额提醒',
     },
     bridge: {
       running: true,
@@ -330,6 +338,7 @@ function fullState() {
     stickers: { items: [], total: 0, stats: {}, tags: [] },
     ai: { installed: true, online: true, tts: true, asr: true, vision: true },
     memory: { service: false, localAI: true },
+    token: { service: true, peak: false, period: 'offpeak' },
     stickerDir: 'C:/tmp/stickers',
     stickerDirExists: true,
     imageDir: 'C:/tmp/fish-message-images',
@@ -455,6 +464,21 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.match(plainText, /编辑窗口（秒）/)
   assert.match(plainText, /发送间隔（毫秒）/)
   assert.match(plainText, /按字数追加间隔（毫秒）/)
+  // 计价与余额卡片：开关、提醒文案、冷却、余额提醒方式与表情名都在。
+  assert.match(plainText, /计价与余额/)
+  assert.match(plainText, /峰时转入任务队列/)
+  assert.match(plainText, /峰时提醒文案/)
+  assert.match(plainText, /提醒冷却（分钟）/)
+  assert.match(plainText, /余额提醒方式/)
+  assert.match(plainText, /余额提醒表情/)
+  assert.match(plainText, /计价服务：已连接（当前谷时）/)
+  const peakNoticeBox = findAll(complete,
+    (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认峰时提醒')
+  assert.equal(peakNoticeBox.length, 1)
+  assert.equal(peakNoticeBox[0].props.value, '')
+  const balanceNoticeBox = findAll(complete,
+    (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认余额提醒')
+  assert.equal(balanceNoticeBox.length, 1)
   // 系统提示词：默认留空，占位文字用宿主下发的内置文案。
   const emptySystemPrompt = findAll(complete,
     (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认系统提示词')
@@ -480,6 +504,12 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   const noDefault = fullState()
   delete noDefault.defaults
   assert.doesNotThrow(() => env.renderSection([noDefault]))
+
+  // d) 老版本 /state 没有 token 字段：卡片照常渲染，状态行说没检测到。
+  const noToken = fullState()
+  delete noToken.token
+  const noTokenTree = env.renderSection([noToken])
+  assert.match(textOf(noTokenTree), /计价服务：未检测到/)
 
   // 配置里未设置的提醒提示词走空串分支；默认文案缺失时也不能抛。
   const emptyCopy = fullState()

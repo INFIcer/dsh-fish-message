@@ -2563,6 +2563,78 @@ window.__ModuleLoader__.load({
           onChange: (e) => change('outboxPerCharDelayMs', Number(e.target.value)),
         }), '在固定间隔之上按字数再加：中文每字算 1，英文一个单词算 1，标点、空格算 0.2，图片、文件和语音文件不算字。'))
 
+      // 计价与余额：可选 fish-token（context 服务 fish.token）。没装时两块都不可用，收发照旧。
+      const tokenState = state.token || {}
+      const tokenOnline = Boolean(tokenState.service)
+      const tokenPeriod = !tokenOnline ? '' : (tokenState.peak === true ? '峰时' : (tokenState.peak === false ? '谷时' : '时段未知'))
+      const defaultPeakNotice = String((state.defaults && state.defaults.peakNoticeTemplate) || '')
+      const defaultBalanceAlert = String((state.defaults && state.defaults.balanceAlertTemplate) || '')
+      const balanceMode = ['off', 'message', 'sticker'].includes(config.balanceAlertMode)
+        ? config.balanceAlertMode
+        : 'message'
+      const tokenPage = h('div', { style: S.card },
+        h('div', { style: { ...S.h, margin: '0 0 8px' } }, '计价与余额'),
+        h('div', { style: S.dim },
+          '接上 fish-token 后：峰时收到的消息先收进非紧要任务队列，谷时再处理；余额偏低时往当前渠道回一条提醒。没装这个插件时两项都不生效，收发照旧。'),
+        row('峰时转入任务队列', flag(config.peakDeferEnabled !== false, (v) => change('peakDeferEnabled', v), !tokenOnline),
+          '峰时先收着、谷时再处理；以【紧要】开头的消息仍立刻送进会话。',
+          '关掉或服务不可用时，消息照常直接送进会话。'),
+        row('峰时提醒文案', h('div', null,
+          h('textarea', {
+            style: {
+              ...S.input, minHeight: 64, resize: 'vertical', lineHeight: 1.6, fontFamily: 'inherit',
+            },
+            rows: 3,
+            maxLength: 1000,
+            value: config.peakNoticeTemplate || '',
+            placeholder: defaultPeakNotice,
+            onChange: (e) => change('peakNoticeTemplate', e.target.value),
+          }),
+          config.peakNoticeTemplate
+            ? h('div', { style: { marginTop: 6 } },
+              h('button', {
+                type: 'button', style: S.btn,
+                onClick: () => change('peakNoticeTemplate', ''),
+              }, '恢复默认'))
+            : null),
+        '留空用内置默认；{offPeakStart}、{offPeakEnd} 会填成下一段谷时的起止时刻（由 fish-token 提供）。'),
+        row('提醒冷却（分钟）', h('input', {
+          style: S.small, type: 'number', min: 0, max: 1440, value: config.peakNoticeCooldownMinutes ?? 30,
+          onChange: (e) => change('peakNoticeCooldownMinutes', Number(e.target.value)),
+        }), '同一渠道这么久只提醒一次；0 表示每次都提醒。'),
+        row('余额提醒方式', h('select', {
+          style: S.input, value: balanceMode,
+          onChange: (e) => change('balanceAlertMode', e.target.value),
+        },
+          h('option', { value: 'off' }, '不提醒'),
+          h('option', { value: 'message' }, '发文字'),
+          h('option', { value: 'sticker' }, '发表情')),
+        balanceMode === 'off' ? '不往渠道发余额提醒。' : '余额跌破提醒阈值时，往当前送信渠道回一条。'),
+        row('余额提醒文案', h('div', null,
+          h('textarea', {
+            style: {
+              ...S.input, minHeight: 64, resize: 'vertical', lineHeight: 1.6, fontFamily: 'inherit',
+            },
+            rows: 3,
+            maxLength: 1000,
+            value: config.balanceAlertTemplate || '',
+            placeholder: defaultBalanceAlert,
+            disabled: balanceMode === 'off',
+            onChange: (e) => change('balanceAlertTemplate', e.target.value),
+          }),
+          config.balanceAlertTemplate
+            ? h('div', { style: { marginTop: 6 } },
+              h('button', {
+                type: 'button', style: S.btn, disabled: balanceMode === 'off',
+                onClick: () => change('balanceAlertTemplate', ''),
+              }, '恢复默认'))
+            : null),
+        '留空用内置默认；{balance} 会换成两位小数的余额。'),
+        row('余额提醒表情', input(config.balanceAlertSticker, (v) => change('balanceAlertSticker', v), '表情名字或 #标签', balanceMode !== 'sticker'),
+          '填表情名字、#标签 或 id；留空则改发文字。'),
+        h('div', { style: { ...S.dim, marginTop: 8 } },
+          `计价服务：${tokenOnline ? `已连接（当前${tokenPeriod}）` : '未检测到（需要安装并启用 fish-token 插件）'}`))
+
       // 默认文案都由宿主 /state 下发，前端不另写一份（原文只在 lib/config.js 一处）。
       const defaultImagePrompt = String((state.defaults && state.defaults.inboundImagePrompt) || '')
       const defaultGuardSystemPrompt = String((state.defaults && state.defaults.guardSystemPrompt) || '')
@@ -2867,7 +2939,7 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { ...S.danger, marginTop: 4 } },
               `离线原因：${offlineReason}。请检查 QQ 渠道服务是否已启动、地址是否正确。`)
             : null),
-        connectPage, wechatPage, bindingPage, behaviorPage, guardPage, voicePage,
+        connectPage, wechatPage, bindingPage, behaviorPage, tokenPage, guardPage, voicePage,
         // 表情包（收藏）与收图图库（缓存）相邻：两块各有「打开图库管理」，各开各的弹窗。
         h(stickerSettings, {
           config,
