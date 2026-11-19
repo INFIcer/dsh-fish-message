@@ -630,18 +630,23 @@ StickerStore（index.json + 文件）
 
 ```text
 event { type:'balance-low', threshold, balance } →
-  ├─ balanceAlertMode = off → 什么都不发
+  ├─ 两个开关都关 → 什么都不发
   ├─ 同一阈值 30 分钟内已转过 → 跳过（防刷屏）
   ├─ 当前送信渠道（replyTargets 里最近更新的一条）不存在 → 跳过，绝不退回默认渠道
-  ├─ sticker 模式且配了表情名 → 走 fish_sticker_send 同一条路（StickerStore → Bridge.sendOutbound）
-  │    └─ 没配表情 / 发送失败 → 回退成文字
-  └─ message 模式 → Bridge.sendText → 失败自动进 Outbox 补发
+  ├─ 文字开 → Bridge.sendText → 失败自动进 Outbox 补发
+  └─ 表情开 → 走 fish_sticker_send 同一条路（StickerStore → Bridge.sendOutbound）
+       └─ 名字空 / 发送失败 → 文字已先发出就不重复补；文字关着只记 warn
 ```
 
 - 目标只看**粘性送信渠道**：状态文件 `replyTargets` 里 `at` 最大的那条
   （`StateStore.latestReplyTarget` → `Bridge.latestReplyTarget`）；没有就跳过。
+- 两个开关互相独立：`balanceAlertMessageEnabled`（默认开）发文字、`balanceAlertStickerEnabled`
+  （默认关）发表情；两个都关 = 不提醒。都开时顺序固定「先文字、后表情」，任一失败不影响
+  另一项，日志分别记。
+- 旧配置只有 `balanceAlertMode` 时按迁移表展开：`off` → 都关、`message` → 只文字、
+  `sticker` → 只表情；配置里一旦出现任一新键，旧键就不再参与。
 - 文案：`balanceAlertTemplate`（`{balance}` 换成两位小数），留空用 `defaultBalanceAlert`。
-- 表情：`balanceAlertSticker` 是名字 / `#标签` / id；空串表示直接发文字。
+- 表情：`balanceAlertSticker` 是名字 / `#标签` / id；留空时本次只发文字。
 - 去重窗口固定 30 分钟（`balanceAlertDedupMs`），与峰时提醒的冷却互不相干。
 - 时段切换事件（`period-switch`）本插件不转发，只认 `balance-low`。
 
@@ -763,7 +768,7 @@ v1 不实现群聊。将来要加群：
 | enqueueTask 失败 / 抛错 / 超时 800ms | 记 warn，这一批照常直接投进会话；消息不丢 |
 | 峰时提醒发不出去 | 只记 warn；消息已经进任务队列，不受影响 |
 | 余额提醒没有送信渠道 | 跳过，不往任何渠道发（绝不退回默认渠道） |
-| 余额提醒发送失败 | 文字进 Outbox 按 FIFO 补发；表情失败回退成文字；同一阈值 30 分钟内不重复转 |
+| 余额提醒发送失败 | 文字进 Outbox 按 FIFO 补发；表情失败时文字已先发出就不重复补、文字关着只记 warn；同一阈值 30 分钟内不重复转 |
 
 ---
 
@@ -955,10 +960,11 @@ fish-token 插件通过 `ctx.provide('fish.token')` 注册；鱼讯按下面这�
 | `peakDeferEnabled` | `true` | 峰时把入站消息转进任务队列；关掉 = 旧行为 |
 | `peakNoticeTemplate` | `''` | 峰时提醒文案；留空用 `defaultPeakNotice`，`{offPeakStart}` / `{offPeakEnd}` 填服务给的下一段谷时 |
 | `peakNoticeCooldownMinutes` | `30` | 同一对端的提醒冷却（分钟，0~1440）；0 = 每次都提醒 |
-| `balanceAlertMode` | `'message'` | `off` / `message` / `sticker` |
+| `balanceAlertMessageEnabled` | `true` | 余额提醒发文字；与表情开关互相独立 |
+| `balanceAlertStickerEnabled` | `false` | 余额提醒发表情；表情发不出去时文字开着就只留文字 |
 | `balanceAlertTemplate` | `''` | 余额提醒文案；留空用 `defaultBalanceAlert`，`{balance}` 换成两位小数 |
-| `balanceAlertSticker` | `''` | 表情名字 / `#标签` / id；空串回退成文字 |
+| `balanceAlertSticker` | `''` | 表情名字 / `#标签` / id；空串时本次只发文字 |
 
-设置页在「计价与余额」卡片里读写这六个键，并从 `/state` 的 `token` 字段显示服务是否连上、
+设置页在「计价与余额」卡片里读写这七个键，并从 `/state` 的 `token` 字段显示服务是否连上、
 当前是峰时还是谷时（老版本 `/state` 没有这个字段时显示「未检测到」）。
 

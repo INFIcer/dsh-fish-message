@@ -234,6 +234,14 @@ function findAll(node, predicate, output = []) {
   return output
 }
 
+/** 按设置项名称找那一行的复选框（row = 左边名称、右边控件）。 */
+function flagFor(root, label) {
+  const row = findAll(root, (node) => node && node.type === 'div'
+    && Array.isArray(node.children) && node.children.length === 2
+    && collectText(node.children[0]).join('') === label)[0]
+  return row ? findAll(row, (node) => node.type === 'input' && node.props && node.props.type === 'checkbox')[0] : undefined
+}
+
 /** 按按钮里的可见文字找按钮（props 里的 type 等属性不算）。 */
 function findButton(root, text) {
   return findAll(root, (node) => node.type === 'button' && collectText(node.children).join('') === text)
@@ -302,7 +310,8 @@ function fullState() {
       peakDeferEnabled: true,
       peakNoticeTemplate: '',
       peakNoticeCooldownMinutes: 30,
-      balanceAlertMode: 'message',
+      balanceAlertMessageEnabled: true,
+      balanceAlertStickerEnabled: false,
       balanceAlertTemplate: '',
       balanceAlertSticker: '',
       logLevel: 'info',
@@ -314,6 +323,8 @@ function fullState() {
       guardSystemPrompt: '默认系统提示词',
       peakNoticeTemplate: '默认峰时提醒',
       balanceAlertTemplate: '默认余额提醒',
+      balanceAlertMessageEnabled: true,
+      balanceAlertStickerEnabled: false,
     },
     bridge: {
       running: true,
@@ -464,13 +475,15 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.match(plainText, /编辑窗口（秒）/)
   assert.match(plainText, /发送间隔（毫秒）/)
   assert.match(plainText, /按字数追加间隔（毫秒）/)
-  // 计价与余额卡片：开关、提醒文案、冷却、余额提醒方式与表情名都在。
+  // 计价与余额卡片：开关、提醒文案、冷却、余额提醒的两个开关与表情名都在。
   assert.match(plainText, /计价与余额/)
   assert.match(plainText, /峰时转入任务队列/)
   assert.match(plainText, /峰时提醒文案/)
   assert.match(plainText, /提醒冷却（分钟）/)
-  assert.match(plainText, /余额提醒方式/)
+  assert.match(plainText, /发送文字提醒/)
+  assert.match(plainText, /发送表情提醒/)
   assert.match(plainText, /余额提醒表情/)
+  assert.match(plainText, /两个开关可以同时打开/)
   assert.match(plainText, /计价服务：已连接（当前谷时）/)
   const peakNoticeBox = findAll(complete,
     (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认峰时提醒')
@@ -479,6 +492,28 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   const balanceNoticeBox = findAll(complete,
     (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认余额提醒')
   assert.equal(balanceNoticeBox.length, 1)
+  // 默认文字开关是开的，文案框可用；两个开关的勾选状态与默认值一致。
+  assert.equal(balanceNoticeBox[0].props.disabled, false)
+  assert.equal(flagFor(complete, '发送文字提醒').props.checked, true)
+  assert.equal(flagFor(complete, '发送表情提醒').props.checked, false)
+  const stickerBox = findAll(complete,
+    (node) => node.type === 'input' && node.props && node.props.placeholder === '表情名字或 #标签')
+  assert.equal(stickerBox.length, 1)
+  assert.equal(stickerBox[0].props.disabled, true, '表情开关关着时表情名置灰')
+
+  // 关掉文字、打开表情：勾选状态跟着变，文案框置灰、表情名可用。
+  const stickerOnly = fullState()
+  stickerOnly.config.balanceAlertMessageEnabled = false
+  stickerOnly.config.balanceAlertStickerEnabled = true
+  const stickerOnlyTree = env.renderSection([stickerOnly])
+  assert.equal(flagFor(stickerOnlyTree, '发送文字提醒').props.checked, false)
+  assert.equal(flagFor(stickerOnlyTree, '发送表情提醒').props.checked, true)
+  const disabledBalance = findAll(stickerOnlyTree,
+    (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认余额提醒')
+  assert.equal(disabledBalance[0].props.disabled, true)
+  const enabledSticker = findAll(stickerOnlyTree,
+    (node) => node.type === 'input' && node.props && node.props.placeholder === '表情名字或 #标签')
+  assert.equal(enabledSticker[0].props.disabled, false)
   // 系统提示词：默认留空，占位文字用宿主下发的内置文案。
   const emptySystemPrompt = findAll(complete,
     (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认系统提示词')

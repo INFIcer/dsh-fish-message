@@ -175,9 +175,13 @@ test('宿主入口：注册路由、状态可读、session/event 能发到 QQ', 
   assert.equal(status.config.peakDeferEnabled, true)
   assert.equal(status.config.peakNoticeTemplate, '')
   assert.equal(status.config.peakNoticeCooldownMinutes, 30)
-  assert.equal(status.config.balanceAlertMode, 'message')
+  // 余额提醒是两个独立开关：文字默认开、表情默认关，默认值由宿主下发。
+  assert.equal(status.config.balanceAlertMessageEnabled, true)
+  assert.equal(status.config.balanceAlertStickerEnabled, false)
   assert.equal(status.defaults.peakNoticeTemplate, defaultPeakNotice)
   assert.equal(status.defaults.balanceAlertTemplate, defaultBalanceAlert)
+  assert.equal(status.defaults.balanceAlertMessageEnabled, true)
+  assert.equal(status.defaults.balanceAlertStickerEnabled, false)
   assert.equal(status.token.service, true)
   assert.equal(status.token.peak, false)
   // 装配时就订了事件：订阅回调存下来，卸载时注销。
@@ -579,6 +583,28 @@ test('防失联：绑定会话装上守卫，销毁时撤销且不重复', async
   const afterClose = JSON.parse(respondAfterClose.body)
   assert.equal(afterClose.guard.enabled, false)
   assert.equal(afterClose.guard.approvalNever, false)
+
+  // 余额提醒两个开关：/save 统一走 normalizeConfig，非布尔按各自的默认落盘。
+  const balanceSave = {
+    method: 'POST',
+    url: '/dsh-fish-message/save',
+    on(event, fn) {
+      if (event === 'data') {
+        fn(JSON.stringify({
+          config: { ...afterClose.config, balanceAlertMessageEnabled: 'maybe', balanceAlertStickerEnabled: 'maybe' },
+        }))
+      }
+      if (event === 'end') fn()
+    },
+  }
+  const balanceSaveResponse = fakeResponse()
+  await routes.get('/dsh-fish-message/save')(balanceSave, balanceSaveResponse)
+  assert.equal(JSON.parse(balanceSaveResponse.body).ok, true)
+  const afterBalanceSave = fakeResponse()
+  await routes.get('/dsh-fish-message/state')({}, afterBalanceSave)
+  const balanceState = JSON.parse(afterBalanceSave.body)
+  assert.equal(balanceState.config.balanceAlertMessageEnabled, true)
+  assert.equal(balanceState.config.balanceAlertStickerEnabled, false)
 
   listen.get('agent/created')({ agent })
   assert.equal(toolGuardList.length, 2)

@@ -2569,9 +2569,14 @@ window.__ModuleLoader__.load({
       const tokenPeriod = !tokenOnline ? '' : (tokenState.peak === true ? '峰时' : (tokenState.peak === false ? '谷时' : '时段未知'))
       const defaultPeakNotice = String((state.defaults && state.defaults.peakNoticeTemplate) || '')
       const defaultBalanceAlert = String((state.defaults && state.defaults.balanceAlertTemplate) || '')
-      const balanceMode = ['off', 'message', 'sticker'].includes(config.balanceAlertMode)
-        ? config.balanceAlertMode
-        : 'message'
+      // 余额提醒是两个独立开关：文字默认开、表情默认关；状态里缺键时按宿主下发的默认值显示。
+      const balanceDefaults = state.defaults || {}
+      const balanceMessageOn = config.balanceAlertMessageEnabled === undefined
+        ? balanceDefaults.balanceAlertMessageEnabled !== false
+        : Boolean(config.balanceAlertMessageEnabled)
+      const balanceStickerOn = config.balanceAlertStickerEnabled === undefined
+        ? balanceDefaults.balanceAlertStickerEnabled === true
+        : Boolean(config.balanceAlertStickerEnabled)
       const tokenPage = h('div', { style: S.card },
         h('div', { style: { ...S.h, margin: '0 0 8px' } }, '计价与余额'),
         h('div', { style: S.dim },
@@ -2602,14 +2607,12 @@ window.__ModuleLoader__.load({
           style: S.small, type: 'number', min: 0, max: 1440, value: config.peakNoticeCooldownMinutes ?? 30,
           onChange: (e) => change('peakNoticeCooldownMinutes', Number(e.target.value)),
         }), '同一渠道这么久只提醒一次；0 表示每次都提醒。'),
-        row('余额提醒方式', h('select', {
-          style: S.input, value: balanceMode,
-          onChange: (e) => change('balanceAlertMode', e.target.value),
-        },
-          h('option', { value: 'off' }, '不提醒'),
-          h('option', { value: 'message' }, '发文字'),
-          h('option', { value: 'sticker' }, '发表情')),
-        balanceMode === 'off' ? '不往渠道发余额提醒。' : '余额跌破提醒阈值时，往当前送信渠道回一条。'),
+        h('div', { style: { ...S.hint, marginBottom: 6 } },
+          '两个开关可以同时打开：同时开启时先发文字、再发表情；两个都关等于不提醒。表情发不出去时，文字开着就只发文字。'),
+        row('发送文字提醒', flag(balanceMessageOn, (v) => change('balanceAlertMessageEnabled', v)),
+          '余额跌破提醒阈值时，往当前渠道发一条文字。'),
+        row('发送表情提醒', flag(balanceStickerOn, (v) => change('balanceAlertStickerEnabled', v)),
+          '在文字之外再发一张表情。'),
         row('余额提醒文案', h('div', null,
           h('textarea', {
             style: {
@@ -2619,19 +2622,19 @@ window.__ModuleLoader__.load({
             maxLength: 1000,
             value: config.balanceAlertTemplate || '',
             placeholder: defaultBalanceAlert,
-            disabled: balanceMode === 'off',
+            disabled: !balanceMessageOn,
             onChange: (e) => change('balanceAlertTemplate', e.target.value),
           }),
           config.balanceAlertTemplate
             ? h('div', { style: { marginTop: 6 } },
               h('button', {
-                type: 'button', style: S.btn, disabled: balanceMode === 'off',
+                type: 'button', style: S.btn, disabled: !balanceMessageOn,
                 onClick: () => change('balanceAlertTemplate', ''),
               }, '恢复默认'))
             : null),
         '留空用内置默认；{balance} 会换成两位小数的余额。'),
-        row('余额提醒表情', input(config.balanceAlertSticker, (v) => change('balanceAlertSticker', v), '表情名字或 #标签', balanceMode !== 'sticker'),
-          '填表情名字、#标签 或 id；留空则改发文字。'),
+        row('余额提醒表情', input(config.balanceAlertSticker, (v) => change('balanceAlertSticker', v), '表情名字或 #标签', !balanceStickerOn),
+          '填表情名字、#标签 或 id；留空时不发这张表情。'),
         h('div', { style: { ...S.dim, marginTop: 8 } },
           `计价服务：${tokenOnline ? `已连接（当前${tokenPeriod}）` : '未检测到（需要安装并启用 fish-token 插件）'}`))
 

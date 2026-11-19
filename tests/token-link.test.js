@@ -18,6 +18,7 @@ import {
   normalizeConfig,
   renderPeakNotice,
   renderBalanceAlert,
+  balanceAlertSwitches,
   defaultPeakNotice,
   defaultBalanceAlert,
 } from '../lib/config.js'
@@ -25,7 +26,6 @@ import {
   TokenLink,
   BalanceAlertForwarder,
   stripUrgentMarker,
-  resolveBalanceAlertMode,
   tokenTimeoutMs,
 } from '../lib/token-link.js'
 
@@ -45,6 +45,12 @@ async function waitFor(check, timeout = 2000, interval = 10) {
 }
 
 const tempDir = () => mkdtempSync(join(tmpdir(), 'fish-token-'))
+
+/** 规整后只取余额提醒的两个开关，便于断言迁移与组合结果。 */
+const switchesOf = (raw) => {
+  const config = normalizeConfig(raw)
+  return { message: config.balanceAlertMessageEnabled, sticker: config.balanceAlertStickerEnabled }
+}
 
 function makeMessage(id, text, time = Math.floor(Date.now() / 1000), qq = QQ) {
   return {
@@ -173,11 +179,15 @@ test('配置：fish.token 相关键默认值齐全，旧配置缺这些键也能
   assert.equal(config.peakDeferEnabled, true)
   assert.equal(config.peakNoticeTemplate, '')
   assert.equal(config.peakNoticeCooldownMinutes, 30)
-  assert.equal(config.balanceAlertMode, 'message')
+  // 余额提醒是两个独立开关：文字默认开、表情默认关。
+  assert.equal(config.balanceAlertMessageEnabled, true)
+  assert.equal(config.balanceAlertStickerEnabled, false)
   assert.equal(config.balanceAlertTemplate, '')
   assert.equal(config.balanceAlertSticker, '')
   // 默认文案原文只在 config.js：峰时提醒与余额提醒各一段。
   assert.equal(DEFAULT_CONFIG.peakDeferEnabled, true)
+  assert.equal(DEFAULT_CONFIG.balanceAlertMessageEnabled, true)
+  assert.equal(DEFAULT_CONFIG.balanceAlertStickerEnabled, false)
   assert.equal(defaultPeakNotice, '当前为峰值计价时段，可留言。谷值计价时段会自动处理。可在留言开头使用【紧要】立即安排处理')
   assert.equal(defaultBalanceAlert, '当前余额 {balance} 元，余额偏低，记得充值。')
 
@@ -189,7 +199,8 @@ test('配置：fish.token 相关键默认值齐全，旧配置缺这些键也能
   }))
   const loaded = new ConfigStore({ homeDir: dir }).load({})
   assert.equal(loaded.peakDeferEnabled, true)
-  assert.equal(loaded.balanceAlertMode, 'message')
+  assert.equal(loaded.balanceAlertMessageEnabled, true)
+  assert.equal(loaded.balanceAlertStickerEnabled, false)
   assert.equal(loaded.bindings.length, 1)
 })
 
@@ -198,14 +209,17 @@ test('配置：非法值在 /save 规整时回落默认', () => {
     peakDeferEnabled: 'maybe',
     peakNoticeTemplate: 12345,
     peakNoticeCooldownMinutes: 'abc',
-    balanceAlertMode: 'speak',
+    balanceAlertMessageEnabled: 'maybe',
+    balanceAlertStickerEnabled: 'maybe',
     balanceAlertTemplate: 'x'.repeat(5000),
     balanceAlertSticker: '  #余额  ',
   })
   assert.equal(config.peakDeferEnabled, true)
   assert.equal(config.peakNoticeTemplate, '')
   assert.equal(config.peakNoticeCooldownMinutes, 30)
-  assert.equal(config.balanceAlertMode, 'message')
+  // 非布尔按各自的默认处理：文字开、表情关。
+  assert.equal(config.balanceAlertMessageEnabled, true)
+  assert.equal(config.balanceAlertStickerEnabled, false)
   assert.equal(config.balanceAlertTemplate, '')
   assert.equal(config.balanceAlertSticker, '#余额')
 
@@ -213,10 +227,43 @@ test('配置：非法值在 /save 规整时回落默认', () => {
   assert.equal(normalizeConfig({ peakNoticeCooldownMinutes: 0 }).peakNoticeCooldownMinutes, 0)
   assert.equal(normalizeConfig({ peakNoticeCooldownMinutes: -5 }).peakNoticeCooldownMinutes, 0)
   assert.equal(normalizeConfig({ peakNoticeCooldownMinutes: 99999 }).peakNoticeCooldownMinutes, 1440)
-  // 三种合法提醒方式都保留。
-  for (const mode of ['off', 'message', 'sticker']) {
-    assert.equal(normalizeConfig({ balanceAlertMode: mode }).balanceAlertMode, mode)
-  }
+  // 两个开关互相独立：四种组合都能如实保存。
+  assert.deepEqual(switchesOf({ balanceAlertMessageEnabled: true, balanceAlertStickerEnabled: true }), { message: true, sticker: true })
+  assert.deepEqual(switchesOf({ balanceAlertMessageEnabled: true, balanceAlertStickerEnabled: false }), { message: true, sticker: false })
+  assert.deepEqual(switchesOf({ balanceAlertMessageEnabled: false, balanceAlertStickerEnabled: true }), { message: false, sticker: true })
+  assert.deepEqual(switchesOf({ balanceAlertMessageEnabled: false, balanceAlertStickerEnabled: false }), { message: false, sticker: false })
+})
+
+test('配置：旧 balanceAlertMode 迁移成两个开关，迁移后新键优先', () => {
+  // 三种旧值各对应一组新开关。
+  assert.deepEqual(switchesOf({ balanceAlertMode: 'off' }), { message: false, sticker: false })
+  assert.deepEqual(switchesOf({ balanceAlertMode: 'message' }), { message: true, sticker: false })
+  assert.deepEqual(switchesOf({ balanceAlertMode: 'sticker' }), { message: false, sticker: true })
+  // 大小写与首尾空白照样认。
+  assert.deepEqual(switchesOf({ balanceAlertMode: ' STICKER ' }), { message: false, sticker: true })
+  // 旧值非法（或不认识）：落新键的默认（文字开、表情关）。
+  assert.deepEqual(switchesOf({ balanceAlertMode: 'speak' }), { message: true, sticker: false })
+  // 未规整的原始配置直接问开关也按迁移表走。
+  assert.deepEqual(balanceAlertSwitches({ balanceAlertMode: 'sticker' }), { message: false, sticker: true })
+
+  // 新键一旦出现，旧键不再参与（没给的那个新键落自己的默认）。
+  assert.deepEqual(switchesOf({ balanceAlertMode: 'off', balanceAlertMessageEnabled: true }), { message: true, sticker: false })
+  assert.deepEqual(switchesOf({ balanceAlertMode: 'sticker', balanceAlertStickerEnabled: false }), { message: true, sticker: false })
+  assert.deepEqual(switchesOf({ balanceAlertMode: 'message', balanceAlertStickerEnabled: true }), { message: true, sticker: true })
+
+  // 规整结果里不再有旧键；落盘一次后文件里也只剩新键。
+  assert.equal('balanceAlertMode' in normalizeConfig({ balanceAlertMode: 'sticker' }), false)
+  const dir = tempDir()
+  const store = new ConfigStore({ homeDir: dir })
+  writeFileSync(join(dir, 'fish-message-config.json'), JSON.stringify({ balanceAlertMode: 'sticker' }))
+  const loaded = store.load({})
+  assert.equal(loaded.balanceAlertMessageEnabled, false)
+  assert.equal(loaded.balanceAlertStickerEnabled, true)
+  store.save(loaded)
+  const persisted = JSON.parse(readFileSync(join(dir, 'fish-message-config.json'), 'utf8'))
+  assert.equal(persisted.balanceAlertMessageEnabled, false)
+  assert.equal(persisted.balanceAlertStickerEnabled, true)
+  assert.equal('balanceAlertMode' in persisted, false)
 })
 
 test('文案：峰时提醒占位符、余额两位小数', () => {
@@ -227,8 +274,8 @@ test('文案：峰时提醒占位符、余额两位小数', () => {
   assert.equal(renderPeakNotice('谷时 {offPeakStart} 到 {offPeakEnd}'), defaultPeakNotice)
   assert.equal(renderBalanceAlert('', 9.6), '当前余额 9.60 元，余额偏低，记得充值。')
   assert.equal(renderBalanceAlert('余额 {balance} 元', 12), '余额 12.00 元')
-  assert.equal(resolveBalanceAlertMode('STICKER'), 'sticker')
-  assert.equal(resolveBalanceAlertMode('nope'), 'message')
+  // 开关本身：没有任何相关配置时是「文字开、表情关」。
+  assert.deepEqual(balanceAlertSwitches({}), { message: true, sticker: false })
 })
 
 test('【紧要】：只认开头，去掉标记后不留空消息', () => {
@@ -393,12 +440,25 @@ function makeBridgeStub({ target = { channel: 'qq', peer: QQ } } = {}) {
   }
 }
 
-test('余额提醒：message 模式发到当前送信渠道，{balance} 两位小数', async () => {
+/** 收集日志的假 logger：只关心 balance alert 记了什么。 */
+function makeLogger() {
+  const logs = { info: [], warn: [], debug: [] }
+  const push = (level) => (text) => logs[level].push(String(text))
+  return { logs, info: push('info'), warn: push('warn'), debug: push('debug') }
+}
+
+test('余额提醒：只开文字 → 发一条文字到当前送信渠道，{balance} 两位小数', async () => {
   const bridge = makeBridgeStub()
-  const alerts = new BalanceAlertForwarder({ bridge, getConfig: () => normalizeConfig({}), logger: null })
+  const alerts = new BalanceAlertForwarder({
+    bridge,
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: true, balanceAlertStickerEnabled: false }),
+    logger: null,
+  })
   const result = await alerts.handle({ type: 'balance-low', threshold: 10, balance: 9.6, at: Date.now() })
   assert.equal(result.ok, true)
-  assert.equal(result.mode, 'message')
+  assert.equal(result.message.ok, true)
+  assert.equal(result.message.text, '当前余额 9.60 元，余额偏低，记得充值。')
+  assert.equal(result.sticker, undefined)
   assert.deepEqual(bridge.sent, [{ peer: QQ, text: '当前余额 9.60 元，余额偏低，记得充值。', channel: 'qq' }])
 
   // 自定义文案。
@@ -408,46 +468,133 @@ test('余额提醒：message 模式发到当前送信渠道，{balance} 两位�
   assert.equal(custom.sent[0].text, '只剩 3.40 了')
 })
 
-test('余额提醒：sticker 模式复用表情发送；空表情或发送失败回退文字', async () => {
+test('余额提醒：只开表情 → 只发表情，不额外补文字', async () => {
   const bridge = makeBridgeStub()
   const calls = []
   const alerts = new BalanceAlertForwarder({
     bridge,
-    getConfig: () => normalizeConfig({ balanceAlertMode: 'sticker', balanceAlertSticker: '#余额' }),
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: false, balanceAlertStickerEnabled: true, balanceAlertSticker: '#余额' }),
     sendSticker: async (target, name) => { calls.push({ target, name }); return { ok: true } },
   })
-  await alerts.handle({ type: 'balance-low', threshold: 10, balance: 9.6 })
+  const result = await alerts.handle({ type: 'balance-low', threshold: 10, balance: 9.6 })
+  assert.equal(result.ok, true)
+  assert.equal(result.message, undefined)
+  assert.equal(result.sticker.ok, true)
   assert.deepEqual(calls, [{ target: { channel: 'qq', peer: QQ }, name: '#余额' }])
-  assert.equal(bridge.sent.length, 0, '发表情时不再补一条文字')
-
-  // 表情名字空：直接发文字。
-  const empty = new BalanceAlertForwarder({
-    bridge,
-    getConfig: () => normalizeConfig({ balanceAlertMode: 'sticker', balanceAlertSticker: '' }),
-    sendSticker: async () => { throw new Error('不该被调用') },
-  })
-  const result = await empty.handle({ type: 'balance-low', threshold: 3, balance: 1 })
-  assert.equal(result.mode, 'message')
-  assert.equal(bridge.sent.length, 1)
-
-  // 表情发送抛错（找不到表情等）：回退成文字。
-  const failedBridge = makeBridgeStub()
-  const failed = new BalanceAlertForwarder({
-    bridge: failedBridge,
-    getConfig: () => normalizeConfig({ balanceAlertMode: 'sticker', balanceAlertSticker: '没有这个表情' }),
-    sendSticker: async () => { throw new Error('找不到表情') },
-  })
-  const fallback = await failed.handle({ type: 'balance-low', threshold: 4, balance: 2 })
-  assert.equal(fallback.mode, 'message')
-  assert.match(failedBridge.sent[0].text, /2\.00/)
+  assert.equal(bridge.sent.length, 0, '只开表情时不再补一条文字')
 })
 
-test('余额提醒：off 不转；同一阈值 30 分钟只转一次；没有渠道就跳过', async () => {
-  const offBridge = makeBridgeStub()
-  const offAlerts = new BalanceAlertForwarder({ bridge: offBridge, getConfig: () => normalizeConfig({ balanceAlertMode: 'off' }) })
-  const offResult = await offAlerts.handle({ type: 'balance-low', threshold: 10, balance: 1 })
-  assert.equal(offResult.skipped, 'off')
-  assert.equal(offBridge.sent.length, 0)
+test('余额提醒：两个都开 → 先文字、后表情，任一失败不影响另一个', async () => {
+  const events = []
+  const bridge = makeBridgeStub()
+  bridge.sendText = async function (peer, text, { channel } = {}) {
+    events.push(['text', text])
+    this.sent.push({ peer, text, channel })
+    return { ok: true, sent: true, queued: false }
+  }
+  const alerts = new BalanceAlertForwarder({
+    bridge,
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: true, balanceAlertStickerEnabled: true, balanceAlertSticker: '#余额' }),
+    sendSticker: async (target, name) => { events.push(['sticker', name]); return { ok: true } },
+  })
+  const result = await alerts.handle({ type: 'balance-low', threshold: 10, balance: 9.6 })
+  assert.equal(result.ok, true)
+  assert.deepEqual(events.map((x) => x[0]), ['text', 'sticker'], '顺序固定：先文字、后表情')
+  assert.equal(result.message.ok, true)
+  assert.equal(result.sticker.ok, true)
+
+  // 文字失败不影响表情：两项都尝试过，日志各记一条。
+  const logger = makeLogger()
+  const failingBridge = makeBridgeStub()
+  failingBridge.sendText = async () => { throw new Error('桥断了') }
+  const both = new BalanceAlertForwarder({
+    bridge: failingBridge,
+    logger,
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: true, balanceAlertStickerEnabled: true, balanceAlertSticker: '#余额' }),
+    sendSticker: async () => ({ ok: true }),
+  })
+  const failedText = await both.handle({ type: 'balance-low', threshold: 11, balance: 1 })
+  assert.equal(failedText.ok, true, '文字失败、表情成功：整体仍算发出去了')
+  assert.equal(failedText.message.ok, false)
+  assert.equal(failedText.sticker.ok, true)
+  assert.match(logger.logs.warn.join('\n'), /余额提醒文字没发出去：桥断了/)
+  assert.match(logger.logs.info.join('\n'), /（表情 #余额）/)
+
+  // 表情失败不影响文字（文字先发出）：同样各记一条日志。
+  const stickerFailed = makeLogger()
+  const stickerBridge = makeBridgeStub()
+  const mixed = new BalanceAlertForwarder({
+    bridge: stickerBridge,
+    logger: stickerFailed,
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: true, balanceAlertStickerEnabled: true, balanceAlertSticker: '没有这个表情' }),
+    sendSticker: async () => { throw new Error('找不到表情') },
+  })
+  const mixedResult = await mixed.handle({ type: 'balance-low', threshold: 12, balance: 1 })
+  assert.equal(mixedResult.ok, true)
+  assert.equal(mixedResult.message.ok, true)
+  assert.equal(mixedResult.sticker.ok, false)
+  assert.match(stickerFailed.logs.info.join('\n'), /余额提醒已发到 qq 10001：当前余额 1\.00 元/)
+  assert.match(stickerFailed.logs.warn.join('\n'), /找不到表情/)
+})
+
+test('余额提醒：表情失败时文字开着只留那一条，不重复补；文字关着只记 warn 放弃', async () => {
+  // 两个都开：文字先发出去，表情失败不再补第二条文字。
+  const bridge = makeBridgeStub()
+  const logger = makeLogger()
+  const bothOn = new BalanceAlertForwarder({
+    bridge,
+    logger,
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: true, balanceAlertStickerEnabled: true, balanceAlertSticker: '没有这个表情' }),
+    sendSticker: async () => { throw new Error('找不到表情') },
+  })
+  const result = await bothOn.handle({ type: 'balance-low', threshold: 10, balance: 9.6 })
+  assert.equal(result.ok, true, '文字已经发出去')
+  assert.equal(result.sticker.ok, false)
+  assert.equal(bridge.sent.length, 1, '只发一条文字，不重复补')
+  assert.match(bridge.sent[0].text, /9\.60/)
+  assert.match(logger.logs.warn.join('\n'), /找不到表情.*文字已先发出，不重复发/)
+
+  // 只开表情：表情失败不补文字（文字关着），只记 warn。
+  const stickerOnlyBridge = makeBridgeStub()
+  const stickerOnlyLogger = makeLogger()
+  const stickerOnly = new BalanceAlertForwarder({
+    bridge: stickerOnlyBridge,
+    logger: stickerOnlyLogger,
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: false, balanceAlertStickerEnabled: true, balanceAlertSticker: '没有这个表情' }),
+    sendSticker: async () => { throw new Error('找不到表情') },
+  })
+  const failed = await stickerOnly.handle({ type: 'balance-low', threshold: 4, balance: 2 })
+  assert.equal(failed.ok, false)
+  assert.equal(stickerOnlyBridge.sent.length, 0, '文字关着，不补发文字')
+  assert.match(stickerOnlyLogger.logs.warn.join('\n'), /文字提醒未开启，本次放弃/)
+
+  // 表情名字空：同样只记 warn，不发任何东西。
+  const emptyLogger = makeLogger()
+  const emptyBridge = makeBridgeStub()
+  const empty = new BalanceAlertForwarder({
+    bridge: emptyBridge,
+    logger: emptyLogger,
+    getConfig: () => normalizeConfig({ balanceAlertMessageEnabled: false, balanceAlertStickerEnabled: true, balanceAlertSticker: '' }),
+    sendSticker: async () => { throw new Error('不该被调用') },
+  })
+  const emptyResult = await empty.handle({ type: 'balance-low', threshold: 6, balance: 1 })
+  assert.equal(emptyResult.ok, false)
+  assert.equal(emptyBridge.sent.length, 0)
+  assert.match(emptyLogger.logs.warn.join('\n'), /表情名字没填/)
+})
+
+test('余额提醒：两个都关不转；同一阈值 30 分钟只转一次；没有渠道就跳过', async () => {
+  // 两个新键都关、以及旧配置 off 迁移过来的都等价于关。
+  for (const raw of [
+    { balanceAlertMessageEnabled: false, balanceAlertStickerEnabled: false },
+    { balanceAlertMode: 'off' },
+  ]) {
+    const offBridge = makeBridgeStub()
+    const offAlerts = new BalanceAlertForwarder({ bridge: offBridge, getConfig: () => normalizeConfig(raw) })
+    const offResult = await offAlerts.handle({ type: 'balance-low', threshold: 10, balance: 1 })
+    assert.equal(offResult.skipped, 'off')
+    assert.equal(offBridge.sent.length, 0)
+  }
 
   let now = 1_000_000
   const bridge = makeBridgeStub()
