@@ -484,6 +484,11 @@ test('客户端设置页：加载态、完整状态、缺 defaults 都能渲染�
   assert.match(plainText, /发送表情提醒/)
   assert.match(plainText, /余额提醒表情/)
   assert.match(plainText, /两个开关可以同时打开/)
+  // 文字开关保留一行说明；表情开关不再复述组合方式，只由顶部提示说一次。
+  assert.match(plainText, /余额跌破提醒阈值时，往当前渠道发一条文字。/)
+  assert.doesNotMatch(plainText, /在文字之外再发一张表情/)
+  assert.equal(plainText.split('同时开启时先发文字、再发表情').length - 1, 1,
+    '文字与表情的组合顺序只在顶部提示里说一次')
   assert.match(plainText, /计价服务：已连接（当前谷时）/)
   const peakNoticeBox = findAll(complete,
     (node) => node.type === 'textarea' && node.props && node.props.placeholder === '默认峰时提醒')
