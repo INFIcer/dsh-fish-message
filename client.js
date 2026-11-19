@@ -2609,8 +2609,7 @@ window.__ModuleLoader__.load({
         }), '同一渠道这么久只提醒一次；0 表示每次都提醒。'),
         h('div', { style: { ...S.hint, marginBottom: 6 } },
           '两个开关可以同时打开：同时开启时先发文字、再发表情；两个都关等于不提醒。表情发不出去时，文字开着就只发文字。'),
-        row('发送文字提醒', flag(balanceMessageOn, (v) => change('balanceAlertMessageEnabled', v)),
-          '余额跌破提醒阈值时，往当前渠道发一条文字。'),
+        row('发送文字提醒', flag(balanceMessageOn, (v) => change('balanceAlertMessageEnabled', v))),
         row('发送表情提醒', flag(balanceStickerOn, (v) => change('balanceAlertStickerEnabled', v))),
         row('余额提醒文案', h('div', null,
           h('textarea', {
